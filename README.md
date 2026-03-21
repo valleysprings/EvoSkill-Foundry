@@ -53,6 +53,37 @@ curl -X POST http://127.0.0.1:8000/api/run-task?task_id=contains-duplicates
 curl -X POST http://127.0.0.1:8000/api/run-sequence
 ```
 
+## Fetch prompt benchmarks
+
+The repo now includes small local benchmark slices for prompt optimization under
+`benchmarks/prompt/`.
+
+Fetch all benchmark slices:
+
+```bash
+python3 scripts/fetch_prompt_benchmarks.py
+```
+
+Fetch one benchmark only:
+
+```bash
+python3 scripts/fetch_prompt_benchmarks.py --benchmark boolq_small
+```
+
+Current benchmark set:
+
+- `banking77_small`: intent routing, 80 train + 60 eval
+- `boolq_small`: yes/no QA, 80 train + 60 eval
+- `ag_news_small`: topic classification, 80 train + 60 eval
+
+Fetched data lands in `benchmarks/prompt/data/<benchmark_id>/` with:
+
+- `train.jsonl`
+- `eval.jsonl`
+- `manifest.json`
+
+These are designed to be the next input layer for a local prompt-evolution runner.
+
 ## Repo map
 
 - `app/engine.py`: runner orchestration, candidate selection, and write-back policy.
@@ -68,6 +99,9 @@ curl -X POST http://127.0.0.1:8000/api/run-sequence
 - `docs/framework.md`: core mechanism and system view.
 - `docs/demo.md`: narration for the frontend demo.
 - `paper/outline.md`: short paper structure for the concept.
+- `benchmarks/prompt/configs/*.json`: prompt benchmark definitions.
+- `benchmarks/prompt/data/*`: local prompt benchmark slices and manifests.
+- `scripts/fetch_prompt_benchmarks.py`: local benchmark fetcher.
 
 ## Design choices
 
