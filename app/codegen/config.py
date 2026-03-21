@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,6 +17,7 @@ REQUIRED_ENV_KEYS = (
     "AUTORESEARCH_MAX_TOKENS",
     "AUTORESEARCH_TIMEOUT_S",
 )
+AVAILABLE_MODELS_ENV_KEY = "AUTORESEARCH_AVAILABLE_MODELS"
 
 
 def _strip_quotes(value: str) -> str:
@@ -89,19 +90,48 @@ def _parse_api_base(name: str) -> str:
     return value.rstrip("/")
 
 
+def _parse_available_models(primary_model: str) -> tuple[str, ...]:
+    raw_value = os.getenv(AVAILABLE_MODELS_ENV_KEY, "")
+    models: list[str] = []
+    for item in raw_value.split(","):
+        model = item.strip()
+        if model and model not in models:
+            models.append(model)
+    if primary_model not in models:
+        models.insert(0, primary_model)
+    return tuple(models)
+
+
 @dataclass(slots=True)
 class RuntimeConfig:
     api_key: str
     api_base: str
     primary_model: str
+    available_models: tuple[str, ...]
     temperature: float
     max_tokens: int
     timeout_s: int
+    selected_model: str | None = None
+
+    @property
+    def active_model(self) -> str:
+        return self.selected_model or self.primary_model
+
+    def with_model(self, model: str | None) -> "RuntimeConfig":
+        if model is None or model == "":
+            return replace(self, selected_model=None)
+        if model not in self.available_models:
+            raise ConfigError(
+                f"Model {model} is not enabled. Choose one of: {', '.join(self.available_models)}."
+            )
+        return replace(self, selected_model=model)
 
     def describe(self) -> dict[str, object]:
         return {
             "mode": "llm-required",
-            "active_model": self.primary_model,
+            "primary_model": self.primary_model,
+            "active_model": self.active_model,
+            "available_models": list(self.available_models),
             "api_base": self.api_base,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -111,10 +141,12 @@ class RuntimeConfig:
 
 def load_runtime_config(root: Path | None = None) -> RuntimeConfig:
     load_repo_env(root or ROOT)
+    primary_model = _require_non_empty("AUTORESEARCH_PRIMARY_MODEL")
     return RuntimeConfig(
         api_key=_require_non_empty("AUTORESEARCH_API_KEY"),
         api_base=_parse_api_base("AUTORESEARCH_API_BASE"),
-        primary_model=_require_non_empty("AUTORESEARCH_PRIMARY_MODEL"),
+        primary_model=primary_model,
+        available_models=_parse_available_models(primary_model),
         temperature=_parse_float("AUTORESEARCH_TEMPERATURE"),
         max_tokens=_parse_int("AUTORESEARCH_MAX_TOKENS"),
         timeout_s=_parse_int("AUTORESEARCH_TIMEOUT_S"),

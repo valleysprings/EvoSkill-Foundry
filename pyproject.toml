@@ -3,6 +3,9 @@ name = "autoresearch-with-experience-replay"
 version = "0.1.0"
 description = "Local-first autoresearch flywheel with deterministic experience replay."
 requires-python = ">=3.11"
+dependencies = [
+  "matplotlib>=3.9,<4",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

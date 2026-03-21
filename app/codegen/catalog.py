@@ -12,9 +12,13 @@ SEED_STRATEGY_EXPERIENCES: list[dict[str, Any]] = [
     {
         "experience_id": "exp-correctness-first",
         "experience_type": "strategy_experience",
+        "experience_outcome": "success",
         "source_task": "seed",
+        "source_session_id": "seed-catalog",
         "family": "agnostic",
         "task_signature": ["python-codegen", "deterministic-eval", "correctness-first"],
+        "verifier_status": "pass",
+        "rejection_reason": "",
         "failure_pattern": "benchmark-only selection promoted fast but incorrect candidates",
         "strategy_hypothesis": "Run deterministic correctness gates before trusting benchmark improvements.",
         "successful_strategy": "compile the candidate, run fixed correctness tests, and benchmark only the passing variants",
@@ -25,7 +29,28 @@ SEED_STRATEGY_EXPERIENCES: list[dict[str, Any]] = [
         "candidate_summary": "Valid candidates only enter the benchmark lane.",
         "reusable_rules": ["correctness_first", "benchmark_after_tests", "deterministic_scoring"],
         "supporting_memory_ids": [],
-    }
+    },
+    {
+        "experience_id": "exp-semantics-before-shortcuts",
+        "experience_type": "strategy_experience",
+        "experience_outcome": "failure",
+        "source_task": "seed",
+        "source_session_id": "seed-catalog",
+        "family": "agnostic",
+        "task_signature": ["python-codegen", "deterministic-eval", "semantics-preservation"],
+        "verifier_status": "fail",
+        "rejection_reason": "A fast shortcut changed ordering semantics and failed the deterministic tests.",
+        "failure_pattern": "Sort- or set-based shortcuts broke stable-order or first-hit semantics while looking faster on the benchmark.",
+        "strategy_hypothesis": "When the task depends on encounter order, optimize with streaming state instead of reordering the input.",
+        "successful_strategy": "Prefer a streaming hash-based or counted approach that preserves the original traversal semantics.",
+        "prompt_fragment": "Do not trade away order-sensitive semantics for a reordering shortcut; keep the original traversal contract intact.",
+        "tool_trace_summary": "reordering shortcut -> deterministic test failure -> reject -> switch to stateful streaming strategy",
+        "delta_J": -0.24,
+        "proposal_model": "seed",
+        "candidate_summary": "A seemingly fast reordering shortcut that violated the task contract.",
+        "reusable_rules": ["preserve_semantics", "avoid_order_breaking_shortcuts"],
+        "supporting_memory_ids": [],
+    },
 ]
 
 

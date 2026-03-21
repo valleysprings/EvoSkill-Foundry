@@ -147,11 +147,11 @@ def _default_transport(request_body: dict[str, Any], config: RuntimeConfig) -> s
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise LlmTransportError(f"Model request failed with HTTP {exc.code}: {body[:240]}", model=config.primary_model) from exc
+        raise LlmTransportError(f"Model request failed with HTTP {exc.code}: {body[:240]}", model=config.active_model) from exc
     except urllib.error.URLError as exc:
-        raise LlmTransportError(f"Model request failed: {exc.reason}", model=config.primary_model) from exc
+        raise LlmTransportError(f"Model request failed: {exc.reason}", model=config.active_model) from exc
     except TimeoutError as exc:
-        raise LlmTransportError("Model request timed out.", model=config.primary_model) from exc
+        raise LlmTransportError("Model request timed out.", model=config.active_model) from exc
 
 
 @dataclass(slots=True)
@@ -165,7 +165,10 @@ class ProposalRuntime:
 
     @property
     def active_model(self) -> str:
-        return self.config.primary_model
+        return self.config.active_model
+
+    def with_model(self, model: str | None) -> "ProposalRuntime":
+        return ProposalRuntime(config=self.config.with_model(model), transport=self.transport)
 
     def describe(self) -> dict[str, object]:
         return self.config.describe()
@@ -176,7 +179,7 @@ class ProposalRuntime:
             {"role": "user", "content": user_prompt},
         ]
         request_body = {
-            "model": self.config.primary_model,
+            "model": self.active_model,
             "messages": messages,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
@@ -232,8 +235,12 @@ def _proposal_prompt(
         + json.dumps(
             {
                 "experience_id": memory.get("experience_id"),
+                "experience_outcome": memory.get("experience_outcome", "success"),
+                "verifier_status": memory.get("verifier_status"),
+                "rejection_reason": memory.get("rejection_reason"),
                 "failure_pattern": memory.get("failure_pattern"),
                 "strategy_hypothesis": memory.get("strategy_hypothesis"),
+                "successful_strategy": memory.get("successful_strategy"),
                 "prompt_fragment": memory.get("prompt_fragment"),
                 "candidate_summary": memory.get("candidate_summary"),
                 "delta_J": memory.get("delta_J"),
@@ -279,7 +286,7 @@ def _proposal_prompt(
         f"{current_best['source_code']}\n"
         f"Benchmark spec: {json.dumps(task['benchmark'])}\n"
         f"Tests: {json.dumps(task['tests'])}\n"
-        "Retrieved strategy experiences:\n"
+        "Retrieved strategy experiences (successful wins and failed attempts to avoid):\n"
         + ("\n".join(memory_lines) if memory_lines else "- none")
         + "\nPrevious candidate summaries:\n"
         + ("\n".join(history_lines) if history_lines else "- none")
@@ -322,22 +329,42 @@ def reflect_strategy_experience(
     previous_best: dict[str, Any],
     winner: dict[str, Any],
     delta_j: float,
+    outcome: str,
+    rejection_reason: str | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    system_prompt = (
-        "You compress successful Python code mutations into reusable strategy memory. "
-        "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary."
-    )
+    if outcome == "success":
+        system_prompt = (
+            "You compress successful Python code mutations into reusable strategy memory. "
+            "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary."
+        )
+        outcome_instructions = "Write the prompt_fragment as a reusable success hint for the next proposal prompt."
+    else:
+        system_prompt = (
+            "You compress failed or rejected Python code mutations into reusable avoidance memory. "
+            "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary. "
+            "successful_strategy must describe the corrective strategy to prefer next time, not the failed attempt."
+        )
+        outcome_instructions = (
+            "Write the prompt_fragment as a concise warning plus corrective strategy that the next proposal prompt can reuse."
+        )
+    failed_tests = [result["name"] for result in winner["metrics"].get("test_results", []) if not result.get("passed")]
     user_prompt = (
         f"Task id: {task['id']}\n"
         f"Generation: {generation}\n"
+        f"Outcome: {outcome}\n"
         f"Previous best summary: {previous_best['candidate_summary']}\n"
         f"Previous best objective: {previous_best['metrics']['objective']}\n"
         f"Winner summary: {winner['candidate_summary']}\n"
         f"Winner strategy: {winner['strategy']}\n"
         f"Winner rationale: {winner['rationale']}\n"
+        f"Winner verifier_status: {winner['metrics']['verifier_status']}\n"
         f"Winner objective: {winner['metrics']['objective']}\n"
         f"Winner J: {winner['metrics']['J']}\n"
+        f"Winner error: {winner['metrics'].get('error')}\n"
+        f"Failed tests: {json.dumps(failed_tests)}\n"
+        f"Rejection reason: {rejection_reason or 'n/a'}\n"
         f"delta_J: {delta_j}\n"
+        f"{outcome_instructions}\n"
         "Write a compact strategy fragment that can be pasted into the next proposal prompt."
     )
     payload, trace = runtime.complete_json(

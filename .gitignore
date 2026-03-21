@@ -9,3 +9,5 @@ examples/
 data/
 benchmarks/
 .pytest_cache/
+node_modules/
+ui/dist/

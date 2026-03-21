@@ -11,11 +11,15 @@ def render_memory_markdown(
     generated_at: str | None = None,
 ) -> str:
     timestamp = generated_at or datetime.now().astimezone().isoformat(timespec="seconds")
+    success_count = sum(1 for item in memories if item.get("experience_outcome", "success") == "success")
+    failure_count = sum(1 for item in memories if item.get("experience_outcome") == "failure")
     lines = [
         f"# {title}",
         "",
         f"- generated_at: {timestamp}",
         f"- num_memories: {len(memories)}",
+        f"- success_memories: {success_count}",
+        f"- failure_memories: {failure_count}",
         "",
         "## Experience Units",
         "",
@@ -27,7 +31,11 @@ def render_memory_markdown(
                 f"### {item.get('experience_id', 'unknown-memory')}",
                 "",
                 f"- source_task: {item.get('source_task', 'unknown')}",
+                f"- source_session_id: {item.get('source_session_id', 'unknown')}",
                 f"- family: {item.get('family', 'agnostic')}",
+                f"- experience_outcome: {item.get('experience_outcome', 'success')}",
+                f"- verifier_status: {item.get('verifier_status', '')}",
+                f"- rejection_reason: {item.get('rejection_reason', '')}",
                 f"- delta_J: {item.get('delta_J', 0.0)}",
                 f"- task_signature: {', '.join(item.get('task_signature', []))}",
                 f"- failure_pattern: {item.get('failure_pattern', '')}",

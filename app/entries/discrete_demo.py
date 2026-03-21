@@ -10,6 +10,7 @@ from typing import Any, Callable
 from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences
 from app.codegen.handoff import UPSTREAM_TARGET, git_commit, git_remote, write_json, write_jsonl
 from app.codegen.llm import ProposalRuntime
+from app.codegen.reporting import build_improvement_table, write_improvement_report_svg
 from app.codegen.trainer import run_codegen_task
 from app.memory.store import MemoryStore
 
@@ -26,6 +27,15 @@ J_FORMULA = (
 )
 OBJECTIVE_FORMULA = "objective = speedup_vs_baseline"
 DELTA_FORMULA = "delta_J = J(winner) - J(previous_best)"
+FLYWHEEL_STEPS = [
+    "load strict llm config from shell env or repo-root .env",
+    "retrieve strategy memory fragments",
+    "ask the configured model for candidate function bodies",
+    "materialize candidates into an ignored workspace",
+    "run deterministic tests and benchmarks",
+    "select winners and write back reusable strategy experience",
+    "emit payload, memory ledger, trace, and llm_trace artifacts",
+]
 
 
 def _relative(path: Path) -> str:
@@ -43,6 +53,7 @@ def generate_discrete_payload(
     runs_root: Path | None = None,
     env_root: Path | None = None,
     workspace_root: Path | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     tasks = load_codegen_tasks()
     if task_id is not None:
@@ -58,7 +69,7 @@ def generate_discrete_payload(
         markdown_path=active_runs_root / WORKING_MEMORY_MD_NAME,
         title="Codegen Strategy Memory",
     )
-    seed_memories = store.seed_from_records(seed_strategy_experiences())
+    initial_memories = store.ensure_seed_records(seed_strategy_experiences())
     runtime = proposal_runtime or ProposalRuntime.from_env(env_root or ROOT)
 
     runs = []
@@ -71,6 +82,7 @@ def generate_discrete_payload(
             store,
             proposal_runtime=runtime,
             workspace_root=active_workspace_root,
+            session_id=session_id or "session-current",
             progress_callback=progress_callback,
             pace_ms=pace_ms,
         )
@@ -109,20 +121,12 @@ def generate_discrete_payload(
             "active_model": runtime.active_model,
             "num_tasks": len(runs),
             "total_generations": total_generations,
-            "initial_memory_count": len(seed_memories),
+            "initial_memory_count": len(initial_memories),
             "memory_size_after_run": store.count(),
             "write_backs": write_backs,
             "winner_candidates": dict(winners),
             "proposal_engine": runtime.describe(),
-            "flywheel": [
-                "load strict llm config from shell env or repo-root .env",
-                "retrieve strategy memory fragments",
-                "ask the configured model for candidate function bodies",
-                "materialize candidates into an ignored workspace",
-                "run deterministic tests and benchmarks",
-                "select winners and write back reusable strategy experience",
-                "emit payload, memory ledger, trace, and llm_trace artifacts",
-            ],
+            "flywheel": FLYWHEEL_STEPS,
         },
         "formulas": {
             "J": J_FORMULA,
@@ -139,6 +143,72 @@ def generate_discrete_payload(
     }
 
 
+def empty_discrete_payload(
+    *,
+    proposal_runtime: ProposalRuntime | None = None,
+    runs_root: Path | None = None,
+    env_root: Path | None = None,
+) -> dict[str, Any]:
+    active_runs_root = runs_root or RUNS
+    runtime = proposal_runtime or ProposalRuntime.from_env(env_root or ROOT)
+    workspace_root = active_runs_root / "workspace" / "current"
+    return {
+        "run_mode": "llm-required",
+        "summary": {
+            "project": "autoresearch-with-experience-replay",
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "git_commit": git_commit(ROOT),
+            "source_repo": git_remote(ROOT),
+            "upstream_target": UPSTREAM_TARGET,
+            "run_mode": "llm-required",
+            "active_model": runtime.active_model,
+            "num_tasks": 0,
+            "total_generations": 0,
+            "initial_memory_count": 0,
+            "memory_size_after_run": 0,
+            "write_backs": 0,
+            "winner_candidates": {},
+            "proposal_engine": runtime.describe(),
+            "flywheel": FLYWHEEL_STEPS,
+        },
+        "formulas": {
+            "J": J_FORMULA,
+            "objective": OBJECTIVE_FORMULA,
+            "delta_J": DELTA_FORMULA,
+        },
+        "audit": {
+            "upstream_target": UPSTREAM_TARGET,
+            "workspace_root": _relative(workspace_root),
+            "session_id": None,
+        },
+        "task_catalog": list_codegen_task_summaries(),
+        "memory_markdown": "",
+        "runs": [],
+    }
+
+
+def load_cached_discrete_payload(
+    *,
+    task_id: str | None = None,
+    proposal_runtime: ProposalRuntime | None = None,
+    runs_root: Path | None = None,
+    env_root: Path | None = None,
+) -> dict[str, Any]:
+    active_runs_root = runs_root or RUNS
+    candidate_paths: list[Path] = []
+    if task_id is not None:
+        candidate_paths.append(active_runs_root / f"codegen-{task_id}.json")
+    candidate_paths.append(active_runs_root / "latest_run.json")
+    for path in candidate_paths:
+        if path.exists():
+            return json.loads(path.read_text())
+    return empty_discrete_payload(
+        proposal_runtime=proposal_runtime,
+        runs_root=active_runs_root,
+        env_root=env_root,
+    )
+
+
 def _write_handoff_bundle(
     *,
     payload: dict[str, Any],
@@ -147,21 +217,28 @@ def _write_handoff_bundle(
     handoff_root: Path,
 ) -> None:
     handoff_root.mkdir(parents=True, exist_ok=True)
+    session_id = str(payload["audit"].get("session_id") or "session-unknown")
+    generated_at = str(payload["summary"]["generated_at"])
     for run in payload["runs"]:
         task_id = run["task"]["id"]
-        bundle_dir = handoff_root / task_id
+        bundle_dir = handoff_root / session_id / task_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
         objective_curve_path = bundle_dir / "objective_curve.json"
         trace_path = bundle_dir / "trace.jsonl"
         llm_trace_path = bundle_dir / "llm_trace.jsonl"
         memory_path = bundle_dir / "memory.md"
+        report_svg_path = bundle_dir / "improvement_report.svg"
+        improvement_table_path = bundle_dir / "improvement_table.json"
         manifest_path = bundle_dir / "manifest.json"
 
         write_json(objective_curve_path, run["objective_curve"])
         write_jsonl(trace_path, events_by_task.get(task_id, []))
         write_jsonl(llm_trace_path, run["llm_traces"])
         memory_path.write_text(run["memory_markdown"])
+        improvement_table = build_improvement_table(run)
+        write_json(improvement_table_path, improvement_table)
+        write_improvement_report_svg(run, report_svg_path)
 
         artifact_paths = {
             "payload": _relative(artifact_path),
@@ -169,13 +246,15 @@ def _write_handoff_bundle(
             "trace": _relative(trace_path),
             "memory_markdown": _relative(memory_path),
             "llm_trace_jsonl": _relative(llm_trace_path),
+            "report_svg": _relative(report_svg_path),
+            "improvement_table_json": _relative(improvement_table_path),
         }
         manifest = {
             "source_repo": payload["summary"]["source_repo"],
             "upstream_target": payload["summary"]["upstream_target"],
-            "generated_at": payload["summary"]["generated_at"],
+            "generated_at": generated_at,
             "git_commit": payload["summary"]["git_commit"],
-            "session_id": payload["audit"].get("session_id"),
+            "session_id": session_id,
             "task_id": task_id,
             "function_name": run["task"]["function_name"],
             "objective_label": run["task"]["objective_label"],
@@ -190,6 +269,9 @@ def _write_handoff_bundle(
             "artifact_paths": artifact_paths,
         }
         write_json(manifest_path, manifest)
+        run["session_id"] = session_id
+        run["generated_at"] = generated_at
+        run["improvement_table"] = improvement_table
         run["handoff_bundle"] = {
             "manifest": manifest,
             "manifest_path": _relative(manifest_path),
@@ -229,6 +311,7 @@ def write_discrete_artifacts(
         runs_root=active_runs_root,
         env_root=env_root,
         workspace_root=active_workspace_root,
+        session_id=session_id,
     )
     payload["audit"]["session_id"] = session_id
     active_runs_root.mkdir(parents=True, exist_ok=True)

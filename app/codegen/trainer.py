@@ -56,18 +56,26 @@ def _baseline_candidate(task: dict[str, Any], workspace_root: Path) -> dict[str,
 
 def _build_experience(
     task: dict[str, Any],
+    session_id: str,
     generation: int,
-    previous_best: dict[str, Any],
     winner: dict[str, Any],
     delta_j: float,
     reflection: dict[str, str],
+    *,
+    outcome: str,
+    rejection_reason: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "experience_id": f"exp-{task['id']}-g{generation}-{winner['agent']}",
+        "experience_id": f"exp-{task['id']}-{session_id}-g{generation}-{winner['agent']}-{outcome}",
         "experience_type": "strategy_experience",
+        "experience_outcome": outcome,
+        "generation": generation,
         "source_task": task["id"],
+        "source_session_id": session_id,
         "family": task["family"],
         "task_signature": task["task_signature"],
+        "verifier_status": winner["metrics"]["verifier_status"],
+        "rejection_reason": rejection_reason or "",
         "failure_pattern": reflection["failure_pattern"],
         "strategy_hypothesis": reflection["strategy_hypothesis"],
         "successful_strategy": reflection["successful_strategy"],
@@ -80,12 +88,30 @@ def _build_experience(
     }
 
 
+def _failure_reason(previous_best: dict[str, Any], winner: dict[str, Any]) -> str:
+    verifier_status = winner["metrics"]["verifier_status"]
+    if verifier_status == "error":
+        return f"Candidate errored before verification completed: {winner['metrics'].get('error') or 'unknown error'}"
+    if verifier_status == "fail":
+        failed_tests = [result["name"] for result in winner["metrics"].get("test_results", []) if not result.get("passed")]
+        if failed_tests:
+            return "Candidate failed deterministic tests: " + ", ".join(failed_tests)
+        return "Candidate failed deterministic correctness checks."
+    if winner["metrics"]["objective"] <= previous_best["metrics"]["objective"]:
+        return (
+            "Candidate passed verification but did not improve the incumbent objective "
+            f"({winner['metrics']['objective']} <= {previous_best['metrics']['objective']})."
+        )
+    return "Candidate was not accepted by the deterministic verifier."
+
+
 def run_codegen_task(
     task: dict[str, Any],
     store: MemoryStore,
     *,
     proposal_runtime: ProposalRuntime,
     workspace_root: Path,
+    session_id: str = "session-current",
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
@@ -207,49 +233,60 @@ def run_codegen_task(
             accepted = True
 
         delta_j = round(generation_winner["metrics"]["J"] - previous_best["metrics"]["J"], 4)
+        experience_outcome = "success" if accepted else "failure"
+        rejection_reason = None if accepted else _failure_reason(previous_best, generation_winner)
         wrote_memory = False
         new_experience = None
-        if (
-            generation_winner["metrics"]["status"] == "pass"
-            and generation_winner["metrics"]["objective"] > previous_best["metrics"]["objective"]
-            and delta_j > float(task["epsilon"])
-        ):
-            reflection, reflection_trace = reflect_strategy_experience(
-                proposal_runtime,
-                task=task,
-                generation=generation,
-                previous_best=previous_best,
-                winner=generation_winner,
-                delta_j=delta_j,
-            )
-            llm_traces.append(
+        reflection, reflection_trace = reflect_strategy_experience(
+            proposal_runtime,
+            task=task,
+            generation=generation,
+            previous_best=previous_best,
+            winner=generation_winner,
+            delta_j=delta_j,
+            outcome=experience_outcome,
+            rejection_reason=rejection_reason,
+        )
+        llm_traces.append(
+            {
+                "task_id": task["id"],
+                "generation": generation,
+                "phase": "memory_reflection",
+                "experience_outcome": experience_outcome,
+                **reflection_trace,
+            }
+        )
+        new_experience = _build_experience(
+            task,
+            session_id,
+            generation,
+            generation_winner,
+            delta_j,
+            reflection,
+            outcome=experience_outcome,
+            rejection_reason=rejection_reason,
+        )
+        wrote_memory = store.append(new_experience)
+        if wrote_memory:
+            memory_events.append(
                 {
-                    "task_id": task["id"],
                     "generation": generation,
-                    "phase": "memory_reflection",
-                    **reflection_trace,
+                    "experience_id": new_experience["experience_id"],
+                    "experience_outcome": experience_outcome,
+                    "verifier_status": generation_winner["metrics"]["verifier_status"],
+                    "delta_J": delta_j,
+                    "prompt_fragment": new_experience["prompt_fragment"],
                 }
             )
-            new_experience = _build_experience(task, generation, previous_best, generation_winner, delta_j, reflection)
-            wrote_memory = store.append(new_experience)
-            if wrote_memory:
-                memory_events.append(
-                    {
-                        "generation": generation,
-                        "experience_id": new_experience["experience_id"],
-                        "delta_J": delta_j,
-                        "prompt_fragment": new_experience["prompt_fragment"],
-                    }
-                )
-                _emit(
-                    progress_callback,
-                    pace_ms,
-                    phase="memory_writeback",
-                    task_id=task["id"],
-                    generation=generation,
-                    candidate=generation_winner["agent"],
-                    message=f"Wrote {new_experience['experience_id']}",
-                )
+            _emit(
+                progress_callback,
+                pace_ms,
+                phase="memory_writeback",
+                task_id=task["id"],
+                generation=generation,
+                candidate=generation_winner["agent"],
+                message=f"Wrote {new_experience['experience_id']} ({experience_outcome})",
+            )
 
         objective_curve.append(
             {
@@ -263,6 +300,7 @@ def run_codegen_task(
                 "accepted": accepted,
                 "active_model": proposal_runtime.active_model,
                 "proposal_model": generation_winner["proposal_model"],
+                "experience_outcome": experience_outcome,
                 "run_mode": "llm-required",
             }
         )
@@ -277,6 +315,7 @@ def run_codegen_task(
                 "winner_accepted": accepted,
                 "best_after_generation": current_best,
                 "delta_J": delta_j,
+                "experience_outcome": experience_outcome,
                 "wrote_memory": wrote_memory,
                 "new_experience": new_experience,
             }
@@ -292,6 +331,13 @@ def run_codegen_task(
         )
 
     run_delta_j = round(current_best["metrics"]["J"] - baseline["metrics"]["J"], 4)
+    added_experiences = [generation["new_experience"] for generation in generations if generation.get("new_experience")]
+    positive_experiences_added = sum(
+        1 for experience in added_experiences if experience.get("experience_outcome") == "success"
+    )
+    negative_experiences_added = sum(
+        1 for experience in added_experiences if experience.get("experience_outcome") == "failure"
+    )
     return {
         "run_mode": "llm-required",
         "active_model": proposal_runtime.active_model,
@@ -314,6 +360,9 @@ def run_codegen_task(
         "winner": current_best,
         "delta_J": run_delta_j,
         "objective_curve": objective_curve,
+        "added_experiences": added_experiences,
+        "positive_experiences_added": positive_experiences_added,
+        "negative_experiences_added": negative_experiences_added,
         "memory_events": memory_events,
         "llm_traces": llm_traces,
         "proposal_engine": proposal_runtime.describe(),
