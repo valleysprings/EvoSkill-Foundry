@@ -7,11 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from app.engine import run_task
-from app.memory_store import MemoryStore
-from app.task_catalog import list_task_summaries, load_tasks
+from app.legacy.engine import run_task
+from app.legacy.task_catalog import list_task_summaries, load_tasks
+from app.memory.store import MemoryStore
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "data"
 RUNS = ROOT / "runs"
 WORKING_MEMORY = RUNS / "working_memory.json"

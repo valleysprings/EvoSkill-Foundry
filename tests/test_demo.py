@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.demo_run import generate_demo_payload
+from app.legacy.demo_run import generate_demo_payload
 
 
 class DemoPayloadTest(unittest.TestCase):

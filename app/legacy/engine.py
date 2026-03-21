@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from app.evaluator import evaluate_program
+from app.legacy.evaluator import evaluate_program
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 

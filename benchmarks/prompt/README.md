@@ -42,13 +42,13 @@ drive an evolutionary flywheel.
 Use the fetch script to download small benchmark slices into `benchmarks/prompt/data/`:
 
 ```bash
-python3 scripts/fetch_prompt_benchmarks.py
+bash scripts/fetch_prompt_benchmarks.sh
 ```
 
 To refresh one benchmark only:
 
 ```bash
-python3 scripts/fetch_prompt_benchmarks.py --benchmark banking77_small
+bash scripts/fetch_prompt_benchmarks.sh --benchmark banking77_small
 ```
 
 ## Data source notes

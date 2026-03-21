@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_PATH = ROOT / "scripts" / "fetch_prompt_benchmarks.py"
+SCRIPT_PATH = ROOT / "app" / "benchmarks" / "fetch_prompt_benchmarks.py"
 SPEC = importlib.util.spec_from_file_location("fetch_prompt_benchmarks", SCRIPT_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

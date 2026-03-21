@@ -7,8 +7,8 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from app.demo_run import ROOT, write_demo_artifacts
-from app.task_catalog import list_task_summaries
+from app.legacy.demo_run import ROOT, write_demo_artifacts
+from app.legacy.task_catalog import list_task_summaries
 
 UI_DIR = ROOT / "ui"
 JOB_LOCK = threading.Lock()

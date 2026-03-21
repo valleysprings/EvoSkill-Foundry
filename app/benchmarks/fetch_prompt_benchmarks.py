@@ -16,7 +16,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency at runtime
     load_dataset = None
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "benchmarks" / "prompt" / "configs"
 DATA_DIR = ROOT / "benchmarks" / "prompt" / "data"
 HF_DATASET_VIEWER_API = "https://datasets-server.huggingface.co"

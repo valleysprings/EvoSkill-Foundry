@@ -4,15 +4,20 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.memory.markdown import render_memory_markdown
+
 
 class MemoryStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, markdown_path: Path | None = None, title: str = "Working Memory"):
         self.path = path
+        self.markdown_path = markdown_path
+        self.title = title
 
     def seed_from(self, source_path: Path) -> list[dict[str, Any]]:
         seed_memories = json.loads(source_path.read_text())
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(seed_memories, indent=2))
+        self._write_markdown(seed_memories)
         return seed_memories
 
     def load(self) -> list[dict[str, Any]]:
@@ -53,4 +58,16 @@ class MemoryStore:
             return False
         memories.append(experience)
         self.path.write_text(json.dumps(memories, indent=2))
+        self._write_markdown(memories)
         return True
+
+    def load_markdown(self) -> str:
+        if self.markdown_path is None or not self.markdown_path.exists():
+            return ""
+        return self.markdown_path.read_text()
+
+    def _write_markdown(self, memories: list[dict[str, Any]]) -> None:
+        if self.markdown_path is None:
+            return
+        self.markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        self.markdown_path.write_text(render_memory_markdown(memories, title=self.title))

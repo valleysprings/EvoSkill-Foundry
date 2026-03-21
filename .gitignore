@@ -3,3 +3,8 @@ __pycache__/
 .DS_Store
 external/
 runs/working_memory.json
+runs/working_memory.md
+runs/discrete-*.json
+runs/discrete_working_memory.json
+runs/discrete_working_memory.md
+.pytest_cache/
