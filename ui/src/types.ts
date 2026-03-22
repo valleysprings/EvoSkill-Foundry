@@ -7,6 +7,7 @@ export type RuntimeInfo = {
   temperature: number | string;
   max_tokens: number | string;
   timeout_s: number | string;
+  llm_concurrency: number | string;
 };
 
 export type ObjectiveSpec = {
@@ -40,6 +41,7 @@ export type TaskSummary = {
   generation_budget: number;
   candidate_budget: number;
   branching_factor: number;
+  item_workers: number;
   benchmark_tier: string;
   track: string;
   dataset_id: string;
@@ -156,6 +158,7 @@ export type RunTask = {
   generation_budget: number;
   candidate_budget: number;
   branching_factor: number;
+  item_workers: number;
   source_type: string;
   benchmark_tier: string;
   track: string;
@@ -164,19 +167,6 @@ export type RunTask = {
   local_dataset_only?: boolean;
   split?: string | null;
   included_in_main_comparison: boolean;
-};
-
-export type ArtifactManifest = {
-  artifact_paths: {
-    payload: string;
-    trace: string;
-    llm_trace_jsonl: string;
-    memory_markdown: string;
-    report_svg?: string;
-    baseline_items?: string;
-    winner_items?: string;
-  };
-  item_artifact_paths?: Record<string, string>;
 };
 
 export type DatasetSummary = {
@@ -192,22 +182,18 @@ export type DatasetSummary = {
 
 export type QuestionRecord = {
   item_id: string;
+  id?: string;
+  question_id?: string;
   name: string;
   prompt: string;
+  raw_prompt?: string;
   context?: unknown;
+  raw_context?: unknown;
   choices?: string[];
+  raw_choices?: string[];
   expected_answer: unknown;
+  raw_expected_answer?: unknown;
   metadata?: Record<string, unknown>;
-};
-
-export type ItemArtifactPaths = {
-  summary?: string;
-  manifest?: string;
-  trace?: string;
-  llm_trace_jsonl?: string;
-  memory_markdown?: string;
-  objective_curve?: string;
-  result?: string;
 };
 
 export type ItemRun = {
@@ -229,8 +215,6 @@ export type ItemRun = {
   added_experiences?: AddedExperience[];
   memory_markdown: string;
   selection_reason: string;
-  artifact_paths?: ItemArtifactPaths;
-  manifest_path?: string;
 };
 
 export type Run = {
@@ -261,10 +245,6 @@ export type Run = {
   added_experiences?: AddedExperience[];
   memory_markdown: string;
   selection_reason: string;
-  handoff_bundle?: {
-    manifest: ArtifactManifest;
-    manifest_path: string;
-  };
 };
 
 export type PayloadSummary = {
@@ -281,7 +261,6 @@ export type PayloadSummary = {
   experiment_write_backs: number;
   source_repo: string;
   git_commit: string;
-  upstream_target: string;
   flywheel: string[];
   proposal_engine: RuntimeInfo;
 };
@@ -331,6 +310,9 @@ export type JobState = {
   task_id?: string | null;
   taskId?: string | null;
   branching_factor?: number | null;
+  generation_budget?: number | null;
+  candidate_budget?: number | null;
+  item_workers?: number | null;
   max_items?: number | null;
   terminal?: boolean;
   error_type?: string | null;

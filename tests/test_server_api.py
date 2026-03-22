@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codegen.errors import LlmTransportError
+from app.codegen.errors import LlmResponseError, LlmTransportError
 from app.entries import server
 from tests.helpers import make_runtime
 
@@ -101,7 +101,7 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(contains_duplicates["dataset_id"], "contains-duplicates-v1")
             self.assertFalse(contains_duplicates["included_in_main_comparison"])
             self.assertEqual(olymmath["dataset_id"], "olymmath")
-            self.assertEqual(olymmath["dataset_size"], 4)
+            self.assertEqual(olymmath["dataset_size"], 100)
             self.assertTrue(olymmath["local_dataset_only"])
             self.assertEqual(sciq["track"], "science_verified")
             self.assertEqual(sciq["split"], "validation")
@@ -157,6 +157,78 @@ class ServerApiTest(unittest.TestCase):
                     httpd.server_close()
                     thread.join(timeout=5)
 
+    def test_generation_and_candidate_budgets_are_forwarded_to_job_runner(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        (
+                            f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                            "?task_id=contains-duplicates&generation_budget=10&candidate_budget=1"
+                        ),
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["generation_budget"], 10)
+                    self.assertEqual(completed["candidate_budget"], 1)
+                    self.assertEqual(write_artifacts.call_args.kwargs["generation_budget"], 10)
+                    self.assertEqual(write_artifacts.call_args.kwargs["candidate_budget"], 1)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
+    def test_item_workers_is_forwarded_to_job_runner(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        (
+                            f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                            "?task_id=olymmath&item_workers=50&max_items=50"
+                        ),
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["item_workers"], 50)
+                    self.assertEqual(write_artifacts.call_args.kwargs["item_workers"], 50)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
     def test_max_items_is_forwarded_to_job_runner(self) -> None:
         payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -187,6 +259,115 @@ class ServerApiTest(unittest.TestCase):
                     httpd.shutdown()
                     httpd.server_close()
                     thread.join(timeout=5)
+
+    def test_run_sequence_forwards_generation_and_candidate_budgets(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        (
+                            f"http://127.0.0.1:{httpd.server_port}/api/run-sequence"
+                            "?generation_budget=10&candidate_budget=1&branching_factor=4&max_items=50"
+                        ),
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["generation_budget"], 10)
+                    self.assertEqual(completed["candidate_budget"], 1)
+                    self.assertEqual(completed["branching_factor"], 4)
+                    self.assertEqual(completed["max_items"], 50)
+                    self.assertEqual(write_artifacts.call_args.kwargs["generation_budget"], 10)
+                    self.assertEqual(write_artifacts.call_args.kwargs["candidate_budget"], 1)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
+    def test_invalid_generation_and_candidate_budgets_fail_fast(self) -> None:
+        with patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])):
+            httpd, thread = self._serve()
+            try:
+                status, _ = _fetch_json(
+                    (
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                        "?task_id=contains-duplicates&generation_budget=0"
+                    ),
+                    method="POST",
+                )
+                self.assertEqual(status, 400)
+                status, _ = _fetch_json(
+                    (
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                        "?task_id=contains-duplicates&candidate_budget=bad"
+                    ),
+                    method="POST",
+                )
+                self.assertEqual(status, 400)
+                status, _ = _fetch_json(
+                    (
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                        "?task_id=olymmath&item_workers=0"
+                    ),
+                    method="POST",
+                )
+                self.assertEqual(status, 400)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=5)
+
+    def test_failed_job_preserves_llm_response_diagnostics(self) -> None:
+        error = LlmResponseError(
+            "Model response appears truncated before completing a valid JSON object.",
+            model="deepseek-chat",
+            details={
+                "parse_status": "truncated",
+                "completion_tokens": 1400,
+                "max_tokens": 1400,
+                "response_truncated": True,
+            },
+        )
+        with patch.object(server, "write_discrete_artifacts", side_effect=error):
+            httpd, thread = self._serve()
+            try:
+                status, start_payload = _fetch_json(
+                    f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=contains-duplicates",
+                    method="POST",
+                )
+                self.assertEqual(status, 202)
+                job_id = start_payload["job_id"]
+                deadline = time.time() + 5
+                payload = {}
+                while time.time() < deadline:
+                    _, payload = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                    if payload["status"] != "running":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(payload["status"], "failed")
+                self.assertEqual(payload["error_type"], "llm_response_error")
+                self.assertIn("details", payload)
+                self.assertEqual(payload["details"]["parse_status"], "truncated")
+                self.assertTrue(payload["details"]["response_truncated"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=5)
 
     def test_completed_job_payload_includes_memory_summary_fields(self) -> None:
         payload = {

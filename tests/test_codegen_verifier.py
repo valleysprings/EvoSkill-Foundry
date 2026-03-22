@@ -195,6 +195,114 @@ class CodegenVerifierTest(unittest.TestCase):
                 self.assertEqual(len(metrics["test_results"]), 1)
                 self.assertEqual(metrics["test_results"][0]["name"], items[0]["name"])
 
+    def test_sciq_question_id_alias_is_available_to_solver(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "sciq")
+        item = load_question_manifest(task)[0]
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            (
+                "def solve(question: dict) -> str:\n"
+                "    if question.get('id') == 'sciq-validation-0':\n"
+                "        return 'darwin'\n"
+                "    return ''\n"
+            ),
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "pass")
+        self.assertEqual(metrics["test_results"][0]["actual"], "darwin")
+
+    def test_sciq_choice_letter_answer_is_accepted(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "sciq")
+        item = load_question_manifest(task)[0]
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            "def solve(question: dict) -> str:\n    return 'B'\n",
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "pass")
+        self.assertEqual(metrics["test_results"][0]["actual"], "darwin")
+
+    def test_dataset_solver_cannot_read_expected_answer_from_question_payload(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "sciq")
+        item = load_question_manifest(task)[0]
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            (
+                "def solve(question: dict) -> str:\n"
+                "    answer = question.get('expected_answer')\n"
+                "    alias = question.get('metadata', {}).get('answer_aliases')\n"
+                "    if answer:\n"
+                "        return str(answer)\n"
+                "    if alias:\n"
+                "        return str(alias[0])\n"
+                "    return ''\n"
+            ),
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "fail")
+        self.assertNotEqual(metrics["test_results"][0]["actual"], "darwin")
+
+    def test_network_access_is_rejected_for_dataset_tasks(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "sciq")
+        item = load_question_manifest(task)[0]
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            (
+                "import urllib.request\n\n"
+                "def solve(question: dict) -> str:\n"
+                "    return urllib.request.urlopen('https://example.com').read().decode()\n"
+            ),
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "error")
+        self.assertIn("disabled", metrics["error"])
+
+    def test_olymmath_math_verify_accepts_symbolic_equivalent_answer(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "olymmath")
+        item = next(item for item in load_question_manifest(task) if item["raw_item_id"] == "OlymMATH-HARD-4-EN")
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            "def solve(question: dict) -> str:\n    return r'$44*sqrt(30)+241$'\n",
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "pass")
+        self.assertIn("44*sqrt(30)+241", metrics["test_results"][0]["actual"])
+
 
 if __name__ == "__main__":
     unittest.main()

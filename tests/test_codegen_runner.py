@@ -4,7 +4,10 @@ import json
 import os
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +15,9 @@ from app.codegen.errors import ConfigError, LlmResponseError, LlmTransportError
 from app.codegen.catalog import load_codegen_tasks, seed_strategy_experiences
 from app.codegen.dataset_runner import run_dataset_task
 from app.codegen.dataset_support import load_question_manifest
+from app.codegen.llm import _proposal_prompt
+from app.codegen.config import RuntimeConfig
+from app.codegen.llm import ProposalRuntime
 from app.codegen.trainer import run_codegen_task
 from app.entries.discrete_demo import generate_discrete_payload, write_discrete_artifacts
 from app.memory.store import MemoryStore
@@ -22,7 +28,13 @@ def _file_with_entry(symbol: str, args: str, body: str) -> str:
     return f"def {symbol}({args}):\n{textwrap.indent(body.strip(), '    ')}\n"
 
 
-def raw_content_response(content: str, *, model: str = "deepseek-chat") -> str:
+def raw_content_response(
+    content: str,
+    *,
+    model: str = "deepseek-chat",
+    prompt_tokens: int = 10,
+    completion_tokens: int = 20,
+) -> str:
     return json.dumps(
         {
             "id": "resp-raw",
@@ -37,8 +49,8 @@ def raw_content_response(content: str, *, model: str = "deepseek-chat") -> str:
                 }
             ],
             "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
             },
             "model": model,
         }
@@ -224,7 +236,167 @@ class CodegenRunnerTest(unittest.TestCase):
                     branching_factor=1,
                 )
 
-    def test_success_path_writes_payload_memory_and_llm_trace(self) -> None:
+    def test_proposal_prompt_requests_exact_candidate_budget_and_json_only_output(self) -> None:
+        task = dict(next(item for item in load_codegen_tasks() if item["id"] == "contains-duplicates"))
+        task["candidate_budget"] = 1
+        candidate = {
+            "candidate_summary": "Checked-in baseline.",
+            "metrics": {"objective": 0.0, "objective_score": 0.0, "J": 0.42},
+            "baseline_source": "def contains_duplicates(values):\n    return False\n",
+            "source_code": "def contains_duplicates(values):\n    return False\n",
+        }
+        system_prompt, _ = _proposal_prompt(
+            task=task,
+            generation=1,
+            parent_candidate=candidate,
+            current_best=candidate,
+            candidate_history=[],
+            memories=[],
+        )
+        self.assertIn("Return exactly 1 candidate.", system_prompt)
+        self.assertIn("Return only a JSON object.", system_prompt)
+        self.assertIn("Do not include Markdown code fences", system_prompt)
+        self.assertIn("file_body is the only field that may be long.", system_prompt)
+        self.assertNotIn("Return between 1 and 3 candidates.", system_prompt)
+
+    def test_truncated_llm_output_surfaces_parse_details(self) -> None:
+        truncated_response = raw_content_response(
+            "```json\n{\"candidates\": [{\"name\": \"cut off\"",
+            completion_tokens=1400,
+        )
+        runtime = make_runtime([truncated_response, truncated_response, truncated_response])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(LlmResponseError) as raised:
+                generate_discrete_payload(
+                    task_id="contains-duplicates",
+                    proposal_runtime=runtime,
+                    runs_root=Path(tmp_dir),
+                    branching_factor=1,
+                )
+        payload = raised.exception.as_payload()
+        self.assertIn("appears truncated", payload["error"])
+        details = payload.get("details")
+        self.assertIsInstance(details, dict)
+        assert isinstance(details, dict)
+        self.assertEqual(details["parse_status"], "truncated")
+        self.assertEqual(details["completion_tokens"], 1400)
+        self.assertEqual(details["max_tokens"], 1400)
+        self.assertEqual(details["attempt"], 3)
+        self.assertTrue(details["response_truncated"])
+        self.assertIn("cut off", str(details["raw_preview"]))
+
+    def test_llm_concurrency_gate_limits_inflight_requests(self) -> None:
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def transport(_request_body, _config):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return chat_response(PROPOSAL_PAYLOAD)
+            finally:
+                with lock:
+                    active -= 1
+
+        runtime = ProposalRuntime(
+            RuntimeConfig(
+                api_key="test-key",
+                api_base="https://api.test/v1",
+                primary_model="deepseek-chat",
+                available_models=("deepseek-chat",),
+                temperature=0.2,
+                max_tokens=1400,
+                timeout_s=45,
+                llm_concurrency=2,
+            ),
+            transport=transport,
+        )
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(
+                    runtime.complete_json,
+                    purpose="concurrency-test",
+                    system_prompt="Return strict JSON only.",
+                    user_prompt='Return {"candidates":[{"name":"n","strategy":"s","rationale":"r","file_body":"def f():\\n    return 1","candidate_summary":"c"}]}',
+                )
+                for _ in range(5)
+            ]
+            for future in futures:
+                payload, trace = future.result()
+                self.assertIn("candidates", payload)
+                self.assertEqual(trace["parse_status"], "ok")
+        self.assertLessEqual(max_active, 2)
+
+    def test_llm_queue_prioritizes_lower_generation_requests(self) -> None:
+        order: list[str] = []
+        blocker_started = threading.Event()
+        release_blocker = threading.Event()
+
+        def transport(request_body, _config):
+            label = str(request_body["messages"][1]["content"])
+            order.append(label)
+            if label == "blocker":
+                blocker_started.set()
+                if not release_blocker.wait(timeout=2):
+                    raise AssertionError("blocker was not released")
+            return raw_content_response('{"ok": true}')
+
+        runtime = ProposalRuntime(
+            RuntimeConfig(
+                api_key="test-key",
+                api_base="https://api.test/v1",
+                primary_model="deepseek-chat",
+                available_models=("deepseek-chat",),
+                temperature=0.2,
+                max_tokens=1400,
+                timeout_s=45,
+                llm_concurrency=1,
+            ),
+            transport=transport,
+        )
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            blocker = executor.submit(
+                runtime.complete_json,
+                purpose="queue-test",
+                system_prompt="Return strict JSON only.",
+                user_prompt="blocker",
+                queue_priority=999,
+            )
+            self.assertTrue(blocker_started.wait(timeout=1))
+            generation_two = executor.submit(
+                runtime.complete_json,
+                purpose="queue-test",
+                system_prompt="Return strict JSON only.",
+                user_prompt="generation-2",
+                queue_priority=20,
+            )
+            generation_one_a = executor.submit(
+                runtime.complete_json,
+                purpose="queue-test",
+                system_prompt="Return strict JSON only.",
+                user_prompt="generation-1-a",
+                queue_priority=10,
+            )
+            generation_one_b = executor.submit(
+                runtime.complete_json,
+                purpose="queue-test",
+                system_prompt="Return strict JSON only.",
+                user_prompt="generation-1-b",
+                queue_priority=10,
+            )
+            release_blocker.set()
+            for future in (blocker, generation_two, generation_one_a, generation_one_b):
+                payload, trace = future.result()
+                self.assertEqual(payload["ok"], True)
+                self.assertEqual(trace["parse_status"], "ok")
+        self.assertEqual(order[0], "blocker")
+        self.assertEqual(order[1:], ["generation-1-a", "generation-1-b", "generation-2"])
+
+    def test_success_path_writes_payload_and_memory_without_handoff_bundle(self) -> None:
         runtime = make_runtime(
             [
                 chat_response(PROPOSAL_PAYLOAD),
@@ -244,18 +416,13 @@ class CodegenRunnerTest(unittest.TestCase):
             )
             payload = json.loads(artifact_path.read_text())
             run = payload["runs"][0]
-            manifest_path = Path(tmp_dir) / run["handoff_bundle"]["manifest_path"]
             self.assertEqual(payload["run_mode"], "llm-required")
             self.assertEqual(payload["summary"]["active_model"], "deepseek-chat")
             self.assertTrue((Path(tmp_dir) / "codegen_working_memory.md").exists())
-            self.assertTrue(manifest_path.exists())
-            manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(manifest["winner_candidate"], run["winner"]["agent"])
-            self.assertIsNotNone(manifest["artifact_paths"]["llm_trace_jsonl"])
-            self.assertTrue((Path(tmp_dir) / manifest["artifact_paths"]["llm_trace_jsonl"]).exists())
-            self.assertTrue((Path(tmp_dir) / manifest["artifact_paths"]["report_svg"]).exists())
-            self.assertIn(manifest["session_id"], run["handoff_bundle"]["manifest_path"])
-            self.assertEqual(run["session_id"], manifest["session_id"])
+            self.assertNotIn("handoff_bundle", run)
+            self.assertFalse((Path(tmp_dir) / "handoff").exists())
+            self.assertTrue(run["session_id"])
+            self.assertTrue(run["generated_at"])
             self.assertEqual(payload["summary"]["write_backs"], 0)
             self.assertEqual(payload["summary"]["experiment_write_backs"], 2)
             self.assertEqual(run["memory_before_count"], 2)
@@ -272,7 +439,7 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertIn("failure_memories:", (Path(tmp_dir) / "codegen_working_memory.md").read_text())
 
     def test_timeout_failure_aborts_run(self) -> None:
-        runtime = make_runtime([TimeoutError("timed out")])
+        runtime = make_runtime([TimeoutError("timed out")] * 3)
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(LlmTransportError):
                 generate_discrete_payload(
@@ -283,7 +450,7 @@ class CodegenRunnerTest(unittest.TestCase):
                 )
 
     def test_invalid_http_json_aborts_run(self) -> None:
-        runtime = make_runtime(["not-json"])
+        runtime = make_runtime(["not-json"] * 3)
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(LlmResponseError):
                 generate_discrete_payload(
@@ -392,6 +559,32 @@ class CodegenRunnerTest(unittest.TestCase):
                 proposal_runtime=runtime,
                 workspace_root=tmp / "workspace",
                 session_id="retry-parse-error",
+            )
+            self.assertEqual(result["winner"]["metrics"]["status"], "pass")
+            self.assertEqual(result["llm_traces"][0]["attempt"], 2)
+
+    def test_model_transport_error_is_retried(self) -> None:
+        runtime = make_runtime(
+            [
+                LlmTransportError("Model request timed out.", model="deepseek-chat"),
+                chat_response(FULL_FILE_PROPOSAL_PAYLOAD),
+                chat_response(REFLECTION_PAYLOAD),
+            ]
+        )
+        task = next(item for item in load_codegen_tasks() if item["id"] == "contains-duplicates")
+        task = dict(task)
+        task["generation_budget"] = 1
+        task["branching_factor"] = 1
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            store = MemoryStore(tmp / "memory.json", markdown_path=tmp / "memory.md")
+            store.ensure_seed_records(seed_strategy_experiences())
+            result = run_codegen_task(
+                task,
+                store,
+                proposal_runtime=runtime,
+                workspace_root=tmp / "workspace",
+                session_id="retry-transport-error",
             )
             self.assertEqual(result["winner"]["metrics"]["status"], "pass")
             self.assertEqual(result["llm_traces"][0]["attempt"], 2)
@@ -577,7 +770,40 @@ class CodegenRunnerTest(unittest.TestCase):
         task["item_workers"] = 1
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
-            items = load_question_manifest(task)[:2]
+            items = [
+                {
+                    "item_id": "olymmath-r1",
+                    "raw_item_id": "olymmath-r1",
+                    "id": "olymmath-r1",
+                    "question_id": "olymmath-r1",
+                    "name": "Remainders mod 2 through 6",
+                    "prompt": "What is the smallest positive integer that leaves remainder 1 when divided by 2, 3, 4, 5, and 6, and leaves remainder 0 when divided by 7?",
+                    "raw_prompt": "What is the smallest positive integer that leaves remainder 1 when divided by 2, 3, 4, 5, and 6, and leaves remainder 0 when divided by 7?",
+                    "context": None,
+                    "raw_context": None,
+                    "choices": [],
+                    "raw_choices": [],
+                    "expected_answer": "301",
+                    "raw_expected_answer": "301",
+                    "metadata": {"dataset": "olymmath", "answer_format": "numeric"},
+                },
+                {
+                    "item_id": "olymmath-triangle",
+                    "raw_item_id": "olymmath-triangle",
+                    "id": "olymmath-triangle",
+                    "question_id": "olymmath-triangle",
+                    "name": "Triangle sides 13, 14, 15",
+                    "prompt": "A triangle has side lengths 13, 14, and 15. What is its area?",
+                    "raw_prompt": "A triangle has side lengths 13, 14, and 15. What is its area?",
+                    "context": None,
+                    "raw_context": None,
+                    "choices": [],
+                    "raw_choices": [],
+                    "expected_answer": "84",
+                    "raw_expected_answer": "84",
+                    "metadata": {"dataset": "olymmath", "answer_format": "numeric"},
+                },
+            ]
             manifest = tmp / "questions.json"
             manifest.write_text(json.dumps(items, indent=2))
             task["item_manifest_path"] = str(manifest)
@@ -600,7 +826,7 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertTrue(any(event.get("item_id") == items[0]["item_id"] for event in events))
             self.assertTrue(any(event.get("item_id") == items[1]["item_id"] for event in events))
 
-    def test_dataset_artifacts_include_item_runs_and_item_summaries(self) -> None:
+    def test_dataset_runs_stay_inline_without_handoff_artifacts(self) -> None:
         runtime = make_runtime(
             [
                 chat_response(QUESTION_SOLVER_PROPOSAL_PAYLOAD),
@@ -634,16 +860,12 @@ class CodegenRunnerTest(unittest.TestCase):
             run = payload["runs"][0]
             self.assertEqual(run["dataset_summary"]["total_items"], 1)
             self.assertEqual(len(run["item_runs"]), 1)
-            manifest_path = Path(tmp) / run["handoff_bundle"]["manifest_path"]
-            dataset_manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(set(dataset_manifest["item_artifact_paths"]), {items[0]["item_id"]})
-            for item_id in dataset_manifest["item_artifact_paths"]:
-                item_summary_path = Path(tmp) / dataset_manifest["item_artifact_paths"][item_id]
-                self.assertTrue(item_summary_path.exists())
-                item_summary = json.loads(item_summary_path.read_text())
-                self.assertEqual(item_summary["item_id"], item_id)
-                item_result_path = Path(tmp) / item_summary["artifact_paths"]["result"]
-                self.assertTrue(item_result_path.exists())
+            self.assertNotIn("handoff_bundle", run)
+            self.assertFalse((Path(tmp) / "handoff").exists())
+            item_run = run["item_runs"][0]
+            self.assertEqual(item_run["question"]["id"], items[0]["item_id"])
+            self.assertEqual(item_run["question"]["question_id"], items[0]["item_id"])
+            self.assertEqual(item_run["question"]["raw_prompt"], items[0]["raw_prompt"])
 
 
 if __name__ == "__main__":

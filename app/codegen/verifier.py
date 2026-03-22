@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import statistics
 import textwrap
 import time
 from pathlib import Path
 from typing import Any
+
+from app.configs.codegen import (
+    BENCHMARK_SAMPLE_COUNT,
+    COMPLEXITY_BASE,
+    COMPLEXITY_FOR_COST,
+    COMPLEXITY_IF_COST,
+    COMPLEXITY_IMPORT_COST,
+    COMPLEXITY_LINE_DIVISOR,
+    COMPLEXITY_MAX,
+    COMPLEXITY_WHILE_COST,
+    ERROR_CANDIDATE_J,
+    FORBIDDEN_NETWORK_PATTERNS,
+    J_SCORE_WEIGHTS,
+    LINE_COUNT_NORMALIZER,
+    SPEED_SCORE_CAP,
+)
 
 
 def _line_count(code: str) -> int:
@@ -13,10 +30,14 @@ def _line_count(code: str) -> int:
 
 
 def _estimate_complexity(source_code: str) -> float:
-    line_cost = _line_count(source_code) / 28.0
-    import_cost = source_code.count("\nimport ") * 0.04 + source_code.count("\nfrom ") * 0.04
-    branch_cost = source_code.count(" for ") * 0.03 + source_code.count(" while ") * 0.04 + source_code.count(" if ") * 0.02
-    return round(min(0.12 + line_cost + import_cost + branch_cost, 0.95), 2)
+    line_cost = _line_count(source_code) / COMPLEXITY_LINE_DIVISOR
+    import_cost = source_code.count("\nimport ") * COMPLEXITY_IMPORT_COST + source_code.count("\nfrom ") * COMPLEXITY_IMPORT_COST
+    branch_cost = (
+        source_code.count(" for ") * COMPLEXITY_FOR_COST
+        + source_code.count(" while ") * COMPLEXITY_WHILE_COST
+        + source_code.count(" if ") * COMPLEXITY_IF_COST
+    )
+    return round(min(COMPLEXITY_BASE + line_cost + import_cost + branch_cost, COMPLEXITY_MAX), 2)
 
 
 def _objective_direction(task: dict[str, Any]) -> str:
@@ -155,12 +176,12 @@ def finalize_candidate_metrics(
         score = -1.0
     else:
         score = (
-            1.20 * correctness
-            + 0.95 * objective_signal
-            + 0.20 * memory_bonus
-            + 0.15 * stability
-            - 0.18 * complexity
-            - 0.05 * (line_count / 10.0)
+            J_SCORE_WEIGHTS["correctness"] * correctness
+            + J_SCORE_WEIGHTS["objective_signal"] * objective_signal
+            + J_SCORE_WEIGHTS["memory_bonus"] * memory_bonus
+            + J_SCORE_WEIGHTS["stability"] * stability
+            - J_SCORE_WEIGHTS["complexity"] * complexity
+            - J_SCORE_WEIGHTS["line_count_penalty"] * (line_count / LINE_COUNT_NORMALIZER)
         )
 
     metrics = {
@@ -215,9 +236,18 @@ def error_candidate_metrics(
             "objective_signal": 0.0,
             "error": error,
             "test_results": [],
-            "J": -1.0,
+            "J": ERROR_CANDIDATE_J,
         },
     )
+
+
+def _network_access_error(task: dict[str, Any], source_code: str) -> str | None:
+    if bool(task.get("allow_browsing", False)):
+        return None
+    for pattern in FORBIDDEN_NETWORK_PATTERNS:
+        if re.search(pattern, source_code):
+            return "Browsing and external network access are disabled for this task."
+    return None
 
 
 def evaluate_python_function_candidate(
@@ -228,6 +258,9 @@ def evaluate_python_function_candidate(
     baseline_metrics: dict[str, Any] | None,
     memory_applied: bool,
 ) -> dict[str, Any]:
+    network_error = _network_access_error(task, source_code)
+    if network_error is not None:
+        return error_candidate_metrics(task=task, source_code=source_code, error=network_error)
     try:
         function = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
     except Exception as exc:  # noqa: BLE001
@@ -282,7 +315,7 @@ def evaluate_python_function_candidate(
     benchmark_args = _benchmark_args(str(benchmark["kind"]))
     samples: list[float] = []
     try:
-        for _ in range(3):
+        for _ in range(BENCHMARK_SAMPLE_COUNT):
             started = time.perf_counter()
             for _ in range(repeats):
                 function(*benchmark_args)
@@ -293,7 +326,7 @@ def evaluate_python_function_candidate(
     benchmark_ms = statistics.median(samples)
     baseline_ms = None if baseline_metrics is None else baseline_metrics.get("benchmark_ms")
     speedup = float(baseline_ms) / benchmark_ms if baseline_ms and benchmark_ms > 0 else 1.0
-    speed_score = min(speedup, 8.0) / 8.0
+    speed_score = min(speedup, SPEED_SCORE_CAP) / SPEED_SCORE_CAP
     stability = min(samples) / max(samples) if max(samples) > 0 else 1.0
     return finalize_candidate_metrics(
         task=task,
@@ -337,6 +370,9 @@ def evaluate_materialized_candidate(
     baseline_metrics: dict[str, Any] | None,
     memory_applied: bool,
 ) -> dict[str, Any]:
+    network_error = _network_access_error(task, source_code)
+    if network_error is not None:
+        return error_candidate_metrics(task=task, source_code=source_code, error=network_error)
     try:
         evaluator = _load_task_verifier(task)
         raw_metrics = evaluator(

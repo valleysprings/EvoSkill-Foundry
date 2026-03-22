@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
+from app.configs.codegen import DEFAULT_FRONTIER_SIZE, DEFAULT_MEMORY_RETRIEVAL_TOP_K, DEFAULT_SESSION_ID, TRAINER_J_SPEC
 from app.codegen.llm import ProposalRuntime, propose_code_candidates, reflect_strategy_experience
 from app.codegen.verifier import evaluate_materialized_candidate, materialize_candidate
 from app.memory.store import MemoryStore
@@ -138,7 +139,11 @@ def _select_generation_winner(evaluated_candidates: list[dict[str, Any]]) -> dic
     return max(evaluated_candidates, key=lambda candidate: (float(candidate["metrics"]["J"]), _objective_score(candidate)))
 
 
-def _extend_frontier(frontier: list[dict[str, Any]], candidate: dict[str, Any], max_size: int = 8) -> list[dict[str, Any]]:
+def _extend_frontier(
+    frontier: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    max_size: int = DEFAULT_FRONTIER_SIZE,
+) -> list[dict[str, Any]]:
     if any(item.get("source_code") == candidate.get("source_code") for item in frontier):
         return frontier
     updated = frontier + [candidate]
@@ -245,7 +250,7 @@ def run_codegen_task(
     *,
     proposal_runtime: ProposalRuntime,
     workspace_root: Path,
-    session_id: str = "session-current",
+    session_id: str = DEFAULT_SESSION_ID,
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
@@ -278,7 +283,11 @@ def run_codegen_task(
             "run_mode": "llm-required",
         }
     ]
-    initial_retrieved = store.retrieve(task_signature=task["task_signature"], family=task["family"], top_k=4)
+    initial_retrieved = store.retrieve(
+        task_signature=task["task_signature"],
+        family=task["family"],
+        top_k=DEFAULT_MEMORY_RETRIEVAL_TOP_K,
+    )
 
     for generation in range(1, int(task["generation_budget"]) + 1):
         parents = _select_branch_parents(frontier, current_best, accepted_history, branching_factor)
@@ -298,7 +307,11 @@ def run_codegen_task(
 
         branch_inputs: list[dict[str, Any]] = []
         for branch_index, parent_candidate in enumerate(parents, start=1):
-            retrieved = store.retrieve(task_signature=task["task_signature"], family=task["family"], top_k=4)
+            retrieved = store.retrieve(
+                task_signature=task["task_signature"],
+                family=task["family"],
+                top_k=DEFAULT_MEMORY_RETRIEVAL_TOP_K,
+            )
             branch_id = f"g{generation}-b{branch_index}"
             branch_input = {
                 "branch_id": branch_id,
@@ -657,13 +670,7 @@ def run_codegen_task(
     return {
         "run_mode": "llm-required",
         "active_model": proposal_runtime.active_model,
-        "j_spec": {
-            "display_name": "Internal selection score J",
-            "direction": "max",
-            "summary_template": "J is the always-max internal selection score used to rank verified candidates across tasks.",
-            "formula": "J = 1.20 * correctness + 0.95 * objective_signal + 0.20 * memory_bonus + 0.15 * stability - 0.18 * complexity - 0.05 * (line_count / 10)",
-            "delta_template": "delta_J compares the generation winner against the selected parent; run_delta_J compares the final winner against the baseline.",
-        },
+        "j_spec": dict(TRAINER_J_SPEC),
         "task": {
             "id": task["id"],
             "title": task["title"],

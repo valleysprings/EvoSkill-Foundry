@@ -5,19 +5,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app.configs.runtime import AVAILABLE_MODELS_ENV_KEY, DEFAULT_LLM_CONCURRENCY, LLM_CONCURRENCY_ENV_KEY, REQUIRED_ENV_KEYS, ROOT
 from app.codegen.errors import ConfigError
-
-
-ROOT = Path(__file__).resolve().parents[2]
-REQUIRED_ENV_KEYS = (
-    "AUTORESEARCH_API_KEY",
-    "AUTORESEARCH_API_BASE",
-    "AUTORESEARCH_PRIMARY_MODEL",
-    "AUTORESEARCH_TEMPERATURE",
-    "AUTORESEARCH_MAX_TOKENS",
-    "AUTORESEARCH_TIMEOUT_S",
-)
-AVAILABLE_MODELS_ENV_KEY = "AUTORESEARCH_AVAILABLE_MODELS"
 
 
 def _strip_quotes(value: str) -> str:
@@ -82,6 +71,19 @@ def _parse_int(name: str) -> int:
     return parsed
 
 
+def _parse_optional_positive_int(name: str, *, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"Environment variable {name} must be an integer.") from exc
+    if parsed <= 0:
+        raise ConfigError(f"Environment variable {name} must be greater than zero.")
+    return parsed
+
+
 def _parse_api_base(name: str) -> str:
     value = _require_non_empty(name)
     parsed = urlparse(value)
@@ -111,6 +113,7 @@ class RuntimeConfig:
     temperature: float
     max_tokens: int
     timeout_s: int
+    llm_concurrency: int
     selected_model: str | None = None
 
     @property
@@ -136,6 +139,7 @@ class RuntimeConfig:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "timeout_s": self.timeout_s,
+            "llm_concurrency": self.llm_concurrency,
         }
 
 
@@ -150,4 +154,5 @@ def load_runtime_config(root: Path | None = None) -> RuntimeConfig:
         temperature=_parse_float("AUTORESEARCH_TEMPERATURE"),
         max_tokens=_parse_int("AUTORESEARCH_MAX_TOKENS"),
         timeout_s=_parse_int("AUTORESEARCH_TIMEOUT_S"),
+        llm_concurrency=_parse_optional_positive_int(LLM_CONCURRENCY_ENV_KEY, default=DEFAULT_LLM_CONCURRENCY),
     )

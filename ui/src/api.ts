@@ -1,5 +1,13 @@
 import type { JobState, Payload, RuntimeInfo, TaskSummary } from "./types";
 
+type StartJobOptions = {
+  branchingFactor?: number | null;
+  generationBudget?: number | null;
+  candidateBudget?: number | null;
+  itemWorkers?: number | null;
+  maxItems?: number | null;
+};
+
 type JsonOptions = RequestInit | undefined;
 
 async function fetchJson<T>(url: string, options?: JsonOptions): Promise<T> {
@@ -35,8 +43,7 @@ export async function loadLatestRun(taskId?: string): Promise<Payload> {
 export async function startJob(
   taskId: string | null,
   model: string,
-  branchingFactor?: number | null,
-  maxItems?: number | null,
+  options: StartJobOptions = {},
 ): Promise<{ job_id: string; model: string }> {
   const params = new URLSearchParams();
   if (model) {
@@ -45,8 +52,18 @@ export async function startJob(
   if (taskId) {
     params.set("task_id", taskId);
   }
+  const { branchingFactor, generationBudget, candidateBudget, itemWorkers, maxItems } = options;
   if (typeof branchingFactor === "number" && Number.isFinite(branchingFactor)) {
     params.set("branching_factor", String(Math.max(1, Math.floor(branchingFactor))));
+  }
+  if (typeof generationBudget === "number" && Number.isFinite(generationBudget)) {
+    params.set("generation_budget", String(Math.max(1, Math.floor(generationBudget))));
+  }
+  if (typeof candidateBudget === "number" && Number.isFinite(candidateBudget)) {
+    params.set("candidate_budget", String(Math.max(1, Math.floor(candidateBudget))));
+  }
+  if (typeof itemWorkers === "number" && Number.isFinite(itemWorkers)) {
+    params.set("item_workers", String(Math.max(1, Math.floor(itemWorkers))));
   }
   if (typeof maxItems === "number" && Number.isFinite(maxItems)) {
     params.set("max_items", String(Math.max(1, Math.floor(maxItems))));

@@ -1,0 +1,184 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+DEFAULT_BRANCHING_FACTOR = 4
+DEFAULT_EDITABLE_FILE = "editable.py"
+DEFAULT_ENTRY_SYMBOL = "solve"
+DEFAULT_SOURCE_TYPE = "benchmark-task"
+VALID_BENCHMARK_TIERS = {"experiment", "comparable"}
+REQUIRED_TASK_FIELDS = (
+    "benchmark_tier",
+    "track",
+    "answer_metric",
+    "editable_file",
+    "entry_symbol",
+    "verifier",
+)
+DEFAULT_SPEEDUP_OBJECTIVE_SPEC: dict[str, str] = {
+    "display_name": "Speedup vs baseline",
+    "direction": "max",
+    "unit": "x",
+    "summary_template": "Higher speedup is better. This task maximizes runtime gain over the checked-in baseline.",
+    "formula": "speedup_vs_baseline = baseline_ms / candidate_ms",
+}
+SEED_STRATEGY_EXPERIENCES: list[dict[str, Any]] = [
+    {
+        "experience_id": "exp-correctness-first",
+        "experience_type": "strategy_experience",
+        "experience_outcome": "success",
+        "source_task": "seed",
+        "source_session_id": "seed-catalog",
+        "family": "agnostic",
+        "task_signature": ["single-file-optimization", "deterministic-eval", "correctness-first"],
+        "verifier_status": "pass",
+        "rejection_reason": "",
+        "failure_pattern": "benchmark-only selection promoted fast but incorrect candidates",
+        "strategy_hypothesis": "Run deterministic correctness gates before trusting optimization gains.",
+        "successful_strategy": "preserve the public contract first, then optimize the editable file under the verifier",
+        "prompt_fragment": "Preserve correctness first, then optimize only under the deterministic verifier contract.",
+        "tool_trace_summary": "materialize candidate file -> deterministic verifier -> score -> selective write-back",
+        "delta_J": 0.18,
+        "proposal_model": "seed",
+        "candidate_summary": "Valid candidates only enter the comparison lane.",
+        "reusable_rules": ["correctness_first", "deterministic_scoring", "single_file_mutation"],
+        "supporting_memory_ids": [],
+    },
+    {
+        "experience_id": "exp-semantics-before-shortcuts",
+        "experience_type": "strategy_experience",
+        "experience_outcome": "failure",
+        "source_task": "seed",
+        "source_session_id": "seed-catalog",
+        "family": "agnostic",
+        "task_signature": ["single-file-optimization", "deterministic-eval", "semantics-preservation"],
+        "verifier_status": "fail",
+        "rejection_reason": "A shortcut violated the contract and failed the deterministic checks.",
+        "failure_pattern": "Aggressive rewrites improved one metric while breaking task semantics.",
+        "strategy_hypothesis": "When the verifier is strict, local semantics-preserving rewrites dominate speculative shortcuts.",
+        "successful_strategy": "Keep the contract fixed and prefer rewrites that remain faithful to the benchmark spec.",
+        "prompt_fragment": "Do not trade away task semantics for a shortcut; keep the benchmark contract intact.",
+        "tool_trace_summary": "shortcut rewrite -> deterministic failure -> reject -> prefer semantics-preserving rewrite",
+        "delta_J": -0.24,
+        "proposal_model": "seed",
+        "candidate_summary": "A fast-looking rewrite that violated the verifier contract.",
+        "reusable_rules": ["preserve_semantics", "respect_verifier_contract"],
+        "supporting_memory_ids": [],
+    },
+]
+
+QUESTION_PREVIEW_LIMIT = 180
+DATASET_NETWORK_ACCESS_INSTRUCTION = "Do not use browsing, web search, HTTP requests, or any external network access."
+DATASET_SINGLE_QUESTION_INSTRUCTION = (
+    "This run evaluates exactly one dataset question. Preserve the declared entry symbol and solve this question only."
+)
+
+DEFAULT_SESSION_ID = "session-current"
+DEFAULT_MEMORY_RETRIEVAL_TOP_K = 4
+DEFAULT_FRONTIER_SIZE = 8
+WORKING_MEMORY_NAME = "codegen_working_memory.json"
+WORKING_MEMORY_MD_NAME = "codegen_working_memory.md"
+WORKING_MEMORY_TITLE = "Codegen Strategy Memory"
+ITEM_MEMORY_DIR_NAME = "item_memory"
+ITEM_MEMORY_JSON_NAME = "memory.json"
+ITEM_MEMORY_MD_NAME = "memory.md"
+FLYWHEEL_STEPS = [
+    "load strict llm config from shell env or repo-root .env",
+    "retrieve strategy memory fragments",
+    "ask the configured model for candidate function bodies",
+    "materialize candidates into an ignored workspace",
+    "run deterministic tests and benchmarks",
+    "select winners and write back reusable strategy experience",
+    "emit payload, memory ledger, trace, and llm_trace artifacts",
+]
+
+J_SCORE_WEIGHTS = {
+    "correctness": 1.20,
+    "objective_signal": 0.95,
+    "memory_bonus": 0.20,
+    "stability": 0.15,
+    "complexity": 0.18,
+    "line_count_penalty": 0.05,
+}
+LINE_COUNT_NORMALIZER = 10.0
+J_FORMULA = (
+    f"J = {J_SCORE_WEIGHTS['correctness']:.2f} * correctness + "
+    f"{J_SCORE_WEIGHTS['objective_signal']:.2f} * objective_signal + "
+    f"{J_SCORE_WEIGHTS['memory_bonus']:.2f} * memory_bonus + "
+    f"{J_SCORE_WEIGHTS['stability']:.2f} * stability - "
+    f"{J_SCORE_WEIGHTS['complexity']:.2f} * complexity - "
+    f"{J_SCORE_WEIGHTS['line_count_penalty']:.2f} * (line_count / {int(LINE_COUNT_NORMALIZER)})"
+)
+OBJECTIVE_FORMULA = "objective is task-specific; see task.objective_spec.formula"
+DELTA_FORMULA = "delta_J = J(generation_winner) - J(selected_parent)"
+RUN_DELTA_FORMULA = "run_delta_J = J(final_winner) - J(baseline)"
+PROPOSAL_J_GUIDANCE = (
+    "J is the always-max internal selection score; improve the selected parent objective first, then raise J without regressing correctness."
+)
+TRAINER_J_SPEC = {
+    "display_name": "Internal selection score J",
+    "direction": "max",
+    "summary_template": "J is the always-max internal selection score used to rank verified candidates across tasks.",
+    "formula": J_FORMULA,
+    "delta_template": "delta_J compares the generation winner against the selected parent; run_delta_J compares the final winner against the baseline.",
+}
+DISCRETE_DEMO_J_SPEC = {
+    "display_name": "Internal selection score J",
+    "direction": "max",
+    "summary_template": "J is the always-max internal score used to compare verified candidates across all tasks.",
+    "formula": J_FORMULA,
+    "delta_template": "delta_J is winner vs selected parent; run_delta_J is final winner vs baseline.",
+}
+
+TEXT_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u00a0": " ",
+    }
+)
+BOXED_PATTERN = re.compile(r"\\boxed\s*\{\s*([^{}]+)\s*\}")
+LATEX_FRAC_PATTERN = re.compile(r"\\frac\s*\{\s*([+-]?\d+)\s*\}\s*\{\s*([+-]?\d+)\s*\}")
+NUMERIC_FRAGMENT_PATTERN = re.compile(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s*/\s*[+-]?\d+)?")
+PUBLIC_QUESTION_HIDDEN_METADATA_KEYS = {
+    "answer_aliases",
+    "correct_choice_index",
+    "expected_answer",
+    "raw_expected_answer",
+}
+
+COMPLEXITY_BASE = 0.12
+COMPLEXITY_MAX = 0.95
+COMPLEXITY_LINE_DIVISOR = 28.0
+COMPLEXITY_IMPORT_COST = 0.04
+COMPLEXITY_FOR_COST = 0.03
+COMPLEXITY_WHILE_COST = 0.04
+COMPLEXITY_IF_COST = 0.02
+BENCHMARK_SAMPLE_COUNT = 3
+SPEED_SCORE_CAP = 8.0
+ERROR_CANDIDATE_J = -1.0
+FORBIDDEN_NETWORK_PATTERNS = (
+    r"(^|\n)\s*import\s+requests\b",
+    r"(^|\n)\s*from\s+requests\b",
+    r"(^|\n)\s*import\s+urllib\b",
+    r"(^|\n)\s*from\s+urllib\b",
+    r"(^|\n)\s*import\s+httpx\b",
+    r"(^|\n)\s*from\s+httpx\b",
+    r"(^|\n)\s*import\s+socket\b",
+    r"(^|\n)\s*from\s+socket\b",
+    r"(^|\n)\s*import\s+http\b",
+    r"(^|\n)\s*from\s+http\b",
+    r"(^|\n)\s*import\s+webbrowser\b",
+    r"(^|\n)\s*from\s+webbrowser\b",
+)
+
+
+def speedup_objective_spec() -> dict[str, str]:
+    return dict(DEFAULT_SPEEDUP_OBJECTIVE_SPEC)

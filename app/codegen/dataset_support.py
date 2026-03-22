@@ -5,8 +5,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-
-QUESTION_PREVIEW_LIMIT = 180
+from app.codegen.benchmark_support import canonical_text
+from app.configs.codegen import (
+    DATASET_NETWORK_ACCESS_INSTRUCTION,
+    DATASET_SINGLE_QUESTION_INSTRUCTION,
+    QUESTION_PREVIEW_LIMIT,
+)
 
 
 def is_dataset_task(task: dict[str, Any]) -> bool:
@@ -50,15 +54,24 @@ def load_question_manifest(task: dict[str, Any]) -> list[dict[str, Any]]:
         if expected is None:
             raise ValueError(f"Question manifest item {index} is missing expected_answer: {manifest_path}")
         item_id = str(raw_item.get("item_id") or raw_item.get("name") or f"item-{index}")
+        normalized_item_id = _slugify(item_id)
+        raw_context = raw_item.get("context")
+        raw_choices = list(raw_item.get("choices") or [])
         normalized.append(
             {
-                "item_id": _slugify(item_id),
+                "id": normalized_item_id,
+                "item_id": normalized_item_id,
+                "question_id": normalized_item_id,
                 "raw_item_id": item_id,
                 "name": str(raw_item.get("name") or item_id),
-                "prompt": prompt.strip(),
-                "context": raw_item.get("context"),
-                "choices": list(raw_item.get("choices") or []),
-                "expected_answer": expected,
+                "prompt": canonical_text(prompt),
+                "raw_prompt": str(prompt).strip(),
+                "context": canonical_text(raw_context) if raw_context is not None else None,
+                "raw_context": raw_context,
+                "choices": [canonical_text(choice) for choice in raw_choices],
+                "raw_choices": raw_choices,
+                "expected_answer": canonical_text(expected),
+                "raw_expected_answer": expected,
                 "metadata": dict(raw_item.get("metadata") or {}),
             }
         )
@@ -79,9 +92,9 @@ def question_prompt_context(task: dict[str, Any], item: dict[str, Any]) -> str:
     choices = item.get("choices") or []
     if choices:
         sections.append(f"Choices: {json.dumps(choices, ensure_ascii=True)}")
-    sections.append(
-        "This run evaluates exactly one dataset question. Preserve the declared entry symbol and solve this question only."
-    )
+    if not bool(task.get("allow_browsing", False)):
+        sections.append(DATASET_NETWORK_ACCESS_INSTRUCTION)
+    sections.append(DATASET_SINGLE_QUESTION_INSTRUCTION)
     return "\n".join(section for section in sections if section)
 
 

@@ -48,6 +48,9 @@ type LiveTaskCard = {
   model: string;
   branchingFactor: number;
   generationBudget: number;
+  candidateBudget: number;
+  itemWorkers: number | null;
+  maxItems: number | null;
   currentBest: string | null;
   status: "queued" | "running" | "completed";
   generations: LiveGenerationCard[];
@@ -58,28 +61,12 @@ function shortPath(path?: string | null): string {
   return path ? path.replace(/^runs\//, "") : "n/a";
 }
 
-function artifactUrl(path?: string | null): string | null {
-  if (!path) {
-    return null;
-  }
-  return `/api/artifact?path=${encodeURIComponent(path)}`;
-}
-
 function questionPreview(prompt: string | undefined | null, limit = 140): string {
   const text = String(prompt ?? "").replace(/\s+/g, " ").trim();
   if (text.length <= limit) {
     return text || "Question preview unavailable.";
   }
   return `${text.slice(0, limit - 3).trimEnd()}...`;
-}
-
-function artifactLink(label: string, path?: string | null) {
-  const href = artifactUrl(path);
-  return href ? (
-    <a className="badge" href={href} key={`${label}-${path}`} target="_blank" rel="noreferrer">
-      {label}
-    </a>
-  ) : null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -92,6 +79,47 @@ function numeric(value: string | number | undefined | null): number {
   }
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function passedCandidate(candidate: Candidate | undefined | null): boolean {
+  if (!candidate) {
+    return false;
+  }
+  const status = candidate.metrics.verifier_status ?? candidate.metrics.status;
+  if (status === "pass") {
+    return true;
+  }
+  const passedTests = numeric(candidate.metrics.passed_tests);
+  const totalTests = numeric(candidate.metrics.total_tests);
+  return totalTests > 0 && passedTests === totalTests;
+}
+
+function datasetTransitionSummary(run: Run): {
+  improved: number;
+  regressed: number;
+  unchangedPass: number;
+  unchangedFail: number;
+} {
+  const counts = {
+    improved: 0,
+    regressed: 0,
+    unchangedPass: 0,
+    unchangedFail: 0,
+  };
+  for (const itemRun of run.item_runs ?? []) {
+    const baselinePassed = passedCandidate(itemRun.baseline);
+    const winnerPassed = passedCandidate(itemRun.winner);
+    if (!baselinePassed && winnerPassed) {
+      counts.improved += 1;
+    } else if (baselinePassed && !winnerPassed) {
+      counts.regressed += 1;
+    } else if (baselinePassed && winnerPassed) {
+      counts.unchangedPass += 1;
+    } else {
+      counts.unchangedFail += 1;
+    }
+  }
+  return counts;
 }
 
 function formatValue(value: string | number | undefined | null, unit = ""): string {
@@ -123,6 +151,7 @@ function emptyRuntime(): RuntimeInfo {
     temperature: "n/a",
     max_tokens: "n/a",
     timeout_s: "n/a",
+    llm_concurrency: "n/a",
   };
 }
 
@@ -152,7 +181,6 @@ function emptyPayload(taskCatalog: TaskSummary[] = []): Payload {
       experiment_write_backs: 0,
       source_repo: "n/a",
       git_commit: "n/a",
-      upstream_target: "n/a",
       flywheel: [],
       proposal_engine: emptyRuntime(),
     },
@@ -238,7 +266,12 @@ function summarizeLiveTasks(
       model: liveJob?.model ?? completedRun?.active_model ?? "n/a",
       branchingFactor:
         liveJob?.branching_factor ?? catalogTask?.branching_factor ?? completedRun?.task.branching_factor ?? 1,
-      generationBudget: catalogTask?.generation_budget ?? completedRun?.task.generation_budget ?? 0,
+      generationBudget:
+        liveJob?.generation_budget ?? catalogTask?.generation_budget ?? completedRun?.task.generation_budget ?? 0,
+      candidateBudget:
+        liveJob?.candidate_budget ?? catalogTask?.candidate_budget ?? completedRun?.task.candidate_budget ?? 0,
+      itemWorkers: liveJob?.item_workers ?? catalogTask?.item_workers ?? completedRun?.task.item_workers ?? null,
+      maxItems: liveJob?.max_items ?? null,
       currentBest: null,
       status: "queued",
       generations: [],
@@ -619,6 +652,8 @@ function liveTaskSection(task: LiveTaskCard, isOpen: boolean, onToggle: () => vo
           <span className={`badge ${task.status === "completed" ? "good" : task.status === "running" ? "warn" : ""}`}>{task.status}</span>
           <span className="badge">{task.model}</span>
           <span className="badge">branching {task.branchingFactor}</span>
+          <span className="badge">candidates {task.candidateBudget}</span>
+          <span className="badge">item workers {task.itemWorkers ?? "n/a"}</span>
           <span className="badge">
             g{task.generations.length}/{task.generationBudget || "?"}
           </span>
@@ -626,6 +661,9 @@ function liveTaskSection(task: LiveTaskCard, isOpen: boolean, onToggle: () => vo
       </button>
       <div className="task-summary-row">
         <span className="summary-pill">{task.taskId}</span>
+        <span className="summary-pill">item workers {task.itemWorkers ?? "n/a"}</span>
+        <span className="summary-pill">candidate budget {task.candidateBudget}</span>
+        <span className="summary-pill">{task.maxItems ? `max items ${task.maxItems}` : "max items all"}</span>
         <span className="summary-pill">{task.currentBest ?? "Current best pending"}</span>
       </div>
       {isOpen ? (
@@ -745,23 +783,16 @@ function itemRunCard(itemRun: ItemRun, objectiveSpec: ObjectiveSpec) {
           {candidateCard(itemRun.baseline, objectiveSpec, "candidate")}
           {candidateCard(itemRun.winner, objectiveSpec, "winner")}
         </div>
-        <div className="badge-row">
-          {artifactLink("item summary", itemRun.artifact_paths?.summary)}
-          {artifactLink("item manifest", itemRun.artifact_paths?.manifest)}
-          {artifactLink("trace", itemRun.artifact_paths?.trace)}
-          {artifactLink("llm trace", itemRun.artifact_paths?.llm_trace_jsonl)}
-          {artifactLink("memory", itemRun.artifact_paths?.memory_markdown)}
-          {artifactLink("result", itemRun.artifact_paths?.result)}
-        </div>
       </div>
     </details>
   );
 }
 
 function runCard(run: Run, jSpec: JSpec, isOpen: boolean, onToggle: () => void) {
-  const reportSvg = artifactUrl(run.handoff_bundle?.manifest?.artifact_paths.report_svg);
   const objectiveSpec = run.task.objective_spec;
   const isDatasetRun = Array.isArray(run.item_runs) && run.item_runs.length > 0;
+  const transitions = isDatasetRun ? datasetTransitionSummary(run) : null;
+  const objectiveUnit = objectiveSpec.unit ? ` ${objectiveSpec.unit}` : "";
   return (
     <article className="task-card completed-card" key={run.task.id}>
       <button className="accordion-toggle" onClick={onToggle} type="button">
@@ -799,8 +830,9 @@ function runCard(run: Run, jSpec: JSpec, isOpen: boolean, onToggle: () => void) 
           {metricTemplate(objectiveSpec, run.j_spec ?? jSpec)}
 
           <div className="metric-grid">
-            {metric("baseline objective", formatValue(run.baseline.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : ""))}
-            {metric("winner objective", formatValue(run.winner.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : ""))}
+            {metric("baseline objective", formatValue(run.baseline.metrics.objective, objectiveUnit))}
+            {metric("winner objective", formatValue(run.winner.metrics.objective, objectiveUnit))}
+            {metric("aggregate gain", formatSigned(run.run_delta_objective ?? 0, 4) + objectiveUnit)}
             {metric("run_delta_J", formatSigned(run.run_delta_J ?? run.delta_J, 4))}
             {metric(isDatasetRun ? "questions" : "generations", isDatasetRun ? run.dataset_summary?.total_items ?? run.item_runs?.length ?? 0 : run.generations.length)}
             {metric("write-backs", run.added_experiences?.length ?? 0)}
@@ -819,8 +851,10 @@ function runCard(run: Run, jSpec: JSpec, isOpen: boolean, onToggle: () => void) 
                 {metric("dataset total questions", run.dataset_summary?.total_items ?? 0)}
                 {metric("baseline pass", run.dataset_summary?.baseline_passed ?? 0)}
                 {metric("winner pass", run.dataset_summary?.winner_passed ?? 0)}
+                {metric("fail -> pass", transitions?.improved ?? 0)}
+                {metric("pass -> fail", transitions?.regressed ?? 0)}
                 {metric("solved ratio", formatValue(run.dataset_summary?.solved_ratio))}
-                {metric("avg winner objective", formatValue(run.dataset_summary?.avg_winner_objective))}
+                {metric("avg delta_J", formatValue(run.dataset_summary?.avg_delta_J))}
                 {metric("failures", run.dataset_summary?.failure_count ?? 0)}
               </div>
               <section className="stack">
@@ -854,46 +888,20 @@ function runCard(run: Run, jSpec: JSpec, isOpen: boolean, onToggle: () => void) 
                   {memoryDeltaChart(run)}
                 </section>
               </div>
-
-              <section className="subpanel">
-                <div className="subpanel-header">
-                  <div>
-                    <p className="eyebrow">report</p>
-                    <h4>SVG summary</h4>
-                  </div>
-                </div>
-                {reportSvg ? <img className="report-figure" src={reportSvg} alt={`${run.task.id} report`} /> : deltaChart(run)}
-              </section>
             </>
           )}
 
-          <section className="subpanel">
-            <div className="subpanel-header">
-              <div>
-                <p className="eyebrow">artifacts</p>
-                <h4>{isDatasetRun ? "Dataset manifest and item artifacts" : "Manifest and memory ledger"}</h4>
+          {!isDatasetRun ? (
+            <section className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <p className="eyebrow">memory</p>
+                  <h4>Run memory ledger</h4>
+                </div>
               </div>
-            </div>
-            <div className="artifact-grid">
-              {metric("manifest", shortPath(run.handoff_bundle?.manifest_path))}
-              {metric("payload", shortPath(run.handoff_bundle?.manifest?.artifact_paths.payload))}
-              {metric("trace", shortPath(run.handoff_bundle?.manifest?.artifact_paths.trace))}
-              {metric("llm trace", shortPath(run.handoff_bundle?.manifest?.artifact_paths.llm_trace_jsonl))}
-              {metric("memory markdown", shortPath(run.handoff_bundle?.manifest?.artifact_paths.memory_markdown))}
-              {metric("baseline items", shortPath(run.handoff_bundle?.manifest?.artifact_paths.baseline_items))}
-              {metric("winner items", shortPath(run.handoff_bundle?.manifest?.artifact_paths.winner_items))}
-              {!isDatasetRun ? metric("report svg", shortPath(run.handoff_bundle?.manifest?.artifact_paths.report_svg)) : null}
-            </div>
-            {isDatasetRun ? (
-              <div className="badge-row">
-                {Object.entries(run.handoff_bundle?.manifest?.item_artifact_paths ?? {}).map(([itemId, path]) =>
-                  artifactLink(itemId, path),
-                )}
-              </div>
-            ) : (
               <pre className="code-block compact"><code>{run.memory_markdown}</code></pre>
-            )}
-          </section>
+            </section>
+          ) : null}
 
           {!isDatasetRun ? (
             <section className="stack">
@@ -916,6 +924,9 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [branchingFactorInput, setBranchingFactorInput] = useState("4");
+  const [generationBudgetInput, setGenerationBudgetInput] = useState("");
+  const [candidateBudgetInput, setCandidateBudgetInput] = useState("");
+  const [itemWorkersInput, setItemWorkersInput] = useState("");
   const [maxItemsInput, setMaxItemsInput] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [liveJob, setLiveJob] = useState<JobState | null>({
@@ -991,6 +1002,9 @@ export function App() {
         const defaultTask = tasks.find((task) => task.included_in_main_comparison) ?? tasks[0] ?? null;
         setSelectedTaskId(defaultTask?.id ?? "");
         setBranchingFactorInput(String(defaultTask?.branching_factor ?? 4));
+        setGenerationBudgetInput(String(defaultTask?.generation_budget ?? 1));
+        setCandidateBudgetInput(String(defaultTask?.candidate_budget ?? 1));
+        setItemWorkersInput(String(defaultTask?.item_workers ?? 4));
         setLiveJob({
           status: "loading",
           events: [{ phase: "boot", message: "Loading latest cached run." }],
@@ -1031,6 +1045,9 @@ export function App() {
       return;
     }
     setBranchingFactorInput(String(selectedTask.branching_factor ?? 4));
+    setGenerationBudgetInput(String(selectedTask.generation_budget ?? 1));
+    setCandidateBudgetInput(String(selectedTask.candidate_budget ?? 1));
+    setItemWorkersInput(String(selectedTask.item_workers ?? 4));
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -1078,6 +1095,15 @@ export function App() {
   async function runTask(taskId: string | null) {
     const model = selectedModel || runtimeInfo.active_model;
     const branchingFactor = Math.max(1, Math.floor(numeric(branchingFactorInput || selectedTask?.branching_factor || 4)));
+    const generationBudget = Math.max(
+      1,
+      Math.floor(numeric(generationBudgetInput || selectedTask?.generation_budget || 1)),
+    );
+    const candidateBudget = Math.max(
+      1,
+      Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1)),
+    );
+    const itemWorkers = Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 4)));
     const maxItems = maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
     pollToken.current += 1;
     const token = pollToken.current;
@@ -1087,17 +1113,29 @@ export function App() {
       taskId,
       model,
       branching_factor: branchingFactor,
+      generation_budget: generationBudget,
+      candidate_budget: candidateBudget,
+      item_workers: itemWorkers,
       max_items: maxItems,
       events: [
         {
           phase: "queued",
-          message: `Starting ${taskId ?? "full sequence"} with ${model}${maxItems ? ` (max_items=${maxItems})` : ""}.`,
+          message:
+            `Starting ${taskId ?? "full sequence"} with ${model} ` +
+            `(g=${generationBudget}, c=${candidateBudget}, branching=${branchingFactor}, item_workers=${itemWorkers}` +
+            `${maxItems ? `, max_items=${maxItems}` : ""}).`,
         },
       ],
     });
 
     try {
-      const start = await startJob(taskId, model, branchingFactor, maxItems);
+      const start = await startJob(taskId, model, {
+        branchingFactor,
+        generationBudget,
+        candidateBudget,
+        itemWorkers,
+        maxItems,
+      });
       let job = await loadJob(start.job_id);
       while (job.status === "running" && token === pollToken.current) {
         setLiveJob(job);
@@ -1136,6 +1174,9 @@ export function App() {
         taskId,
         model,
         branching_factor: Math.max(1, Math.floor(numeric(branchingFactorInput || 4))),
+        generation_budget: Math.max(1, Math.floor(numeric(generationBudgetInput || selectedTask?.generation_budget || 1))),
+        candidate_budget: Math.max(1, Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1))),
+        item_workers: Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 4))),
         events: [],
       });
     }
@@ -1219,6 +1260,32 @@ export function App() {
             <input className="control" type="number" min={1} step={1} value={branchingFactorInput} onChange={(event) => setBranchingFactorInput(event.target.value)} />
           </label>
           <label className="field">
+            <span className="field-label">Generation Budget</span>
+            <input
+              className="control"
+              type="number"
+              min={1}
+              step={1}
+              value={generationBudgetInput}
+              onChange={(event) => setGenerationBudgetInput(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">Candidate Budget</span>
+            <input
+              className="control"
+              type="number"
+              min={1}
+              step={1}
+              value={candidateBudgetInput}
+              onChange={(event) => setCandidateBudgetInput(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">Item Workers</span>
+            <input className="control" type="number" min={1} step={1} value={itemWorkersInput} onChange={(event) => setItemWorkersInput(event.target.value)} />
+          </label>
+          <label className="field">
             <span className="field-label">Max Items</span>
             <input
               className="control"
@@ -1250,8 +1317,10 @@ export function App() {
               <span className="summary-pill">{selectedTask.answer_metric}</span>
               <span className="summary-pill">{selectedTask.function_name}</span>
               <span className="summary-pill">
-                {selectedTask.generation_budget} generations × {selectedTask.candidate_budget} candidates × branching {branchingFactorInput}
+                {generationBudgetInput || selectedTask.generation_budget} generations × {candidateBudgetInput || selectedTask.candidate_budget} candidates × branching {branchingFactorInput}
               </span>
+              <span className="summary-pill">item workers {itemWorkersInput || selectedTask.item_workers}</span>
+              <span className="summary-pill">llm queue {runtimeInfo.llm_concurrency}</span>
             </div>
             <p className="muted">{selectedTask.description}</p>
             {metricTemplate(selectedTask.objective_spec, taskJSpec)}
@@ -1292,6 +1361,8 @@ export function App() {
           {metric("experiment write backs", payload.summary.experiment_write_backs)}
           {metric("temperature", runtimeInfo.temperature)}
           {metric("max tokens", runtimeInfo.max_tokens)}
+          {metric("timeout", `${runtimeInfo.timeout_s}s`)}
+          {metric("LLM Queue", runtimeInfo.llm_concurrency)}
         </div>
       </section>
 
@@ -1304,6 +1375,8 @@ export function App() {
           <div className="badge-row">
             <span className={`badge ${liveJob?.status === "completed" ? "good" : liveJob?.status === "running" ? "warn" : ""}`}>{liveJob?.status ?? "idle"}</span>
             <span className="badge">{liveJob?.model ?? selectedModel ?? "n/a"}</span>
+            <span className="badge">item workers {(liveJob?.item_workers ?? itemWorkersInput) || "n/a"}</span>
+            <span className="badge">llm queue {runtimeInfo.llm_concurrency}</span>
           </div>
         </div>
         {liveTasks.length ? (

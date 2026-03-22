@@ -23,8 +23,14 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("Generational deltas", source)
         self.assertIn("Per-question results", source)
         self.assertIn("dataset total questions", source)
-        self.assertIn("Dataset manifest and item artifacts", source)
+        self.assertIn("aggregate gain", source)
+        self.assertIn("fail -> pass", source)
+        self.assertIn("Run memory ledger", source)
         self.assertIn("Max Items", source)
+        self.assertIn("Generation Budget", source)
+        self.assertIn("Candidate Budget", source)
+        self.assertIn("Item Workers", source)
+        self.assertIn("LLM Queue", source)
 
     def test_index_loads_react_entry(self) -> None:
         source = (ROOT / "ui" / "index.html").read_text()

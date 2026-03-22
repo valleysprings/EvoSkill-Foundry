@@ -56,6 +56,7 @@ def make_runtime(responses: Sequence[object], *, model: str = "deepseek-chat") -
             temperature=0.2,
             max_tokens=1400,
             timeout_s=45,
+            llm_concurrency=20,
         ),
         transport=QueueTransport(responses),
     )

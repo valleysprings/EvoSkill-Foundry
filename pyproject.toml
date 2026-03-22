@@ -3,8 +3,11 @@ name = "autoresearch-with-experience-replay"
 version = "0.1.0"
 description = "Local-first autoresearch flywheel with deterministic experience replay."
 requires-python = ">=3.11"
+# This root package only covers the active app/* implementation.
+# Vendored projects under external/* keep their own dependency manifests.
 dependencies = [
   "matplotlib>=3.9,<4",
+  "math-verify[antlr4_13_2]>=0.9,<1",
 ]
 
 [build-system]

@@ -1,19 +1,92 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
+import time
 import textwrap
 import urllib.error
 import urllib.request
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.configs.prompts import (
+    CANDIDATE_LABEL_LIMIT,
+    PROPOSAL_CANDIDATE_COUNT_TEMPLATE,
+    PROPOSAL_CONCISE_FIELDS_INSTRUCTION,
+    CANDIDATE_RESPONSE_REQUIRED_FIELDS,
+    FAILURE_REFLECTION_OUTCOME_INSTRUCTIONS,
+    FAILURE_REFLECTION_SYSTEM_PROMPT,
+    MODEL_COMPLETION_MAX_ATTEMPTS,
+    PROPOSAL_JSON_ONLY_INSTRUCTION,
+    PROPOSAL_RESULT_INSTRUCTION,
+    PROPOSAL_SYSTEM_PROMPT,
+    RAW_PREVIEW_LIMIT,
+    REFLECTION_FIELD_LIMIT,
+    REFLECTION_FRAGMENT_INSTRUCTION,
+    REFLECTION_REQUIRED_FIELDS,
+    REQUEST_PREVIEW_LIMIT,
+    SUCCESS_REFLECTION_OUTCOME_INSTRUCTIONS,
+    SUCCESS_REFLECTION_SYSTEM_PROMPT,
+    TRIM_DEFAULT_LIMIT,
+)
+from app.configs.codegen import PROPOSAL_J_GUIDANCE
 from app.codegen.config import ROOT, RuntimeConfig, load_runtime_config
 from app.codegen.errors import LlmResponseError, LlmTransportError
 
 
 Transport = Callable[[dict[str, Any], RuntimeConfig], str]
+_TRANSPORT_GATE_LOCK = threading.Lock()
+_TRANSPORT_DISPATCHERS: dict[str, tuple[int, "_TransportDispatcher"]] = {}
+
+
+class _TransportDispatcher:
+    def __init__(self, *, max_workers: int) -> None:
+        self._queue: queue.PriorityQueue[tuple[int, int, Transport, dict[str, Any], RuntimeConfig, Future[str]]] = (
+            queue.PriorityQueue()
+        )
+        self._lock = threading.Lock()
+        self._sequence = 0
+        self._threads = [
+            threading.Thread(
+                target=self._worker,
+                name=f"autoresearch-llm-{index}",
+                daemon=True,
+            )
+            for index in range(max_workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit(
+        self,
+        *,
+        priority: int,
+        sender: Transport,
+        request_body: dict[str, Any],
+        config: RuntimeConfig,
+    ) -> Future[str]:
+        future: Future[str] = Future()
+        with self._lock:
+            sequence = self._sequence
+            self._sequence += 1
+        self._queue.put((priority, sequence, sender, request_body, config, future))
+        return future
+
+    def _worker(self) -> None:
+        while True:
+            _priority, _sequence, sender, request_body, config, future = self._queue.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(sender(request_body, config))
+                    except BaseException as exc:  # noqa: BLE001
+                        future.set_exception(exc)
+            finally:
+                self._queue.task_done()
 
 
 def _message_text(content: Any) -> str:
@@ -30,6 +103,26 @@ def _message_text(content: Any) -> str:
                     parts.append(text)
         return "\n".join(parts)
     return json.dumps(content)
+
+
+def _transport_dispatcher(config: RuntimeConfig) -> _TransportDispatcher:
+    with _TRANSPORT_GATE_LOCK:
+        dispatcher_entry = _TRANSPORT_DISPATCHERS.get(config.api_base)
+        if dispatcher_entry is None or dispatcher_entry[0] != config.llm_concurrency:
+            dispatcher_entry = (
+                config.llm_concurrency,
+                _TransportDispatcher(max_workers=config.llm_concurrency),
+            )
+            _TRANSPORT_DISPATCHERS[config.api_base] = dispatcher_entry
+        return dispatcher_entry[1]
+
+
+def _proposal_queue_priority(generation: int) -> int:
+    return max(1, generation) * 10
+
+
+def _reflection_queue_priority(generation: int) -> int:
+    return _proposal_queue_priority(generation) + 5
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -101,11 +194,126 @@ def _balanced_json_objects(text: str) -> list[str]:
     return candidates
 
 
-def _trim(value: Any, *, limit: int = 240) -> str:
+def _trim(value: Any, *, limit: int = TRIM_DEFAULT_LIMIT) -> str:
     text = str(value).strip()
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def _proposal_candidate_noun(count: int) -> str:
+    return "candidate" if count == 1 else "candidates"
+
+
+def _proposal_system_prompt(candidate_budget: int) -> str:
+    return " ".join(
+        (
+            PROPOSAL_SYSTEM_PROMPT,
+            PROPOSAL_JSON_ONLY_INSTRUCTION,
+            PROPOSAL_CANDIDATE_COUNT_TEMPLATE.format(
+                count=candidate_budget,
+                noun=_proposal_candidate_noun(candidate_budget),
+            ),
+            PROPOSAL_CONCISE_FIELDS_INSTRUCTION,
+            "file_body must contain the full contents of the editable file and must preserve the declared entry symbol.",
+        )
+    )
+
+
+def _looks_like_truncated_response(text: str, completion_tokens: Any, max_tokens: int) -> bool:
+    completion_hit_limit = isinstance(completion_tokens, int) and completion_tokens >= max_tokens
+    normalized = text.rstrip()
+    if not normalized:
+        return completion_hit_limit
+    incomplete_tail = (
+        normalized.startswith("```")
+        and not normalized.endswith("```")
+        or normalized.count("{") > normalized.count("}")
+        or normalized.count("[") > normalized.count("]")
+        or normalized.endswith("\\")
+    )
+    return completion_hit_limit or incomplete_tail
+
+
+def _parse_failure_error(
+    *,
+    purpose: str,
+    runtime: "ProposalRuntime",
+    messages: list[dict[str, str]],
+    usage: dict[str, Any],
+    text: str,
+    attempt: int,
+    fallback_message: str,
+) -> LlmResponseError:
+    completion_tokens = usage.get("completion_tokens")
+    response_truncated = _looks_like_truncated_response(text, completion_tokens, runtime.config.max_tokens)
+    details = {
+        "purpose": purpose,
+        "selected_model": runtime.active_model,
+        "parse_status": "truncated" if response_truncated else "invalid_json",
+        "api_base": runtime.config.api_base,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": completion_tokens,
+        "max_tokens": runtime.config.max_tokens,
+        "request_preview": _request_preview(messages),
+        "raw_preview": _trim(text, limit=RAW_PREVIEW_LIMIT),
+        "attempt": attempt,
+        "response_truncated": response_truncated,
+    }
+    if response_truncated:
+        message = (
+            "Model response appears truncated before completing a valid JSON object "
+            f"(completion_tokens={completion_tokens}, max_tokens={runtime.config.max_tokens})."
+        )
+    else:
+        message = fallback_message
+    return LlmResponseError(message, model=runtime.active_model, details=details)
+
+
+def _transport_failure_error(
+    *,
+    purpose: str,
+    runtime: "ProposalRuntime",
+    messages: list[dict[str, str]],
+    attempt: int,
+    exc: Exception,
+) -> LlmTransportError:
+    details = {
+        "purpose": purpose,
+        "selected_model": runtime.active_model,
+        "parse_status": "transport_error",
+        "api_base": runtime.config.api_base,
+        "request_preview": _request_preview(messages),
+        "attempt": attempt,
+        "max_attempts": MODEL_COMPLETION_MAX_ATTEMPTS,
+    }
+    if isinstance(exc, LlmTransportError) and exc.details is not None:
+        details.update(exc.details)
+    return LlmTransportError(str(exc), model=runtime.active_model, details=details)
+
+
+def _response_envelope_error(
+    *,
+    purpose: str,
+    runtime: "ProposalRuntime",
+    messages: list[dict[str, str]],
+    raw_response: str,
+    attempt: int,
+    message: str,
+) -> LlmResponseError:
+    return LlmResponseError(
+        message,
+        model=runtime.active_model,
+        details={
+            "purpose": purpose,
+            "selected_model": runtime.active_model,
+            "parse_status": "invalid_http_json",
+            "api_base": runtime.config.api_base,
+            "request_preview": _request_preview(messages),
+            "raw_preview": _trim(raw_response, limit=RAW_PREVIEW_LIMIT),
+            "attempt": attempt,
+        },
+    )
 
 
 def _normalize_imports(raw_imports: Any) -> list[str]:
@@ -133,8 +341,9 @@ def _normalize_candidate_payload(payload: dict[str, Any], task: dict[str, Any], 
     for index, item in enumerate(candidates[:max_candidates], start=1):
         if not isinstance(item, dict):
             raise LlmResponseError("Each candidate must be an object.", model=trace.get("selected_model"))
-        required_keys = ("name", "strategy", "rationale", "file_body", "candidate_summary")
-        missing = [key for key in required_keys if not isinstance(item.get(key), str) or not item.get(key).strip()]
+        missing = [
+            key for key in CANDIDATE_RESPONSE_REQUIRED_FIELDS if not isinstance(item.get(key), str) or not item.get(key).strip()
+        ]
         if missing:
             raise LlmResponseError(
                 f"Candidate {index} is missing required string fields: {', '.join(missing)}.",
@@ -146,7 +355,7 @@ def _normalize_candidate_payload(payload: dict[str, Any], task: dict[str, Any], 
         normalized.append(
             {
                 "agent": f"candidate-{index}",
-                "label": _trim(item["name"], limit=72),
+                "label": _trim(item["name"], limit=CANDIDATE_LABEL_LIMIT),
                 "strategy": _trim(item["strategy"]),
                 "rationale": _trim(item["rationale"]),
                 "imports": _normalize_imports(item.get("imports")),
@@ -162,13 +371,12 @@ def _normalize_candidate_payload(payload: dict[str, Any], task: dict[str, Any], 
 
 
 def _normalize_reflection_payload(payload: dict[str, Any], trace: dict[str, Any]) -> dict[str, str]:
-    required = ("failure_pattern", "strategy_hypothesis", "successful_strategy", "prompt_fragment", "tool_trace_summary")
     normalized: dict[str, str] = {}
-    for field in required:
+    for field in REFLECTION_REQUIRED_FIELDS:
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
             raise LlmResponseError(f"Reflection response is missing required field {field}.", model=trace.get("selected_model"))
-        normalized[field] = _trim(value, limit=320)
+        normalized[field] = _trim(value, limit=REFLECTION_FIELD_LIMIT)
     return normalized
 
 
@@ -176,7 +384,7 @@ def _request_preview(messages: list[dict[str, str]]) -> str:
     user_messages = [message["content"] for message in messages if message["role"] == "user"]
     if not user_messages:
         return ""
-    return _trim(user_messages[-1], limit=280)
+    return _trim(user_messages[-1], limit=REQUEST_PREVIEW_LIMIT)
 
 
 def _default_transport(request_body: dict[str, Any], config: RuntimeConfig) -> str:
@@ -221,7 +429,14 @@ class ProposalRuntime:
     def describe(self) -> dict[str, object]:
         return self.config.describe()
 
-    def complete_json(self, *, purpose: str, system_prompt: str, user_prompt: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    def complete_json(
+        self,
+        *,
+        purpose: str,
+        system_prompt: str,
+        user_prompt: str,
+        queue_priority: int = 1000,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -234,34 +449,98 @@ class ProposalRuntime:
         }
         sender = self.transport or _default_transport
         last_parse_error: LlmResponseError | None = None
-        for attempt in range(1, 4):
+        last_transport_error: LlmTransportError | None = None
+        for attempt in range(1, MODEL_COMPLETION_MAX_ATTEMPTS + 1):
             try:
-                raw_response = sender(request_body, self.config)
-            except LlmTransportError:
-                raise
+                raw_response = _transport_dispatcher(self.config).submit(
+                    priority=queue_priority,
+                    sender=sender,
+                    request_body=request_body,
+                    config=self.config,
+                ).result()
+            except LlmTransportError as exc:
+                last_transport_error = _transport_failure_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    attempt=attempt,
+                    exc=exc,
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+                    raise last_transport_error from exc
+                time.sleep(min(2**(attempt - 1), 5))
+                continue
             except TimeoutError as exc:
-                raise LlmTransportError("Model request timed out.", model=self.active_model) from exc
+                last_transport_error = _transport_failure_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    attempt=attempt,
+                    exc=LlmTransportError("Model request timed out.", model=self.active_model),
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+                    raise last_transport_error from exc
+                time.sleep(min(2**(attempt - 1), 5))
+                continue
             except urllib.error.URLError as exc:
-                raise LlmTransportError(f"Model request failed: {exc.reason}", model=self.active_model) from exc
+                last_transport_error = _transport_failure_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    attempt=attempt,
+                    exc=LlmTransportError(f"Model request failed: {exc.reason}", model=self.active_model),
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+                    raise last_transport_error from exc
+                time.sleep(min(2**(attempt - 1), 5))
+                continue
             try:
                 parsed_response = json.loads(raw_response)
             except json.JSONDecodeError as exc:
-                raise LlmResponseError("Model HTTP response was not valid JSON.", model=self.active_model) from exc
+                last_parse_error = _response_envelope_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    raw_response=raw_response,
+                    attempt=attempt,
+                    message="Model HTTP response was not valid JSON.",
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+                    raise last_parse_error from exc
+                continue
 
             try:
                 message = parsed_response["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError) as exc:
-                raise LlmResponseError("Model response did not contain choices[0].message.content.", model=self.active_model) from exc
+                last_parse_error = _response_envelope_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    raw_response=raw_response,
+                    attempt=attempt,
+                    message="Model response did not contain choices[0].message.content.",
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+                    raise last_parse_error from exc
+                continue
 
             text = _message_text(message)
+            usage = parsed_response.get("usage", {})
             try:
                 payload = _extract_json_object(text)
             except LlmResponseError as exc:
-                last_parse_error = LlmResponseError(str(exc), model=self.active_model)
-                if attempt >= 3:
+                last_parse_error = _parse_failure_error(
+                    purpose=purpose,
+                    runtime=self,
+                    messages=messages,
+                    usage=usage,
+                    text=text,
+                    attempt=attempt,
+                    fallback_message=str(exc),
+                )
+                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_parse_error from exc
                 continue
-            usage = parsed_response.get("usage", {})
             trace = {
                 "purpose": purpose,
                 "selected_model": self.active_model,
@@ -269,11 +548,14 @@ class ProposalRuntime:
                 "api_base": self.config.api_base,
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
+                "max_tokens": self.config.max_tokens,
                 "request_preview": _request_preview(messages),
-                "raw_preview": _trim(text, limit=280),
+                "raw_preview": _trim(text, limit=RAW_PREVIEW_LIMIT),
                 "attempt": attempt,
             }
             return payload, trace
+        if last_transport_error is not None:
+            raise last_transport_error
         if last_parse_error is not None:
             raise last_parse_error
         raise LlmResponseError("Model response did not contain a valid JSON object.", model=self.active_model)
@@ -326,13 +608,7 @@ def _proposal_prompt(
         )
         for item in candidate_history[-6:]
     ]
-    system_prompt = (
-        "You are the only proposal model in a strict outer-loop single-file Python optimization system. "
-        "Return strict JSON with shape "
-        '{"candidates":[{"name":"short label","strategy":"one sentence","rationale":"why it should win",'
-        '"file_body":"full editable file contents","candidate_summary":"brief code summary"}]}. '
-        "Return between 1 and 3 candidates. file_body must contain the full contents of the editable file and must preserve the declared entry symbol."
-    )
+    system_prompt = _proposal_system_prompt(max(1, int(task["candidate_budget"])))
     user_prompt = (
         f"Task id: {task['id']}\n"
         f"Title: {task['title']}\n"
@@ -346,7 +622,7 @@ def _proposal_prompt(
         f"Objective direction: {objective_direction}\n"
         f"Objective formula: {objective_formula}\n"
         f"Objective summary: {objective_summary}\n"
-        "J is the always-max internal selection score; improve the selected parent objective first, then raise J without regressing correctness.\n"
+        f"{PROPOSAL_J_GUIDANCE}\n"
         f"Prompt context: {task.get('prompt_context') or 'n/a'}\n"
         f"Generation: {generation}\n"
         f"Selected parent summary: {parent_candidate['candidate_summary']}\n"
@@ -367,7 +643,7 @@ def _proposal_prompt(
         + ("\n".join(memory_lines) if memory_lines else "- none")
         + "\nPrevious candidate summaries:\n"
         + ("\n".join(history_lines) if history_lines else "- none")
-        + "\nReturn full editable-file rewrites that preserve the public contract, improve the selected parent, and avoid repeating recent no-op rewrites."
+        + f"\n{PROPOSAL_RESULT_INSTRUCTION}"
     )
     return system_prompt, user_prompt
 
@@ -394,6 +670,7 @@ def propose_code_candidates(
         purpose="generation_proposals",
         system_prompt=system_prompt,
         user_prompt=user_prompt,
+        queue_priority=_proposal_queue_priority(generation),
     )
     candidates = _normalize_candidate_payload(payload, task, trace)
     trace["candidate_count"] = len(candidates)
@@ -412,20 +689,11 @@ def reflect_strategy_experience(
     rejection_reason: str | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     if outcome == "success":
-        system_prompt = (
-            "You compress successful Python code mutations into reusable strategy memory. "
-            "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary."
-        )
-        outcome_instructions = "Write the prompt_fragment as a reusable success hint for the next proposal prompt."
+        system_prompt = SUCCESS_REFLECTION_SYSTEM_PROMPT
+        outcome_instructions = SUCCESS_REFLECTION_OUTCOME_INSTRUCTIONS
     else:
-        system_prompt = (
-            "You compress failed or rejected Python code mutations into reusable avoidance memory. "
-            "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary. "
-            "successful_strategy must describe the corrective strategy to prefer next time, not the failed attempt."
-        )
-        outcome_instructions = (
-            "Write the prompt_fragment as a concise warning plus corrective strategy that the next proposal prompt can reuse."
-        )
+        system_prompt = FAILURE_REFLECTION_SYSTEM_PROMPT
+        outcome_instructions = FAILURE_REFLECTION_OUTCOME_INSTRUCTIONS
     failed_tests = [result["name"] for result in winner["metrics"].get("test_results", []) if not result.get("passed")]
     user_prompt = (
         f"Task id: {task['id']}\n"
@@ -444,11 +712,12 @@ def reflect_strategy_experience(
         f"Rejection reason: {rejection_reason or 'n/a'}\n"
         f"delta_J: {delta_j}\n"
         f"{outcome_instructions}\n"
-        "Write a compact strategy fragment that can be pasted into the next proposal prompt."
+        f"{REFLECTION_FRAGMENT_INSTRUCTION}"
     )
     payload, trace = runtime.complete_json(
         purpose="memory_reflection",
         system_prompt=system_prompt,
         user_prompt=user_prompt,
+        queue_priority=_reflection_queue_priority(generation),
     )
     return _normalize_reflection_payload(payload, trace), trace

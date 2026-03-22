@@ -4,30 +4,25 @@ import json
 from pathlib import Path
 from typing import Any
 
-
-ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_ROOT = ROOT / "benchmark"
-REGISTRY_PATH = BENCHMARK_ROOT / "registry.json"
-DEFAULT_BRANCHING_FACTOR = 4
-VALID_BENCHMARK_TIERS = {"experiment", "comparable"}
-REQUIRED_TASK_FIELDS = (
-    "benchmark_tier",
-    "track",
-    "answer_metric",
-    "editable_file",
-    "entry_symbol",
-    "verifier",
+from app.configs.codegen import (
+    DEFAULT_BRANCHING_FACTOR,
+    DEFAULT_EDITABLE_FILE,
+    DEFAULT_ENTRY_SYMBOL,
+    DEFAULT_SOURCE_TYPE,
+    REQUIRED_TASK_FIELDS,
+    SEED_STRATEGY_EXPERIENCES,
+    VALID_BENCHMARK_TIERS,
+    speedup_objective_spec,
 )
+from app.configs.paths import BENCHMARK_ROOT as CONFIG_BENCHMARK_ROOT
+from app.configs.paths import REGISTRY_PATH as CONFIG_REGISTRY_PATH
+
+BENCHMARK_ROOT = CONFIG_BENCHMARK_ROOT
+REGISTRY_PATH = CONFIG_REGISTRY_PATH
 
 
 def _speedup_objective_spec() -> dict[str, str]:
-    return {
-        "display_name": "Speedup vs baseline",
-        "direction": "max",
-        "unit": "x",
-        "summary_template": "Higher speedup is better. This task maximizes runtime gain over the checked-in baseline.",
-        "formula": "speedup_vs_baseline = baseline_ms / candidate_ms",
-    }
+    return speedup_objective_spec()
 
 
 def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -55,18 +50,19 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["answer_metric"] = str(normalized["answer_metric"]).strip()
     normalized["dataset_id"] = str(normalized.get("dataset_id") or normalized["id"])
     normalized["dataset_size"] = int(normalized.get("dataset_size") or 0)
-    normalized["entry_symbol"] = str(normalized.get("entry_symbol") or normalized.get("function_name") or "solve")
+    normalized["entry_symbol"] = str(normalized.get("entry_symbol") or normalized.get("function_name") or DEFAULT_ENTRY_SYMBOL)
     normalized["function_name"] = str(normalized.get("function_name") or normalized["entry_symbol"])
-    normalized["editable_file"] = str(normalized.get("editable_file") or "editable.py")
+    normalized["editable_file"] = str(normalized.get("editable_file") or DEFAULT_EDITABLE_FILE)
     normalized["editable_filename"] = Path(normalized["editable_file"]).name
     normalized["included_in_main_comparison"] = normalized["benchmark_tier"] == "comparable"
-    normalized["source_type"] = str(normalized.get("source_type") or "benchmark-task")
+    normalized["source_type"] = str(normalized.get("source_type") or DEFAULT_SOURCE_TYPE)
     normalized["local_dataset_only"] = bool(normalized.get("local_dataset_only"))
     split = normalized.get("split")
     normalized["split"] = str(split).strip() if isinstance(split, str) and split.strip() else None
     item_manifest = normalized.get("item_manifest")
     normalized["item_manifest"] = str(item_manifest).strip() if isinstance(item_manifest, str) and item_manifest.strip() else None
     normalized["prompt_context"] = str(normalized.get("prompt_context") or "")
+    normalized["allow_browsing"] = bool(normalized.get("allow_browsing", False))
     normalized["verifier_path"] = str(normalized["verifier_path"])
     normalized["editable_path"] = str(normalized["editable_path"])
     if normalized["local_dataset_only"]:
@@ -130,53 +126,6 @@ def _load_task(entry: dict[str, Any]) -> dict[str, Any]:
 def _sort_key(task: dict[str, Any]) -> tuple[int, str, str]:
     return (0 if task["included_in_main_comparison"] else 1, task["track"], task["id"])
 
-
-SEED_STRATEGY_EXPERIENCES: list[dict[str, Any]] = [
-    {
-        "experience_id": "exp-correctness-first",
-        "experience_type": "strategy_experience",
-        "experience_outcome": "success",
-        "source_task": "seed",
-        "source_session_id": "seed-catalog",
-        "family": "agnostic",
-        "task_signature": ["single-file-optimization", "deterministic-eval", "correctness-first"],
-        "verifier_status": "pass",
-        "rejection_reason": "",
-        "failure_pattern": "benchmark-only selection promoted fast but incorrect candidates",
-        "strategy_hypothesis": "Run deterministic correctness gates before trusting optimization gains.",
-        "successful_strategy": "preserve the public contract first, then optimize the editable file under the verifier",
-        "prompt_fragment": "Preserve correctness first, then optimize only under the deterministic verifier contract.",
-        "tool_trace_summary": "materialize candidate file -> deterministic verifier -> score -> selective write-back",
-        "delta_J": 0.18,
-        "proposal_model": "seed",
-        "candidate_summary": "Valid candidates only enter the comparison lane.",
-        "reusable_rules": ["correctness_first", "deterministic_scoring", "single_file_mutation"],
-        "supporting_memory_ids": [],
-    },
-    {
-        "experience_id": "exp-semantics-before-shortcuts",
-        "experience_type": "strategy_experience",
-        "experience_outcome": "failure",
-        "source_task": "seed",
-        "source_session_id": "seed-catalog",
-        "family": "agnostic",
-        "task_signature": ["single-file-optimization", "deterministic-eval", "semantics-preservation"],
-        "verifier_status": "fail",
-        "rejection_reason": "A shortcut violated the contract and failed the deterministic checks.",
-        "failure_pattern": "Aggressive rewrites improved one metric while breaking task semantics.",
-        "strategy_hypothesis": "When the verifier is strict, local semantics-preserving rewrites dominate speculative shortcuts.",
-        "successful_strategy": "Keep the contract fixed and prefer rewrites that remain faithful to the benchmark spec.",
-        "prompt_fragment": "Do not trade away task semantics for a shortcut; keep the benchmark contract intact.",
-        "tool_trace_summary": "shortcut rewrite -> deterministic failure -> reject -> prefer semantics-preserving rewrite",
-        "delta_J": -0.24,
-        "proposal_model": "seed",
-        "candidate_summary": "A fast-looking rewrite that violated the verifier contract.",
-        "reusable_rules": ["preserve_semantics", "respect_verifier_contract"],
-        "supporting_memory_ids": [],
-    },
-]
-
-
 def load_codegen_tasks(
     task_id: str | None = None,
     *,
@@ -214,6 +163,7 @@ def list_codegen_task_summaries() -> list[dict[str, Any]]:
             "generation_budget": task["generation_budget"],
             "candidate_budget": task["candidate_budget"],
             "branching_factor": task["branching_factor"],
+            "item_workers": int(task.get("item_workers") or 4),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
             "dataset_id": task["dataset_id"],

@@ -44,8 +44,8 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertFalse(contains_duplicates["included_in_main_comparison"])
 
         self.assertTrue(olymmath["local_dataset_only"])
-        self.assertEqual(olymmath["dataset_size"], 4)
-        self.assertEqual(olymmath["split"], "numeric_verified_seed")
+        self.assertEqual(olymmath["dataset_size"], 100)
+        self.assertEqual(olymmath["split"], "en-hard:test")
         self.assertEqual(sciq["track"], "science_verified")
         self.assertEqual(sciq["split"], "validation")
 

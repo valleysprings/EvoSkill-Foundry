@@ -5,17 +5,21 @@ class AutoresearchError(RuntimeError):
     error_type = "runtime_error"
     terminal = True
 
-    def __init__(self, message: str, *, model: str | None = None):
+    def __init__(self, message: str, *, model: str | None = None, details: dict[str, object] | None = None):
         super().__init__(message)
         self.model = model
+        self.details = dict(details) if details is not None else None
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "terminal": True,
             "error_type": self.error_type,
             "error": str(self),
             "model": self.model,
         }
+        if self.details is not None:
+            payload["details"] = self.details
+        return payload
 
 
 class ConfigError(AutoresearchError):

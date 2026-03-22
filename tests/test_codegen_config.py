@@ -31,6 +31,7 @@ class CodegenConfigTest(unittest.TestCase):
             self.assertEqual(config.primary_model, "deepseek-chat")
             self.assertEqual(config.available_models, ("deepseek-chat",))
             self.assertEqual(config.max_tokens, 1400)
+            self.assertEqual(config.llm_concurrency, 20)
 
     def test_shell_env_overrides_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
@@ -108,6 +109,25 @@ class CodegenConfigTest(unittest.TestCase):
             )
             with self.assertRaises(ConfigError):
                 load_runtime_config(Path(tmp_dir))
+
+    def test_llm_concurrency_env_is_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
+            env_path = Path(tmp_dir) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "AUTORESEARCH_API_KEY=test-key",
+                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
+                        "AUTORESEARCH_PRIMARY_MODEL=deepseek-chat",
+                        "AUTORESEARCH_TEMPERATURE=0.2",
+                        "AUTORESEARCH_MAX_TOKENS=1400",
+                        "AUTORESEARCH_TIMEOUT_S=45",
+                        "AUTORESEARCH_LLM_CONCURRENCY=7",
+                    ]
+                )
+            )
+            config = load_runtime_config(Path(tmp_dir))
+            self.assertEqual(config.llm_concurrency, 7)
 
 
 if __name__ == "__main__":

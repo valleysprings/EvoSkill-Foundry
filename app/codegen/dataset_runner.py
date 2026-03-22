@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.codegen.catalog import seed_strategy_experiences
+from app.configs.codegen import ITEM_MEMORY_JSON_NAME, ITEM_MEMORY_MD_NAME
 from app.codegen.dataset_support import (
     aggregate_candidate,
     aggregate_dataset_metrics,
@@ -23,8 +24,8 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 def _memory_store_for_item(memory_root: Path, dataset_task_id: str, item_id: str) -> MemoryStore:
     item_dir = memory_root / dataset_task_id / item_id
     return MemoryStore(
-        item_dir / "memory.json",
-        markdown_path=item_dir / "memory.md",
+        item_dir / ITEM_MEMORY_JSON_NAME,
+        markdown_path=item_dir / ITEM_MEMORY_MD_NAME,
         title=f"{dataset_task_id}:{item_id} Strategy Memory",
     )
 
@@ -92,12 +93,18 @@ def _run_item(
     result["item_id"] = item["item_id"]
     result["item_name"] = item.get("name") or item["item_id"]
     result["question"] = {
+        "id": item["item_id"],
         "item_id": item["item_id"],
+        "question_id": item["item_id"],
         "name": item.get("name") or item["item_id"],
         "prompt": item["prompt"],
+        "raw_prompt": item.get("raw_prompt"),
         "context": item.get("context"),
+        "raw_context": item.get("raw_context"),
         "choices": list(item.get("choices") or []),
+        "raw_choices": list(item.get("raw_choices") or []),
         "expected_answer": item.get("expected_answer"),
+        "raw_expected_answer": item.get("raw_expected_answer"),
         "metadata": dict(item.get("metadata") or {}),
     }
     return result
@@ -200,6 +207,7 @@ def run_dataset_task(
             "generation_budget": task["generation_budget"],
             "candidate_budget": task["candidate_budget"],
             "branching_factor": task["branching_factor"],
+            "item_workers": configured_workers,
             "source_type": task["source_type"],
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
