@@ -1,16 +1,14 @@
 # autoresearch-foundry
 
-## Motivation
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.13-blue)
+![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61dafb)
 
-This repo is a workbench for one question: can an LLM keep improving Python solutions when generation stays inside the model, but checking and selection stay outside it?
+### Overview Panel
 
-The project is intentionally strict about that boundary. The model is not an optional helper, and the verifier is not allowed to drift into another opaque model call. Every run depends on a configured LLM, every candidate is materialized locally, and every comparison is decided by deterministic tests or benchmarks.
+![Autoresearch panel](fig/panel.png)
 
-That constraint matters because the useful artifact is not just the latest answer. It is the trail of strategies, failures, and write-backs that can be reused in the next run. The goal is to make iterative code research inspectable instead of magical.
-
-This repo was built with substantial help from OpenAI Codex for scaffolding, debugging, refactors, verification, and documentation cleanup. It deliberately was not built with Claude in this iteration because the cost profile and usage limits were a worse fit for repeated local agent loops.
-
-## Theme
+## Intro
 
 This repo is a small autoresearch workbench around one idea:
 
@@ -19,11 +17,9 @@ This repo is a small autoresearch workbench around one idea:
 - memory stores reusable success and failure experience
 - every successful run emits handoff-ready artifacts
 
-The current implementation is intentionally biased toward pure-function, deterministic tasks because that keeps correctness, benchmarking, and experience replay legible.
+The current implementation is intentionally biased toward pure-function, deterministic tasks because that keeps correctness, benchmarking, and experience replay legible. This repo was built with substantial help from OpenAI Codex for scaffolding, debugging, refactors, verification, and documentation cleanup.
 
 The benchmark source of truth lives under [benchmark/](benchmark/).
-
-The active research lane is dataset-first:
 
 - each comparable benchmark task is a real local dataset such as `olymmath`, `math-500`, `aime-2024`, `aime-2025`, `aime-2026`, `planbench`, `sciq`, `qasc`, or `scienceqa`
 - coding is now represented by `livecodebench`, wired as a lazy local cache over the full `release_v6` coding set
@@ -68,16 +64,6 @@ Required keys:
 - `AUTORESEARCH_API_KEY`
 - `AUTORESEARCH_API_BASE`
 
-Optional:
-
-- `AUTORESEARCH_PRIMARY_MODEL`
-- `AUTORESEARCH_AVAILABLE_MODELS`
-  temporary shell overrides; the committed defaults live in [app/configs/runtime.py](app/configs/runtime.py)
-- `AUTORESEARCH_TEMPERATURE`
-- `AUTORESEARCH_MAX_TOKENS`
-- `AUTORESEARCH_TIMEOUT_S`
-  temporary shell overrides; the committed defaults live in [app/configs/runtime.py](app/configs/runtime.py)
-
 See [.env.example](.env.example).
 
 ## Benchmarks
@@ -107,6 +93,10 @@ There are two user-facing ways to run the same backend:
 The shared task runner lives in [app/entries/runner.py](app/entries/runner.py).
 
 The internal [app/entries/](app/entries/) package just means process entrypoints. It is not the recommended user-facing module path anymore.
+
+### Live Execution View
+
+![Live execution view](fig/live%20execution.png)
 
 ## API And Artifacts
 
