@@ -50,8 +50,7 @@ class BenchmarkComparisonTest(unittest.TestCase):
             {
                 "math_verified",
                 "reasoning_verified",
-                "planning_verified",
-                "deepsearch_verified",
+                "longcontext_verified",
                 "science_verified",
                 "coding_verified",
             },

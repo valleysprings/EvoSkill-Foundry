@@ -7,7 +7,7 @@
   "dataset_id": "planbench_task1_plan_generation",
   "dataset_size": 2270,
   "local_dataset_only": true,
-  "item_manifest": "../../planning_verified/planbench/data/questions.json",
+  "item_manifest": "data/questions.json",
   "split": "task_1_plan_generation:train",
   "allow_browsing": false,
   "answer_metric": "exact_plan_match_rate",

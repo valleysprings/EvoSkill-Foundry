@@ -33,8 +33,7 @@ class CodegenCatalogTest(unittest.TestCase):
             {
                 "math_verified",
                 "reasoning_verified",
-                "planning_verified",
-                "deepsearch_verified",
+                "longcontext_verified",
                 "science_verified",
                 "coding_verified",
             },
@@ -84,7 +83,7 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertEqual(aime_2026["split"], "test")
         self.assertTrue(planbench["local_dataset_only"])
         self.assertEqual(planbench["dataset_size"], 2270)
-        self.assertEqual(planbench["track"], "planning_verified")
+        self.assertEqual(planbench["track"], "reasoning_verified")
         self.assertTrue(planbench["included_in_main_comparison"])
         self.assertEqual(planbench["split"], "task_1_plan_generation:train")
         self.assertEqual(planbench["selection_spec"]["profile"], "plan_length")
@@ -92,7 +91,7 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertEqual(arc_challenge["track"], "reasoning_verified")
         self.assertEqual(arc_challenge["split"], "validation:ARC-Challenge")
         self.assertEqual(longbench["dataset_size"], 503)
-        self.assertEqual(longbench["track"], "deepsearch_verified")
+        self.assertEqual(longbench["track"], "longcontext_verified")
         self.assertEqual(longbench["split"], "train")
         self.assertTrue(longbench["included_in_main_comparison"])
         self.assertEqual(sciq["dataset_size"], 1000)

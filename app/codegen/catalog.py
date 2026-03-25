@@ -25,15 +25,12 @@ REGISTRY_PATH = CONFIG_REGISTRY_PATH
 TRACK_ORDER = {
     "math_verified": 0,
     "reasoning_verified": 1,
-    "planning_verified": 1,
     "longcontext_verified": 2,
-    "deepsearch_verified": 2,
     "browse_snapshot": 3,
     "science_verified": 4,
-    "terminal_verified": 5,
-    "agent_verified": 6,
-    "coding_verified": 7,
-    "or_verified": 8,
+    "agent_verified": 5,
+    "coding_verified": 6,
+    "or_verified": 7,
 }
 TASK_ORDER = {
     "olymmath": 0,
@@ -57,18 +54,8 @@ TASK_ORDER = {
     "co-bench": 18,
 }
 
-TRACK_ALIASES = {
-    ("planbench", "reasoning_verified"): "planning_verified",
-    ("longbench-v2", "longcontext_verified"): "deepsearch_verified",
-}
-
-
 def _speedup_objective_spec() -> dict[str, str]:
     return speedup_objective_spec()
-
-
-def _canonical_track(task_id: str, track: str) -> str:
-    return TRACK_ALIASES.get((task_id, track), track)
 
 
 def _count_manifest_items(path: Path) -> int:
@@ -100,10 +87,7 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["objective_direction"] = normalized.get("objective_direction") or objective_spec["direction"]
     normalized["branching_factor"] = int(normalized.get("branching_factor", DEFAULT_BRANCHING_FACTOR))
     normalized["benchmark_tier"] = benchmark_tier
-    normalized["track"] = _canonical_track(
-        str(normalized.get("id") or "").strip(),
-        str(normalized["track"]).strip(),
-    )
+    normalized["track"] = str(normalized["track"]).strip()
     normalized["answer_metric"] = str(normalized["answer_metric"]).strip()
     normalized["dataset_id"] = str(normalized.get("dataset_id") or normalized["id"])
     normalized["dataset_size"] = int(normalized.get("dataset_size") or 0)
@@ -245,11 +229,8 @@ def _load_task(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(task, dict):
         raise ValueError(f"Task spec must be a JSON object: {task_path}")
     track_from_path = Path(relative_path).parts[0]
-    task_id = str(task.get("id") or "").strip()
     declared_track = str(task.get("track") or "").strip()
-    canonical_path_track = _canonical_track(task_id, track_from_path)
-    canonical_declared_track = _canonical_track(task_id, declared_track)
-    if declared_track and canonical_declared_track != canonical_path_track:
+    if declared_track and declared_track != track_from_path:
         raise ValueError(
             f"Task {task.get('id') or '<unknown>'} declares track={declared_track!r} "
             f"but registry path lives under {track_from_path!r}."

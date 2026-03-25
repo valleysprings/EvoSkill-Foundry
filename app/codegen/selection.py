@@ -18,7 +18,6 @@ PROPOSAL_SELECTION_GUIDANCE = (
 
 LINE_COUNT_NORMALIZER = 10.0
 PLAN_STEP_NORMALIZER = 20.0
-COMMAND_COUNT_NORMALIZER = 20.0
 
 
 def _gate_rule(metric: str, op: str, threshold: object, *, label: str | None = None) -> dict[str, Any]:
@@ -76,23 +75,6 @@ SELECTION_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "archive_features": ["complexity", "line_count"],
     },
-    "terminal_commands": {
-        "summary_template": (
-            "Candidates must satisfy the verifier gate. Primary selection uses task success first; "
-            "fewer generated commands only break ties among equally successful candidates."
-        ),
-        "gate": [_gate_rule("verifier_status", "==", "pass", label="verified pass")],
-        "tie_break_metrics": [
-            _tie_break_metric(
-                "avg_command_count",
-                direction="min",
-                weight=1.0,
-                normalizer=COMMAND_COUNT_NORMALIZER,
-                label=f"avg_command_count / {int(COMMAND_COUNT_NORMALIZER)}",
-            )
-        ],
-        "archive_features": ["avg_command_count"],
-    },
     "plan_length": {
         "summary_template": (
             "Candidates must satisfy the verifier gate. Primary selection uses solved ratio first; "
@@ -115,13 +97,8 @@ SELECTION_PROFILES: dict[str, dict[str, Any]] = {
 
 def _default_profile_name(task: dict[str, Any]) -> str:
     answer_metric = str(task.get("answer_metric") or "").strip().lower()
-    track = str(task.get("track") or "").strip().lower()
     if answer_metric == "speedup_vs_baseline":
         return "optimization"
-    if track == "planning_verified":
-        return "plan_length"
-    if track == "terminal_verified":
-        return "terminal_commands"
     return "objective_only"
 
 

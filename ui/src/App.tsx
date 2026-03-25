@@ -535,31 +535,18 @@ function benchmarkTierLabel(includedInMainComparison: boolean): string {
   return includedInMainComparison ? "benchmark task" : "auxiliary task";
 }
 
-function canonicalTrack(taskId: string | undefined | null, track: string): string {
-  if (taskId === "planbench" && track === "reasoning_verified") {
-    return "planning_verified";
-  }
-  if (taskId === "longbench-v2" && track === "longcontext_verified") {
-    return "deepsearch_verified";
-  }
-  return track;
-}
-
-function trackLabel(track: string, taskId?: string | null): string {
-  const canonical = canonicalTrack(taskId, track);
+function trackLabel(track: string): string {
   const labels: Record<string, string> = {
     math_verified: "Mathematics",
     reasoning_verified: "Reasoning",
-    planning_verified: "Planning",
-    deepsearch_verified: "Deep Search",
+    longcontext_verified: "Long Context",
     browse_snapshot: "Browse",
     science_verified: "Science Reasoning",
-    terminal_verified: "Terminal",
     agent_verified: "Agent Benchmarks",
     coding_verified: "Coding",
     or_verified: "Operations Research",
   };
-  return labels[canonical] ?? canonical.replace(/_/g, " ");
+  return labels[track] ?? track.replace(/_/g, " ");
 }
 
 function taskModeLabel(mode: string | undefined | null): string {
@@ -593,7 +580,7 @@ function optimizationScopeLabel(scope: string | undefined | null): string {
 function groupTasksByTrack(tasks: TaskSummary[]): TaskGroup[] {
   const groups = new Map<string, TaskGroup>();
   for (const task of tasks) {
-    const track = canonicalTrack(task.id, task.track);
+    const track = task.track;
     const existing = groups.get(track);
     if (existing) {
       existing.tasks.push(task);
@@ -601,7 +588,7 @@ function groupTasksByTrack(tasks: TaskSummary[]): TaskGroup[] {
     }
     groups.set(track, {
       track,
-      label: trackLabel(track, task.id),
+      label: trackLabel(track),
       tasks: [task],
     });
   }
@@ -2060,7 +2047,7 @@ export function App() {
           <div className="task-preview">
             <div className="task-summary-row">
               <span className="summary-pill">{benchmarkTierLabel(selectedTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(selectedTask.track, selectedTask.id)}</span>
+              <span className="summary-pill">{trackLabel(selectedTask.track)}</span>
               <span className="summary-pill">{selectedTask.answer_metric}</span>
               <span className="summary-pill">{selectedTask.function_name}</span>
               <span className="summary-pill">{taskModeLabel(selectedTask.task_mode)}</span>
@@ -2190,7 +2177,7 @@ export function App() {
             <p className="muted modal-copy">{datasetIntroCopy(datasetIntroTask)}</p>
             <div className="task-summary-row">
               <span className="summary-pill">{benchmarkTierLabel(datasetIntroTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(datasetIntroTask.track, datasetIntroTask.id)}</span>
+              <span className="summary-pill">{trackLabel(datasetIntroTask.track)}</span>
               <span className="summary-pill">{datasetIntroTask.answer_metric}</span>
               <span className="summary-pill">{datasetIntroTask.objective_label}</span>
               <span className="summary-pill">{datasetIntroTask.function_name}</span>
