@@ -12,8 +12,8 @@ class AppEntryTest(unittest.TestCase):
             patch.object(run, "runner_main") as runner_main,
             patch.object(run, "server_main") as server_main,
         ):
-            run.main(["--task", "olymmath", "--max-items", "5"])
-            runner_main.assert_called_once_with(["--task", "olymmath", "--max-items", "5"])
+            run.main(["run-task", "--task-id", "olymmath", "--max-items", "5"])
+            runner_main.assert_called_once_with(["run-task", "--task-id", "olymmath", "--max-items", "5"])
             server_main.assert_not_called()
 
     def test_serve_mode_dispatches_to_http_server(self) -> None:

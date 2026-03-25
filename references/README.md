@@ -6,9 +6,11 @@ Read in this order:
 
 1. `runtime-flow.md`
    the end-to-end execution path from UI request to winner selection and artifact write-out
-2. `backend-modules.md`
+2. `evaluation-contract.md`
+   how `answer`, `artifact`, and `agent` tasks define gates, primary metrics, and tie-breaks
+3. `backend-modules.md`
    what each backend module owns and who calls it
-3. `frontend-modules.md`
+4. `frontend-modules.md`
    what the UI modules do and how they consume backend payloads
 
 Scope notes:
