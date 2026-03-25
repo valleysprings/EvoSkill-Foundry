@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.configs.codegen import DEFAULT_FRONTIER_SIZE, DEFAULT_MEMORY_RETRIEVAL_TOP_K, DEFAULT_SESSION_ID
 from app.codegen.llm import ProposalRuntime, propose_code_candidates, reflect_strategy_experience
 from app.codegen.selection import metrics_rank, selection_spec_for_task
+from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.codegen.verifier import evaluate_materialized_candidate, materialize_candidate
 from app.memory.store import MemoryStore
 
@@ -725,7 +726,9 @@ def run_codegen_task(
             "generation_budget": task["generation_budget"],
             "candidate_budget": task["candidate_budget"],
             "branching_factor": branching_factor,
-            "source_type": task["source_type"],
+            "runtime_backend": infer_runtime_backend(task),
+            "task_mode": infer_task_mode(task),
+            "optimization_scope": infer_optimization_scope(task),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
             "dataset_id": task["dataset_id"],

@@ -276,6 +276,100 @@ class CodegenRunnerTest(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 generate_discrete_payload(task_id="contains-duplicates", runs_root=Path(tmp_dir), env_root=Path(tmp_dir))
 
+    def test_external_benchmark_task_runs_without_codegen_loop(self) -> None:
+        runtime = make_runtime([])
+        with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
+            payload = generate_discrete_payload(
+                task_id="external-score",
+                proposal_runtime=runtime,
+                runs_root=Path(tmp_dir),
+            )
+        self.assertEqual(payload["summary"]["total_runs"], 1)
+        run = payload["runs"][0]
+        self.assertEqual(run["run_mode"], "external-benchmark")
+        self.assertEqual(run["winner"]["agent"], "fixture-agent")
+        self.assertEqual(run["winner"]["metrics"]["objective"], 0.75)
+        self.assertEqual(run["winner"]["metrics"]["verifier_status"], "pass")
+        self.assertEqual(run["baseline"]["metrics"]["verifier_status"], "not-run")
+        self.assertEqual(run["selection_reason"], "External fixture finished with 3/4 successful cases.")
+        self.assertEqual(run["external_summary"], {"passed": 3, "total": 4})
+        self.assertEqual(run["generations"], [])
+        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "external-score")
+        self.assertTrue(task_summary["supports_runtime_config"])
+        self.assertEqual(task_summary["external_run_config"]["cases"], 4)
+        self.assertTrue(task_summary["supports_max_items"])
+        self.assertEqual(task_summary["default_max_items"], 4)
+
+    def test_external_config_override_updates_external_task_without_editing_file(self) -> None:
+        runtime = make_runtime([])
+        with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
+            payload = generate_discrete_payload(
+                task_id="external-score",
+                proposal_runtime=runtime,
+                runs_root=Path(tmp_dir),
+                external_config={"agent_name": "override-agent", "cases": 5, "passed": 4},
+            )
+        run = payload["runs"][0]
+        self.assertEqual(run["winner"]["agent"], "override-agent")
+        self.assertEqual(run["winner"]["metrics"]["objective"], 0.8)
+        self.assertIn("'cases': 5", run["winner"]["source_code"])
+        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "external-score")
+        self.assertEqual(task_summary["external_run_config"]["cases"], 5)
+        self.assertEqual(task_summary["default_max_items"], 5)
+
+    def test_external_task_can_enter_codegen_search_loop_when_budgets_are_positive(self) -> None:
+        runtime = make_runtime(
+            [
+                chat_response(
+                    {
+                        "candidates": [
+                            {
+                                "name": "perfect fixture wrapper",
+                                "strategy": "Increase the passed count to the full case count.",
+                                "rationale": "The fixture objective is passed / total, so making both values equal reaches 1.0.",
+                                "candidate_summary": "Wrapper with a perfect synthetic pass rate.",
+                                "file_body": (
+                                    "def build_run_config() -> dict:\n"
+                                    "    return {\n"
+                                    "        'agent_name': 'evolved-agent',\n"
+                                    "        'cases': 5,\n"
+                                    "        'passed': 5,\n"
+                                    "    }\n\n"
+                                    "RUN_CONFIG = build_run_config()\n"
+                                ),
+                            }
+                        ]
+                    }
+                ),
+                chat_response(
+                    {
+                        "failure_pattern": "The baseline leaves synthetic cases unsolved.",
+                        "strategy_hypothesis": "Increasing passed to match cases maximizes the fixture objective.",
+                        "successful_strategy": "Return a wrapper whose build_run_config produces a perfect passed/cases ratio.",
+                        "prompt_fragment": "For this fixture, evolve build_run_config toward passed == cases when that preserves the wrapper contract.",
+                        "tool_trace_summary": "candidate wrapper -> fixture verifier -> accept perfect objective",
+                    }
+                ),
+            ]
+        )
+        with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
+            payload = generate_discrete_payload(
+                task_id="external-score",
+                proposal_runtime=runtime,
+                runs_root=Path(tmp_dir),
+                generation_budget=1,
+                candidate_budget=1,
+                branching_factor=1,
+            )
+        run = payload["runs"][0]
+        self.assertEqual(run["run_mode"], "llm-required")
+        self.assertEqual(run["winner"]["agent"], "candidate-1")
+        self.assertEqual(run["winner"]["metrics"]["objective"], 1.0)
+        self.assertEqual(run["winner"]["metrics"]["verifier_status"], "pass")
+        self.assertEqual(len(run["generations"]), 1)
+        self.assertIn("build_run_config", run["winner"]["source_code"])
+        self.assertGreater(float(run["delta_primary_score"]), 0.0)
+
     def test_math_tasks_fail_fast_when_math_verify_is_missing(self) -> None:
         runtime = make_runtime([])
         with tempfile.TemporaryDirectory() as tmp_dir, patch("app.entries.runner.importlib.util.find_spec", return_value=None):
@@ -310,7 +404,7 @@ class CodegenRunnerTest(unittest.TestCase):
             "baseline_source": "def contains_duplicates(values):\n    return False\n",
             "source_code": "def contains_duplicates(values):\n    return False\n",
         }
-        system_prompt, _ = _proposal_prompt(
+        system_prompt, user_prompt = _proposal_prompt(
             task=task,
             generation=1,
             parent_candidate=candidate,
@@ -323,6 +417,8 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertIn("Do not include Markdown code fences", system_prompt)
         self.assertIn("file_body is the only field that may be long.", system_prompt)
         self.assertNotIn("Return between 1 and 3 candidates.", system_prompt)
+        self.assertIn("Task mode: answer", user_prompt)
+        self.assertIn("Optimization scope: implementation", user_prompt)
 
     def test_truncated_llm_output_surfaces_parse_details(self) -> None:
         truncated_response = raw_content_response(
@@ -795,7 +891,9 @@ class CodegenRunnerTest(unittest.TestCase):
                     "formula": "latency_ms = elapsed_ms",
                 },
                 "task_signature": ["python-codegen", "synthetic", "min-objective"],
-                "source_type": "benchmark-task",
+                "runtime_backend": "single",
+                "task_mode": "answer",
+                "optimization_scope": "implementation",
                 "generation_budget": 1,
                 "candidate_budget": 1,
                 "branching_factor": 1,

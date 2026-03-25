@@ -34,6 +34,12 @@ from app.configs.prompts import (
     TRIM_DEFAULT_LIMIT,
 )
 from app.codegen.selection import prompt_summary
+from app.codegen.task_contracts import (
+    infer_optimization_scope,
+    infer_task_mode,
+    optimization_scope_summary,
+    task_mode_summary,
+)
 from app.configs.codegen import PROPOSAL_SELECTION_GUIDANCE
 from app.codegen.config import ROOT, RuntimeConfig, load_runtime_config
 from app.codegen.errors import LlmResponseError, LlmTransportError
@@ -216,8 +222,17 @@ def _proposal_system_prompt(candidate_budget: int) -> str:
                 noun=_proposal_candidate_noun(candidate_budget),
             ),
             PROPOSAL_CONCISE_FIELDS_INSTRUCTION,
-            "file_body must contain the full contents of the editable file and must preserve the declared entry symbol.",
+            "file_body must contain the full contents of the editable file and must preserve the declared entry symbol and task contract.",
         )
+    )
+
+
+def _proposal_contract_lines(task: dict[str, Any]) -> tuple[str, str]:
+    task_mode = infer_task_mode(task)
+    optimization_scope = infer_optimization_scope(task)
+    return (
+        f"Task mode: {task_mode} ({task_mode_summary(task_mode)})",
+        f"Optimization scope: {optimization_scope} ({optimization_scope_summary(optimization_scope)})",
     )
 
 
@@ -613,6 +628,7 @@ def _proposal_prompt(
         )
         for item in candidate_history[-6:]
     ]
+    task_mode_line, optimization_scope_line = _proposal_contract_lines(task)
     system_prompt = _proposal_system_prompt(max(1, int(task["candidate_budget"])))
     user_prompt = (
         f"Task id: {task['id']}\n"
@@ -623,6 +639,8 @@ def _proposal_prompt(
         f"Dataset id: {task['dataset_id']}\n"
         f"Editable file: {task['editable_file']}\n"
         f"Entry symbol: {task['entry_symbol']}\n"
+        f"{task_mode_line}\n"
+        f"{optimization_scope_line}\n"
         f"Objective: {objective_name}\n"
         f"Objective direction: {objective_direction}\n"
         f"Objective formula: {objective_formula}\n"

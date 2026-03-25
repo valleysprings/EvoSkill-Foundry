@@ -26,7 +26,7 @@ type LiveItemCard = {
   itemKey: string;
   itemId: string;
   displayName: string;
-  status: "queued" | "running" | "completed";
+  status: "queued" | "running" | "failed" | "completed";
   latestGeneration: number;
   branchCount: number;
   passCount: number;
@@ -48,6 +48,7 @@ type LiveTaskCard = {
   title: string;
   description: string;
   objectiveLabel: string;
+  objectiveUnit: string | null;
   model: string;
   branchingFactor: number;
   generationBudget: number;
@@ -55,9 +56,10 @@ type LiveTaskCard = {
   itemWorkers: number | null;
   maxItems: number | null;
   usesMaxItems: boolean;
+  defaultMaxItems: number | null;
   scheduledItems: number | null;
   currentBest: string | null;
-  status: "queued" | "running" | "completed";
+  status: "queued" | "running" | "failed" | "completed";
   totalItems: number;
   completedItems: number;
   passItems: number;
@@ -161,6 +163,53 @@ function numeric(value: string | number | undefined | null): number {
   }
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseExternalConfigInput(
+  input: string,
+  fallback: Record<string, unknown> | null = null,
+): { config: Record<string, unknown> | null; error: string | null } {
+  if (!input.trim()) {
+    return { config: fallback, error: null };
+  }
+  try {
+    const parsed = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { config: null, error: "External RUN_CONFIG must be a JSON object." };
+    }
+    return { config: parsed as Record<string, unknown>, error: null };
+  } catch {
+    return { config: null, error: "External RUN_CONFIG is not valid JSON." };
+  }
+}
+
+function prettyJson(value: unknown): string {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function inferExternalDefaultMaxItems(config: Record<string, unknown> | null | undefined): number | null {
+  if (!config) {
+    return null;
+  }
+  for (const key of ["n_tasks", "cases"]) {
+    const value = config[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.max(1, Math.floor(value));
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.max(1, Math.floor(parsed));
+      }
+    }
+  }
+  for (const key of ["problem_names", "task_names", "tasks"]) {
+    const value = config[key];
+    if (Array.isArray(value) && value.length) {
+      return value.length;
+    }
+  }
+  return null;
 }
 
 function average(values: number[]): number | null {
@@ -274,6 +323,77 @@ function formatSigned(value: string | number | undefined | null, digits = 3): st
   return `${amount >= 0 ? "+" : ""}${amount.toFixed(digits)}`;
 }
 
+function sameMetricValue(left: string | number | undefined | null, right: string | number | undefined | null, epsilon = 1e-9): boolean {
+  return Math.abs(numeric(left) - numeric(right)) <= epsilon;
+}
+
+function hasTieBreakMetrics(selectionSpec: SelectionSpec): boolean {
+  return Boolean(selectionSpec.tie_break_formula) && !selectionSpec.tie_break_formula.toLowerCase().includes("no auxiliary tie-break metrics configured");
+}
+
+function replacePrimaryTerms(text: string | undefined | null): string {
+  return String(text ?? "")
+    .replace(/\bprimary scores\b/gi, "selection scores")
+    .replace(/\bprimary score\b/gi, "selection score")
+    .replace(/\bprimary_score\b/gi, "selection score");
+}
+
+function selectionPipelineLabel(selectionSpec: SelectionSpec): string {
+  return hasTieBreakMetrics(selectionSpec) ? "gate -> score -> tie-break" : "gate -> score";
+}
+
+function selectionFormula(selectionSpec: SelectionSpec): string {
+  const formula = replacePrimaryTerms(selectionSpec.primary_formula);
+  if (formula.toLowerCase().includes("selection score = objective_score")) {
+    return "selection score = normalized objective score";
+  }
+  return formula;
+}
+
+function parseGenerationBestValue(message?: string | null): number | null {
+  const text = String(message ?? "");
+  const match = text.match(/:\s*([-+]?\d+(?:\.\d+)?)(?:\s|\(|$)/);
+  if (!match) {
+    return null;
+  }
+  return Number(match[1]);
+}
+
+function generationSummaryPill(event: LiveEvent, objectiveLabelText: string, objectiveUnit?: string | null): string | null {
+  const generation = event.generation;
+  const bestValue = parseGenerationBestValue(event.message);
+  if (generation == null || bestValue == null || !Number.isFinite(bestValue)) {
+    return stringValue(event.message);
+  }
+  return `best ${objectiveLabelText} ${formatObjectiveValueFromUnit(bestValue, objectiveUnit)} at gen ${generation}`;
+}
+
+function formatLiveEventMessage(event: LiveEvent, objectiveLabelText: string, objectiveUnit?: string | null): string | null {
+  if (event.phase === "candidate_verified") {
+    const metrics = parseCandidateMetrics(event.message);
+    const fragments = [`Candidate ${metrics.status ?? "checked"}`];
+    if (metrics.objective != null) {
+      fragments.push(`${objectiveLabelText} ${formatObjectiveValueFromUnit(metrics.objective, objectiveUnit)}`);
+    }
+    if (metrics.primaryScore != null && !sameMetricValue(metrics.primaryScore, metrics.objective)) {
+      fragments.push(`score ${formatValue(metrics.primaryScore)}`);
+    }
+    return `${fragments.join(", ")}.`;
+  }
+  if (event.phase === "generation_finished") {
+    const generation = event.generation;
+    const bestValue = parseGenerationBestValue(event.message);
+    if (generation == null || bestValue == null || !Number.isFinite(bestValue)) {
+      return stringValue(event.message);
+    }
+    if (event.improved_global_best) {
+      return `Generation ${generation} found a new best ${objectiveLabelText}: ${formatObjectiveValueFromUnit(bestValue, objectiveUnit)}.`;
+    }
+    return `Generation ${generation} finished. Best ${objectiveLabelText} remains ${formatObjectiveValueFromUnit(bestValue, objectiveUnit)}.`;
+  }
+  return stringValue(event.message);
+}
+
 function directionCopy(direction: string): string {
   return direction === "min" ? "Lower score wins" : "Higher score wins";
 }
@@ -299,7 +419,7 @@ function emptyRuntime(): RuntimeInfo {
 function emptySelectionSpec(): SelectionSpec {
   return {
     display_name: "Layered selection policy",
-    summary_template: "Candidates must satisfy the verifier gate, improve primary_score, and only use tie-break metrics when primary scores are effectively tied.",
+    summary_template: "Candidates must satisfy the verifier gate, improve the selection score, and only use tie-break metrics when scores are effectively tied.",
     primary_metric: "objective_score",
     primary_label: "Normalized objective score",
     primary_direction: "max",
@@ -415,30 +535,73 @@ function benchmarkTierLabel(includedInMainComparison: boolean): string {
   return includedInMainComparison ? "benchmark task" : "auxiliary task";
 }
 
-function trackLabel(track: string): string {
+function canonicalTrack(taskId: string | undefined | null, track: string): string {
+  if (taskId === "planbench" && track === "reasoning_verified") {
+    return "planning_verified";
+  }
+  if (taskId === "longbench-v2" && track === "longcontext_verified") {
+    return "deepsearch_verified";
+  }
+  return track;
+}
+
+function trackLabel(track: string, taskId?: string | null): string {
+  const canonical = canonicalTrack(taskId, track);
   const labels: Record<string, string> = {
     math_verified: "Mathematics",
+    reasoning_verified: "Reasoning",
     planning_verified: "Planning",
     deepsearch_verified: "Deep Search",
     browse_snapshot: "Browse",
     science_verified: "Science Reasoning",
     terminal_verified: "Terminal",
+    agent_verified: "Agent Benchmarks",
     coding_verified: "Coding",
+    or_verified: "Operations Research",
   };
-  return labels[track] ?? track.replace(/_/g, " ");
+  return labels[canonical] ?? canonical.replace(/_/g, " ");
+}
+
+function taskModeLabel(mode: string | undefined | null): string {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === "answer") {
+    return "mode answer";
+  }
+  if (normalized === "artifact") {
+    return "mode artifact";
+  }
+  if (normalized === "agent") {
+    return "mode agent";
+  }
+  return "mode unknown";
+}
+
+function optimizationScopeLabel(scope: string | undefined | null): string {
+  const normalized = String(scope ?? "").trim().toLowerCase();
+  if (normalized === "prompt") {
+    return "scope prompt";
+  }
+  if (normalized === "wrapper") {
+    return "scope wrapper";
+  }
+  if (normalized === "implementation") {
+    return "scope implementation";
+  }
+  return "scope unknown";
 }
 
 function groupTasksByTrack(tasks: TaskSummary[]): TaskGroup[] {
   const groups = new Map<string, TaskGroup>();
   for (const task of tasks) {
-    const existing = groups.get(task.track);
+    const track = canonicalTrack(task.id, task.track);
+    const existing = groups.get(track);
     if (existing) {
       existing.tasks.push(task);
       continue;
     }
-    groups.set(task.track, {
-      track: task.track,
-      label: trackLabel(task.track),
+    groups.set(track, {
+      track,
+      label: trackLabel(track, task.id),
       tasks: [task],
     });
   }
@@ -482,6 +645,42 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function isRatioUnit(unit?: string | null): boolean {
+  return String(unit ?? "").trim().toLowerCase() === "ratio";
+}
+
+function formatObjectiveValueFromUnit(value: string | number | undefined | null, unit?: string | null): string {
+  if (isRatioUnit(unit)) {
+    return formatPercent(numeric(value));
+  }
+  return formatValue(value, unit ? ` ${unit}` : "");
+}
+
+function formatObjectiveValue(value: string | number | undefined | null, spec: ObjectiveSpec): string {
+  return formatObjectiveValueFromUnit(value, spec.unit);
+}
+
+function formatPercentagePointDelta(value: string | number | undefined | null, digits = 1): string {
+  const amount = numeric(value) * 100;
+  return `${amount >= 0 ? "+" : ""}${amount.toFixed(digits)} pp`;
+}
+
+function formatObjectiveDelta(value: string | number | undefined | null, spec: ObjectiveSpec): string {
+  if (isRatioUnit(spec.unit)) {
+    return formatPercentagePointDelta(value);
+  }
+  return `${formatSigned(value, 4)}${spec.unit ? ` ${spec.unit}` : ""}`;
+}
+
+function formatSolvedFraction(solved: number | string | undefined | null, total: number | string | undefined | null): string {
+  const solvedCount = numeric(solved);
+  const totalCount = numeric(total);
+  if (totalCount <= 0) {
+    return `${solvedCount}/${totalCount}`;
+  }
+  return `${solvedCount}/${totalCount} (${formatPercent(solvedCount / totalCount)})`;
+}
+
 function summarizeLiveTasks(
   events: LiveEvent[],
   taskCatalog: TaskSummary[],
@@ -501,8 +700,9 @@ function summarizeLiveTasks(
     if (existing) {
       return existing;
     }
-    const usesMaxItems = Boolean(catalogTask?.local_dataset_only ?? completedRun?.task.local_dataset_only);
+    const usesMaxItems = Boolean(catalogTask?.supports_max_items ?? catalogTask?.local_dataset_only ?? completedRun?.task.local_dataset_only);
     const datasetSize = catalogTask?.dataset_size ?? completedRun?.task.dataset_size ?? null;
+    const defaultMaxItems = catalogTask?.default_max_items ?? completedRun?.task.default_max_items ?? null;
     const requestedItems = liveJob?.max_items ?? null;
     const scheduledItems = usesMaxItems
       ? typeof requestedItems === "number" && requestedItems > 0
@@ -511,13 +711,14 @@ function summarizeLiveTasks(
           : requestedItems
         : typeof datasetSize === "number" && datasetSize > 0
           ? datasetSize
-          : null
+          : defaultMaxItems
       : 1;
     const entry: LiveTaskCard = {
       taskId,
       title: catalogTask?.title ?? completedRun?.task.title ?? taskId,
       description: catalogTask?.description ?? completedRun?.task.description ?? "Benchmark description unavailable.",
       objectiveLabel: objectiveLabel(catalogTask?.objective_spec ?? completedRun?.task.objective_spec ?? { display_name: "Benchmark objective", direction: "max", summary_template: "", formula: "" }),
+      objectiveUnit: catalogTask?.objective_spec?.unit ?? completedRun?.task.objective_spec?.unit ?? null,
       model: liveJob?.model ?? completedRun?.active_model ?? "n/a",
       branchingFactor:
         liveJob?.branching_factor ?? catalogTask?.branching_factor ?? completedRun?.task.branching_factor ?? 1,
@@ -528,9 +729,17 @@ function summarizeLiveTasks(
       itemWorkers: liveJob?.item_workers ?? catalogTask?.item_workers ?? completedRun?.task.item_workers ?? null,
       maxItems: liveJob?.max_items ?? null,
       usesMaxItems,
+      defaultMaxItems,
       scheduledItems,
       currentBest: null,
-      status: liveJob?.status === "completed" ? "completed" : liveJob?.status === "running" ? "running" : "queued",
+      status:
+        liveJob?.status === "completed"
+          ? "completed"
+          : liveJob?.status === "failed"
+            ? "failed"
+            : liveJob?.status === "running"
+              ? "running"
+              : "queued",
       totalItems: 0,
       completedItems: 0,
       passItems: 0,
@@ -589,13 +798,14 @@ function summarizeLiveTasks(
     }
     const task = getTask(taskId);
     task.events.push(event);
+    const displayMessage = formatLiveEventMessage(event, task.objectiveLabel, task.objectiveUnit);
     const item = getItem(task, event);
     if (item) {
       item.displayName = humanizeItemName(event.item_name ?? item.displayName, item.itemId);
       item.itemBrief = event.item_brief ?? item.itemBrief;
       item.expectedAnswer = event.expected_answer ?? item.expectedAnswer;
       item.responseOutput = event.candidate_actual ?? item.responseOutput;
-      item.latestMessage = event.message ?? item.latestMessage;
+      item.latestMessage = displayMessage ?? item.latestMessage;
       if (typeof event.generation === "number") {
         item.latestGeneration = Math.max(item.latestGeneration, event.generation);
       }
@@ -643,7 +853,7 @@ function summarizeLiveTasks(
     }
     task.memoryDelta += event.memory_delta ?? 0;
     if (event.phase === "generation_finished") {
-      task.currentBest = event.message ?? task.currentBest;
+      task.currentBest = generationSummaryPill(event, task.objectiveLabel, task.objectiveUnit) ?? task.currentBest;
       if (item && item.latestGeneration >= task.generationBudget) {
         item.status = "completed";
       }
@@ -671,6 +881,8 @@ function summarizeLiveTasks(
             status:
               liveJob?.status === "completed" || completedItemRun || latestGeneration >= task.generationBudget
                 ? "completed"
+                : liveJob?.status === "failed" && item
+                  ? "failed"
                 : item?.status ?? "queued",
             latestGeneration,
             branchCount: item?.branchIds.size ?? 0,
@@ -693,7 +905,12 @@ function summarizeLiveTasks(
       const totalItems = Math.max(items.length, task.scheduledItems ?? items.length);
       return {
         ...task,
-        status: liveJob?.status === "completed" ? "completed" : task.status,
+        status:
+          liveJob?.status === "completed"
+            ? "completed"
+            : liveJob?.status === "failed"
+              ? "failed"
+              : task.status,
         totalItems,
         completedItems: items.filter((item) => item.status === "completed").length,
         passItems: items.filter((item) => item.passCount > 0 || item.responseStatus === "pass").length,
@@ -701,6 +918,19 @@ function summarizeLiveTasks(
       };
     })
     .sort((left, right) => left.taskId.localeCompare(right.taskId));
+}
+
+function statusTone(status: "loading" | "queued" | "running" | "failed" | "completed" | null | undefined): "" | "good" | "warn" | "bad" {
+  if (status === "completed") {
+    return "good";
+  }
+  if (status === "running") {
+    return "warn";
+  }
+  if (status === "failed") {
+    return "bad";
+  }
+  return "";
 }
 
 function deltaChart(run: Run) {
@@ -721,6 +951,7 @@ function deltaChart(run: Run) {
     primaryScoreDelta: numeric(point.primary_score) - anchorPrimaryScore,
     acceptedCount: numeric(point.accepted_count ?? 0),
   }));
+  const showSelectionScoreTrace = chartPoints.some((point) => !sameMetricValue(point.objectiveDelta, point.primaryScoreDelta));
   const width = 700;
   const height = 260;
   const padding = 26;
@@ -744,11 +975,13 @@ function deltaChart(run: Run) {
         })}
         <line className="chart-axis" x1={padding} x2={width - padding} y1={y(0)} y2={y(0)} />
         <path className="chart-line objective-line" d={pathFor("objectiveDelta")} />
-        <path className="chart-line primary-line" d={pathFor("primaryScoreDelta")} />
+        {showSelectionScoreTrace ? <path className="chart-line primary-line" d={pathFor("primaryScoreDelta")} /> : null}
         {chartPoints.map((point) => (
           <g key={`chart-${run.task.id}-${point.generation}`}>
             <circle className={`chart-point ${point.acceptedCount > 0 ? "accepted" : "candidate"}`} cx={x(point.index)} cy={y(point.objectiveDelta)} r="4.6" />
-            <circle className={`chart-point primary-point ${point.acceptedCount > 0 ? "accepted" : "candidate"}`} cx={x(point.index)} cy={y(point.primaryScoreDelta)} r="4.6" />
+            {showSelectionScoreTrace ? (
+              <circle className={`chart-point primary-point ${point.acceptedCount > 0 ? "accepted" : "candidate"}`} cx={x(point.index)} cy={y(point.primaryScoreDelta)} r="4.6" />
+            ) : null}
             <text className="chart-label" x={x(point.index)} y={height - 8} textAnchor="middle">
               g{point.generation}
             </text>
@@ -760,10 +993,12 @@ function deltaChart(run: Run) {
           <span className="legend-swatch objective-line-swatch" />
           {label} vs {anchorLabel}
         </span>
-        <span className="legend-item">
-          <span className="legend-swatch primary-line-swatch" />
-          primary score vs {anchorLabel}
-        </span>
+        {showSelectionScoreTrace ? (
+          <span className="legend-item">
+            <span className="legend-swatch primary-line-swatch" />
+            selection score vs {anchorLabel}
+          </span>
+        ) : null}
         <span className="legend-item">
           <span className="legend-swatch accepted-swatch" />
           frontier accepts
@@ -840,7 +1075,7 @@ function metricTemplate(spec: ObjectiveSpec, selectionSpec: SelectionSpec) {
         <p className="eyebrow">selection rules</p>
         <div className="badge-row">
           <span className="badge">{directionCopy(spec.direction)}</span>
-          <span className="badge">{"gate -> primary -> tie-break"}</span>
+          <span className="badge">{selectionPipelineLabel(selectionSpec)}</span>
         </div>
       </div>
       <div className="template-grid">
@@ -851,9 +1086,9 @@ function metricTemplate(spec: ObjectiveSpec, selectionSpec: SelectionSpec) {
         </article>
         <article className="template-card">
           <div className="template-label">{selectionSpec.display_name}</div>
-          <p className="small">{selectionSpec.summary_template}</p>
+          <p className="small">{replacePrimaryTerms(selectionSpec.summary_template)}</p>
           <p className="template-formula">{selectionSpec.gate_summary}</p>
-          <p className="template-formula">{selectionSpec.primary_formula}</p>
+          <p className="template-formula">{selectionFormula(selectionSpec)}</p>
           <p className="template-formula">{selectionSpec.tie_break_formula}</p>
           <p className="small">{selectionSpec.delta_template}</p>
           <p className="small">{selectionSpec.archive_summary}</p>
@@ -879,9 +1114,8 @@ function candidateCard(candidate: Candidate, objectiveSpec: ObjectiveSpec, tone:
       </summary>
       <div className="detail-body">
         <div className="metric-grid compact-metrics">
-          {metric(objectiveLabel(objectiveSpec), formatValue(candidate.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : ""))}
+          {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(candidate.metrics.objective, objectiveSpec))}
           {metric("normalized score", formatValue(candidate.metrics.objective_score))}
-          {metric("primary score", formatValue(candidate.metrics.primary_score))}
           {metric("tie-break score", formatValue(candidate.metrics.tie_break_score))}
           {metric("verifier time", candidate.metrics.benchmark_ms == null ? "n/a" : `${candidate.metrics.benchmark_ms} ms`)}
           {metric("tests passed", `${candidate.metrics.passed_tests ?? "n/a"}/${candidate.metrics.total_tests ?? "n/a"}`)}
@@ -916,8 +1150,8 @@ function branchCard(branch: Branch, objectiveSpec: ObjectiveSpec, openByDefault 
       <div className="detail-body stack">
         <div className="metric-grid compact-metrics">
           {metric("parent agent", branch.parent_candidate.agent)}
-          {metric(objectiveLabel(objectiveSpec), formatValue(branch.winner.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : ""))}
-          {metric("winner primary", formatValue(branch.winner.metrics.primary_score))}
+          {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(branch.winner.metrics.objective, objectiveSpec))}
+          {metric("winner score", formatValue(branch.winner.metrics.primary_score))}
           {metric("winner tie-break", formatValue(branch.winner.metrics.tie_break_score))}
           {metric("beats run best", String(Boolean(branch.winner_improved_global_best)))}
         </div>
@@ -967,8 +1201,8 @@ function generationCard(generation: Generation, objectiveSpec: ObjectiveSpec, op
         <div className="metric-grid compact-metrics">
           {metric("parent pool", generation.parents?.length ?? generation.branches.length)}
           {metric("selected candidate", generation.winner.label)}
-          {metric(objectiveLabel(objectiveSpec), formatValue(generation.winner.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : ""))}
-          {metric("winner primary", formatValue(generation.winner.metrics.primary_score))}
+          {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(generation.winner.metrics.objective, objectiveSpec))}
+          {metric("winner score", formatValue(generation.winner.metrics.primary_score))}
           {metric("winner tie-break", formatValue(generation.winner.metrics.tie_break_score))}
           {metric("positive writes", generation.positive_writebacks ?? 0)}
           {metric("negative writes", generation.negative_writebacks ?? 0)}
@@ -993,21 +1227,18 @@ function liveTaskSection(task: LiveTaskCard) {
           <p className="muted">{task.description}</p>
         </div>
         <div className="accordion-meta">
-          <span className={`badge ${task.status === "completed" ? "good" : task.status === "running" ? "warn" : ""}`}>{task.status}</span>
+          <span className={`badge ${statusTone(task.status)}`}>{task.status}</span>
           <span className="badge">{task.model}</span>
-          <span className="badge">frontier parents {task.branchingFactor}</span>
-          <span className="badge">candidates/branch {task.candidateBudget}</span>
-          <span className="badge">workers {task.itemWorkers ?? "n/a"}</span>
         </div>
       </div>
       <div className="task-summary-row">
         <span className="summary-pill">{task.taskId}</span>
-        <span className="summary-pill">{task.objectiveLabel}</span>
-        <span className="summary-pill">workers {task.itemWorkers ?? "n/a"}</span>
-        <span className="summary-pill">candidates/branch {task.candidateBudget}</span>
-        <span className="summary-pill">max rounds {task.generationBudget}</span>
+        {task.branchingFactor > 0 ? <span className="summary-pill">frontier parents {task.branchingFactor}</span> : null}
+        {task.itemWorkers && task.itemWorkers > 0 ? <span className="summary-pill">workers {task.itemWorkers}</span> : null}
+        {task.candidateBudget > 0 ? <span className="summary-pill">candidates/branch {task.candidateBudget}</span> : null}
+        {task.generationBudget > 0 ? <span className="summary-pill">max rounds {task.generationBudget}</span> : null}
         <span className="summary-pill">
-          {task.usesMaxItems ? (task.maxItems ? `item cap ${task.maxItems}` : "item cap full dataset") : "item cap off"}
+          {task.usesMaxItems ? (task.maxItems ? `item cap ${task.maxItems}` : task.defaultMaxItems ? `item cap default ${task.defaultMaxItems}` : "item cap default") : "item cap off"}
         </span>
         <span className="summary-pill">{task.currentBest ?? "awaiting first selection"}</span>
       </div>
@@ -1017,7 +1248,7 @@ function liveTaskSection(task: LiveTaskCard) {
         {metric("completion", formatPercent(completedRatio))}
         {metric("items solved", `${task.passItems}/${task.totalItems || "?"}`)}
         {metric("solve rate", formatPercent(passRatio))}
-        {metric("best primary seen", task.bestPrimaryScore == null ? "n/a" : task.bestPrimaryScore.toFixed(3))}
+        {metric("best score seen", task.bestPrimaryScore == null ? "n/a" : task.bestPrimaryScore.toFixed(3))}
         {metric("frontier accepts", task.acceptedCount)}
         {metric("memory delta", task.memoryDelta > 0 ? `+${task.memoryDelta}` : task.memoryDelta)}
       </div>
@@ -1031,13 +1262,13 @@ function liveTaskSection(task: LiveTaskCard) {
                   <div className="detail-summary-copy live-item-id">{item.itemId}</div>
                 </div>
                 <div className="badge-row">
-                  <span className={`badge ${item.status === "completed" ? "good" : item.status === "running" ? "warn" : ""}`}>{item.status}</span>
-                  <span className="badge">Generation {item.latestGeneration || 0}/{task.generationBudget || "?"}</span>
+                  <span className={`badge ${statusTone(item.status)}`}>{item.status}</span>
+                  {task.generationBudget > 0 ? <span className="badge">Generation {item.latestGeneration || 0}/{task.generationBudget || "?"}</span> : null}
                   <span className="badge">branches {item.branchCount}</span>
                   <span className="badge">solved {item.passCount}</span>
                   <span className="badge">fail {item.failCount}</span>
                   <span className="badge">accepted {item.acceptCount}</span>
-                  <span className="badge">primary {item.bestPrimaryScore == null ? "n/a" : item.bestPrimaryScore.toFixed(3)}</span>
+                  <span className="badge">score {item.bestPrimaryScore == null ? "n/a" : item.bestPrimaryScore.toFixed(3)}</span>
                 </div>
               </div>
               <div className="split-grid report-grid">
@@ -1069,13 +1300,12 @@ function liveTaskSection(task: LiveTaskCard) {
   );
 }
 
-function itemRunCard(itemRun: ItemRun, objectiveSpec: ObjectiveSpec) {
-  const objectiveUnit = objectiveSpec.unit ? ` ${objectiveSpec.unit}` : "";
+function itemRunCard(itemRun: ItemRun) {
   const displayName = humanizeItemName(itemRun.item_name, itemRun.item_id);
   const responseOutput = candidateResponseOutput(itemRun.winner);
   const responseStatus = candidateResponseStatus(itemRun.winner);
-  const roundOneWinner = firstRoundWinner(itemRun);
-  const improvement = itemRunImprovementRatio(itemRun);
+  const baselineStatus = itemRun.baseline.metrics.verifier_status ?? itemRun.baseline.metrics.status ?? "n/a";
+  const finalStatus = itemRun.winner.metrics.verifier_status ?? itemRun.winner.metrics.status ?? "n/a";
   return (
     <details className="detail-card generation-card" key={itemRun.item_id}>
       <summary className="detail-summary">
@@ -1084,15 +1314,10 @@ function itemRunCard(itemRun: ItemRun, objectiveSpec: ObjectiveSpec) {
           <div className="detail-summary-copy">{questionPreview(itemRun.question.prompt)}</div>
         </div>
         <div className="badge-row">
-          <span className={`badge ${itemRun.winner.metrics.verifier_status === "pass" ? "good" : "warn"}`}>
-            {itemRun.winner.metrics.verifier_status ?? "n/a"}
+          <span className={`badge ${finalStatus === "pass" ? "good" : "warn"}`}>
+            {finalStatus}
           </span>
-          <span className="badge">
-            {objectiveLabel(objectiveSpec)} {formatValue(itemRun.winner.metrics.objective, objectiveUnit)}
-          </span>
-          <span className={`badge ${ratioTone(improvement)}`}>
-            improvement {formatMultiplier(improvement)}
-          </span>
+          {baselineStatus !== finalStatus ? <span className="badge">{`baseline ${baselineStatus} -> final ${finalStatus}`}</span> : null}
         </div>
       </summary>
       <div className="detail-body stack">
@@ -1116,13 +1341,10 @@ function itemRunCard(itemRun: ItemRun, objectiveSpec: ObjectiveSpec) {
         </div>
         <div className="metric-grid compact-metrics">
           {metric("item key", itemRun.item_id)}
-          {metric("checked-in status", itemRun.baseline.metrics.verifier_status ?? "n/a")}
-          {metric("selected status", itemRun.winner.metrics.verifier_status ?? "n/a")}
+          {metric("baseline status", baselineStatus)}
+          {metric("final status", finalStatus)}
           {metric("generations used", itemRun.generations.length)}
-          {metric("round 1 primary", roundOneWinner ? formatValue(roundOneWinner.metrics.primary_score) : "n/a")}
           {metric("memory ledger", `${itemRun.memory_before_count ?? "n/a"} → ${itemRun.memory_after_count ?? "n/a"}`)}
-          {metric("selected primary", formatValue(itemRun.winner.metrics.primary_score))}
-          {metric("improvement vs round 1", formatMultiplier(improvement))}
         </div>
         <p className="small">{itemRun.selection_reason}</p>
         {itemRun.question.context ? (
@@ -1151,9 +1373,14 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
   const selectionSpec = run.selection_spec ?? run.task.selection_spec ?? defaultSelectionSpec;
   const isDatasetRun = Array.isArray(run.item_runs) && run.item_runs.length > 0;
   const transitions = isDatasetRun ? datasetTransitionSummary(run) : null;
-  const objectiveUnit = objectiveSpec.unit ? ` ${objectiveSpec.unit}` : "";
   const roundOneWinner = firstRoundWinner(run);
   const improvement = runImprovementRatio(run);
+  const totalItems = run.dataset_summary?.total_items ?? run.item_runs?.length ?? 0;
+  const baselineSolved = run.dataset_summary?.baseline_passed ?? 0;
+  const finalSolved = run.dataset_summary?.winner_passed ?? 0;
+  const baselineSolveRate = totalItems ? baselineSolved / totalItems : 0;
+  const finalSolveRate = totalItems ? finalSolved / totalItems : 0;
+  const solveRateGain = finalSolveRate - baselineSolveRate;
   return (
     <article className="task-card completed-card" key={run.task.id}>
       <button className="accordion-toggle" onClick={onToggle} type="button">
@@ -1166,23 +1393,26 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
           <span className="badge">{run.active_model}</span>
           <span className="badge">branches {run.task.branching_factor}</span>
           {isDatasetRun ? (
-            <span className="badge">
-              solved {run.dataset_summary?.winner_passed ?? 0}/{run.dataset_summary?.total_items ?? run.item_runs?.length ?? 0}
-            </span>
+            <>
+              <span className="badge">solved {finalSolved}/{totalItems}</span>
+              <span className="badge">solve rate {formatPercent(finalSolveRate)}</span>
+            </>
           ) : (
-            <span className="badge">
-              {objectiveLabel(objectiveSpec)} {formatValue(run.winner.metrics.objective, objectiveSpec.unit ? ` ${objectiveSpec.unit}` : "")}
-            </span>
+            <>
+              <span className="badge">
+                {objectiveLabel(objectiveSpec)} {formatObjectiveValue(run.winner.metrics.objective, objectiveSpec)}
+              </span>
+              <span className={`badge ${ratioTone(improvement)}`}>
+                improvement {formatMultiplier(improvement)}
+              </span>
+            </>
           )}
-          <span className={`badge ${ratioTone(improvement)}`}>
-            improvement {formatMultiplier(improvement)}
-          </span>
         </div>
       </button>
       <div className="task-summary-row">
         <span className="summary-pill">{run.task.id}</span>
         <span className="summary-pill">{benchmarkTierLabel(run.included_in_main_comparison)}</span>
-        <span className="summary-pill">{trackLabel(run.track)}</span>
+        <span className="summary-pill">{trackLabel(run.track, run.task.id)}</span>
         <span className="summary-pill">{directionCopy(objectiveSpec.direction)}</span>
         <span className="summary-pill">{run.selection_reason}</span>
       </div>
@@ -1191,14 +1421,27 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
           {metricTemplate(objectiveSpec, selectionSpec)}
 
           <div className="metric-grid">
-            {metric("checked-in objective", formatValue(run.baseline.metrics.objective, objectiveUnit))}
-            {metric("round 1 objective", roundOneWinner ? formatValue(roundOneWinner.metrics.objective, objectiveUnit) : "n/a")}
-            {metric("selected objective", formatValue(run.winner.metrics.objective, objectiveUnit))}
-            {metric("objective delta", formatSigned(run.run_delta_objective ?? 0, 4) + objectiveUnit)}
-            {metric("improvement vs round 1", formatMultiplier(improvement))}
-            {metric(isDatasetRun ? "items" : "generations", isDatasetRun ? run.dataset_summary?.total_items ?? run.item_runs?.length ?? 0 : run.generations.length)}
-            {metric("new memories", run.added_experiences?.length ?? 0)}
-            {metric("memory ledger", `${run.memory_before_count ?? "n/a"} → ${run.memory_after_count ?? "n/a"}`)}
+            {isDatasetRun ? (
+              <>
+                {metric("dataset size", totalItems)}
+                {metric("baseline solved", formatSolvedFraction(baselineSolved, totalItems))}
+                {metric("final solved", formatSolvedFraction(finalSolved, totalItems))}
+                {metric("solve-rate gain", formatPercentagePointDelta(solveRateGain))}
+                {metric("new memories", run.added_experiences?.length ?? 0)}
+                {metric("memory ledger", `${run.memory_before_count ?? "n/a"} → ${run.memory_after_count ?? "n/a"}`)}
+              </>
+            ) : (
+              <>
+                {metric("checked-in objective", formatObjectiveValue(run.baseline.metrics.objective, objectiveSpec))}
+                {metric("round 1 objective", roundOneWinner ? formatObjectiveValue(roundOneWinner.metrics.objective, objectiveSpec) : "n/a")}
+                {metric("selected objective", formatObjectiveValue(run.winner.metrics.objective, objectiveSpec))}
+                {metric("objective delta", formatObjectiveDelta(run.run_delta_objective ?? 0, objectiveSpec))}
+                {metric("improvement vs round 1", formatMultiplier(improvement))}
+                {metric("generations", run.generations.length)}
+                {metric("new memories", run.added_experiences?.length ?? 0)}
+                {metric("memory ledger", `${run.memory_before_count ?? "n/a"} → ${run.memory_after_count ?? "n/a"}`)}
+              </>
+            )}
           </div>
 
           {isDatasetRun ? (
@@ -1210,17 +1453,16 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
                 </div>
               </div>
               <div className="metric-grid compact-metrics">
-                {metric("dataset size", run.dataset_summary?.total_items ?? 0)}
-                {metric("checked-in solved", run.dataset_summary?.baseline_passed ?? 0)}
-                {metric("selected solved", run.dataset_summary?.winner_passed ?? 0)}
+                {metric("dataset size", totalItems)}
+                {metric("baseline solved", formatSolvedFraction(baselineSolved, totalItems))}
+                {metric("final solved", formatSolvedFraction(finalSolved, totalItems))}
                 {metric("fail -> pass", transitions?.improved ?? 0)}
                 {metric("pass -> fail", transitions?.regressed ?? 0)}
-                {metric("solve rate", formatValue(run.dataset_summary?.solved_ratio))}
-                {metric("avg improvement", formatMultiplier(improvement))}
+                {metric("solve-rate gain", formatPercentagePointDelta(solveRateGain))}
                 {metric("still failing", run.dataset_summary?.failure_count ?? 0)}
               </div>
               <section className="stack">
-                {run.item_runs?.map((itemRun) => itemRunCard(itemRun, objectiveSpec))}
+                {run.item_runs?.map((itemRun) => itemRunCard(itemRun))}
               </section>
             </section>
           ) : (
@@ -1290,6 +1532,7 @@ export function App() {
   const [candidateBudgetInput, setCandidateBudgetInput] = useState("");
   const [itemWorkersInput, setItemWorkersInput] = useState("");
   const [maxItemsInput, setMaxItemsInput] = useState("");
+  const [externalConfigInput, setExternalConfigInput] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [datasetIntroTaskId, setDatasetIntroTaskId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<JobState | null>({
@@ -1420,8 +1663,9 @@ export function App() {
     setBranchingFactorInput(String(selectedTask.branching_factor ?? 4));
     setGenerationBudgetInput(String(selectedTask.generation_budget ?? 1));
     setCandidateBudgetInput(String(selectedTask.candidate_budget ?? 1));
-    setItemWorkersInput(String(selectedTask.item_workers ?? 20));
+    setItemWorkersInput(selectedTask.runtime_backend === "external" ? "" : String(selectedTask.item_workers ?? 20));
     setMaxItemsInput("");
+    setExternalConfigInput(selectedTask.supports_runtime_config ? prettyJson(selectedTask.external_run_config ?? {}) : "");
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -1529,7 +1773,8 @@ export function App() {
 
   async function runTask(taskId: string | null) {
     const model = selectedModel || runtimeInfo.active_model;
-    const supportsMaxItems = Boolean(selectedTask?.local_dataset_only && selectedTask?.dataset_size);
+    const isExternalTask = selectedTask?.runtime_backend === "external";
+    const supportsMaxItems = Boolean(selectedTask?.supports_max_items);
     const branchingFactor = Math.max(1, Math.floor(numeric(branchingFactorInput || selectedTask?.branching_factor || 4)));
     const generationBudget = Math.max(
       1,
@@ -1539,8 +1784,20 @@ export function App() {
       1,
       Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1)),
     );
-    const itemWorkers = Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20)));
+    const itemWorkers = isExternalTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20)));
     const maxItems = supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
+    const externalConfig = selectedTask?.supports_runtime_config
+      ? parseExternalConfigInput(externalConfigInput, selectedTask.external_run_config ?? null)
+      : { config: null, error: null };
+    if (externalConfig.error) {
+      setError({
+        terminal: true,
+        error_type: "config_error",
+        error: externalConfig.error,
+        model,
+      });
+      return;
+    }
     pollToken.current += 1;
     const token = pollToken.current;
     setError(null);
@@ -1553,13 +1810,17 @@ export function App() {
       candidate_budget: candidateBudget,
       item_workers: itemWorkers,
       max_items: maxItems,
+      external_config: externalConfig.config,
       events: [
         {
           phase: "queued",
-          message:
-            `Launching ${taskId ?? "selected task"} on ${model} ` +
-            `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}, workers=${itemWorkers}` +
-            `${maxItems ? `, item cap=${maxItems}` : ""}).`,
+          message: isExternalTask
+            ? `Launching ${taskId ?? "selected task"} on ${model} ` +
+              `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}` +
+              `${maxItems ? `, item cap=${maxItems}` : ""}).`
+            : `Launching ${taskId ?? "selected task"} on ${model} ` +
+              `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}, workers=${itemWorkers}` +
+              `${maxItems ? `, item cap=${maxItems}` : ""}).`,
         },
       ],
     });
@@ -1571,6 +1832,7 @@ export function App() {
         candidateBudget,
         itemWorkers,
         maxItems,
+        externalConfig: externalConfig.config,
       });
       let job = await loadJob(start.job_id);
       while (job.status === "running" && token === pollToken.current) {
@@ -1608,25 +1870,40 @@ export function App() {
         branching_factor: Math.max(1, Math.floor(numeric(branchingFactorInput || 4))),
         generation_budget: Math.max(1, Math.floor(numeric(generationBudgetInput || selectedTask?.generation_budget || 1))),
         candidate_budget: Math.max(1, Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1))),
-        item_workers: Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20))),
+        item_workers: isExternalTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20))),
         events: [],
       });
     }
   }
 
   const defaultSelectionSpec = selectedTask?.selection_spec ?? payload.task_catalog[0]?.selection_spec ?? emptySelectionSpec();
-  const selectedTaskUsesMaxItems = Boolean(selectedTask?.local_dataset_only && selectedTask?.dataset_size);
+  const externalConfigDraft = selectedTask?.supports_runtime_config
+    ? parseExternalConfigInput(externalConfigInput, selectedTask.external_run_config ?? null)
+    : { config: null, error: null };
+  const selectedTaskDefaultMaxItems = selectedTask?.local_dataset_only
+    ? selectedTask.dataset_size ?? null
+    : inferExternalDefaultMaxItems(externalConfigDraft.config ?? selectedTask?.external_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
+  const selectedTaskUsesMaxItems = Boolean(selectedTask?.supports_max_items);
   const selectedTaskHasDatasetIntro = Boolean(selectedTask?.local_dataset_only);
+  const selectedTaskIsExternal = selectedTask?.runtime_backend === "external";
   const selectedTaskIsCoding = selectedTask?.track === "coding_verified";
   const parsedMaxItems = selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
-  const requestedItemCount = selectedTaskUsesMaxItems ? (parsedMaxItems ?? selectedTask?.dataset_size ?? null) : null;
+  const requestedItemCount = selectedTaskUsesMaxItems ? (parsedMaxItems ?? selectedTaskDefaultMaxItems ?? null) : null;
   const showDemoMaxItemsWarning = Boolean(selectedTaskIsCoding && requestedItemCount && requestedItemCount > 50);
   const maxItemsLabel = selectedTaskUsesMaxItems && selectedTask?.dataset_size
     ? `${selectedTaskIsCoding ? "Problem Count" : "Item Cap"} (full dataset = ${selectedTask.dataset_size})`
-    : "Item Cap";
+    : selectedTaskUsesMaxItems
+      ? selectedTaskDefaultMaxItems
+        ? `Task Cap (default = ${selectedTaskDefaultMaxItems})`
+        : "Task Cap"
+      : "Item Cap";
   const maxItemsHelper = selectedTaskUsesMaxItems && selectedTask?.dataset_size
     ? `Dataset size: ${selectedTask.dataset_size} ${selectedTaskIsCoding ? "coding problems" : "items"}`
-    : "Single-item task: cap disabled";
+    : selectedTaskUsesMaxItems
+      ? selectedTaskDefaultMaxItems
+        ? `Blank uses the current RUN_CONFIG default of ${selectedTaskDefaultMaxItems} tasks.`
+        : "Blank uses the current RUN_CONFIG default task subset."
+      : "Single-item task: cap disabled";
 
   return (
     <main className="app-shell">
@@ -1687,7 +1964,14 @@ export function App() {
           </label>
           <label className="field">
             <span className="field-label">Frontier Parents</span>
-            <input className="control" type="number" min={1} step={1} value={branchingFactorInput} onChange={(event) => setBranchingFactorInput(event.target.value)} />
+            <input
+              className="control"
+              type="number"
+              min={1}
+              step={1}
+              value={branchingFactorInput}
+              onChange={(event) => setBranchingFactorInput(event.target.value)}
+            />
           </label>
           <label className="field">
             <span className="field-label">Max Search Rounds</span>
@@ -1713,7 +1997,16 @@ export function App() {
           </label>
           <label className="field">
             <span className="field-label">Parallel Item Workers</span>
-            <input className="control" type="number" min={1} step={1} value={itemWorkersInput} onChange={(event) => setItemWorkersInput(event.target.value)} />
+            <input
+              className="control"
+              type="number"
+              min={1}
+              step={1}
+              value={itemWorkersInput}
+              onChange={(event) => setItemWorkersInput(event.target.value)}
+              disabled={selectedTaskIsExternal}
+              placeholder={selectedTaskIsExternal ? "n/a" : undefined}
+            />
           </label>
           <label className="field">
             <span className="field-label">{maxItemsLabel}</span>
@@ -1722,7 +2015,7 @@ export function App() {
               type="number"
               min={1}
               step={1}
-              placeholder={selectedTaskUsesMaxItems ? "all" : "n/a"}
+              placeholder={selectedTaskUsesMaxItems ? (selectedTask?.dataset_size ? "all" : "default") : "n/a"}
               value={maxItemsInput}
               onChange={(event) => setMaxItemsInput(event.target.value)}
               disabled={!selectedTaskUsesMaxItems}
@@ -1734,6 +2027,22 @@ export function App() {
               </span>
             ) : null}
           </label>
+          {selectedTask?.supports_runtime_config ? (
+            <label className="field field-span-full">
+              <span className="field-label">External RUN_CONFIG</span>
+              <textarea
+                className="control code-textarea"
+                rows={14}
+                value={externalConfigInput}
+                onChange={(event) => setExternalConfigInput(event.target.value)}
+                spellCheck={false}
+              />
+              <span className="small muted">
+                Per-run JSON override for the external benchmark harness. This does not rewrite the checked-in `editable.py`.
+              </span>
+              {externalConfigDraft.error ? <span className="small launcher-warning">{externalConfigDraft.error}</span> : null}
+            </label>
+          ) : null}
         </div>
 
         <div className="button-row">
@@ -1742,7 +2051,8 @@ export function App() {
           </button>
         </div>
         <p className="small muted">
-          Runs execute one task at a time. For dataset tasks, Item Cap limits how many local items are expanded in this session.
+          Runs execute one task at a time. For dataset and external benchmark tasks, Item Cap limits how many local items or harness cases are expanded in this session.
+          {selectedTaskIsExternal ? " External benchmark tasks also use the standard search loop; the JSON RUN_CONFIG above defines the wrapper baseline for this run." : ""}
           {selectedTaskIsCoding ? " LiveCodeBench lazily caches only the requested prefix on first use." : ""}
         </p>
 
@@ -1750,13 +2060,20 @@ export function App() {
           <div className="task-preview">
             <div className="task-summary-row">
               <span className="summary-pill">{benchmarkTierLabel(selectedTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(selectedTask.track)}</span>
+              <span className="summary-pill">{trackLabel(selectedTask.track, selectedTask.id)}</span>
               <span className="summary-pill">{selectedTask.answer_metric}</span>
               <span className="summary-pill">{selectedTask.function_name}</span>
+              <span className="summary-pill">{taskModeLabel(selectedTask.task_mode)}</span>
+              <span className="summary-pill">{optimizationScopeLabel(selectedTask.optimization_scope)}</span>
               <span className="summary-pill">
                 cap {generationBudgetInput || selectedTask.generation_budget} rounds | {candidateBudgetInput || selectedTask.candidate_budget} candidates/branch | {branchingFactorInput} frontier parents
               </span>
-              <span className="summary-pill">workers {itemWorkersInput || selectedTask.item_workers}</span>
+              {selectedTaskIsExternal ? <span className="summary-pill">configured via RUN_CONFIG</span> : <span className="summary-pill">workers {itemWorkersInput || selectedTask.item_workers}</span>}
+              {selectedTaskIsExternal ? (
+                <span className="summary-pill">
+                  {parsedMaxItems ? `task cap ${parsedMaxItems}` : selectedTaskDefaultMaxItems ? `task cap default ${selectedTaskDefaultMaxItems}` : "task cap default"}
+                </span>
+              ) : null}
             </div>
             <p className="muted">{selectedTask.description}</p>
             {selectedTaskHasDatasetIntro ? (
@@ -1812,11 +2129,6 @@ export function App() {
           <div>
             <p className="eyebrow">live execution</p>
             <h2>Live execution trace</h2>
-          </div>
-          <div className="badge-row">
-            <span className={`badge ${liveJob?.status === "completed" ? "good" : liveJob?.status === "running" ? "warn" : ""}`}>{liveJob?.status ?? "idle"}</span>
-            <span className="badge">{liveJob?.model ?? selectedModel ?? "n/a"}</span>
-            <span className="badge">item workers {(liveJob?.item_workers ?? itemWorkersInput) || "n/a"}</span>
           </div>
         </div>
         {liveTasks.length ? (
@@ -1878,10 +2190,12 @@ export function App() {
             <p className="muted modal-copy">{datasetIntroCopy(datasetIntroTask)}</p>
             <div className="task-summary-row">
               <span className="summary-pill">{benchmarkTierLabel(datasetIntroTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(datasetIntroTask.track)}</span>
+              <span className="summary-pill">{trackLabel(datasetIntroTask.track, datasetIntroTask.id)}</span>
               <span className="summary-pill">{datasetIntroTask.answer_metric}</span>
               <span className="summary-pill">{datasetIntroTask.objective_label}</span>
               <span className="summary-pill">{datasetIntroTask.function_name}</span>
+              <span className="summary-pill">{taskModeLabel(datasetIntroTask.task_mode)}</span>
+              <span className="summary-pill">{optimizationScopeLabel(datasetIntroTask.optimization_scope)}</span>
             </div>
             <div className="metric-grid compact-metrics">
               {metric("local items", datasetIntroTask.dataset_size ?? "n/a")}

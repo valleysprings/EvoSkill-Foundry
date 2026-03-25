@@ -1,0 +1,34 @@
+{
+  "id": "nl4opt",
+  "title": "NL4OPT",
+  "description": "Evaluate the configured model on CardinalOperations/NL4OPT by generating coptpy formulations and checking the resulting optimal value.",
+  "benchmark_tier": "experiment",
+  "track": "or_verified",
+  "dataset_id": "CardinalOperations/NL4OPT",
+  "answer_metric": "success_rate",
+  "family": "operations-research",
+  "runtime_backend": "external",
+  "task_mode": "artifact",
+  "optimization_scope": "wrapper",
+  "task_signature": [
+    "external-benchmark",
+    "operations-research",
+    "coptpy",
+    "nl4opt"
+  ],
+  "editable_file": "editable.py",
+  "verifier": "verifier.py",
+  "entry_symbol": "build_run_config",
+  "generation_budget": 2,
+  "candidate_budget": 2,
+  "branching_factor": 1,
+  "baseline_summary": "Checked-in NL4OPT wrapper that defines dataset settings and the prompting policy used to generate coptpy code.",
+  "prompt_context": "Edit editable.py only. This file is the NL4OPT wrapper. Preserve def build_run_config(), SYSTEM_PROMPT, build_user_prompt(question), and RUN_CONFIG = build_run_config(). The benchmark evaluates the wrapper by using it to prompt the model for each OR question.",
+  "objective_spec": {
+    "display_name": "Optimal value match rate",
+    "direction": "max",
+    "unit": "ratio",
+    "summary_template": "Higher exact optimal-value match rate is better.",
+    "formula": "match_rate = matched_items / total_items"
+  }
+}

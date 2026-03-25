@@ -12,13 +12,15 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "science",
+  "runtime_backend": "dataset",
+  "task_mode": "answer",
+  "optimization_scope": "implementation",
   "task_signature": [
     "single-file-optimization",
     "dataset-task",
     "science-question-solving",
     "multihop-qa"
   ],
-  "source_type": "dataset-task",
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "solve",

@@ -13,8 +13,14 @@
   "allow_browsing": false,
   "answer_metric": "test_pass_rate",
   "family": "coding",
-  "task_signature": ["single-file-optimization", "dataset-task", "coding-problem-solving"],
-  "source_type": "dataset-task",
+  "runtime_backend": "dataset",
+  "task_mode": "artifact",
+  "optimization_scope": "implementation",
+  "task_signature": [
+    "single-file-optimization",
+    "dataset-task",
+    "coding-problem-solving"
+  ],
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "solve",

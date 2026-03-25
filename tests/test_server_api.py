@@ -17,8 +17,8 @@ from app.entries import server
 from tests.helpers import make_runtime
 
 
-def _fetch_json(url: str, *, method: str = "GET") -> tuple[int, dict]:
-    request = urllib.request.Request(url, method=method)
+def _fetch_json(url: str, *, method: str = "GET", body: bytes | None = None, headers: dict[str, str] | None = None) -> tuple[int, dict]:
+    request = urllib.request.Request(url, method=method, data=body, headers=headers or {})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -51,6 +51,7 @@ class ServerApiTest(unittest.TestCase):
                 candidate_budget=None,
                 item_workers=None,
                 max_items=None,
+                external_config=None,
             )
             try:
                 deadline = time.time() + 5
@@ -198,10 +199,12 @@ class ServerApiTest(unittest.TestCase):
             scienceqa = next(task for task in payload["tasks"] if task["id"] == "scienceqa")
             openbookqa = next(task for task in payload["tasks"] if task["id"] == "openbookqa")
             livecodebench = next(task for task in payload["tasks"] if task["id"] == "livecodebench")
+            terminal_bench = next(task for task in payload["tasks"] if task["id"] == "terminal-bench")
+            tau_bench_retail = next(task for task in payload["tasks"] if task["id"] == "tau-bench-retail")
+            nl4opt = next(task for task in payload["tasks"] if task["id"] == "nl4opt")
             task_ids = {task["id"] for task in payload["tasks"]}
             self.assertNotIn("contains-duplicates", task_ids)
             self.assertNotIn("planbench-lite", task_ids)
-            self.assertTrue(all(task["included_in_main_comparison"] for task in payload["tasks"]))
             self.assertEqual(olymmath["dataset_id"], "olymmath")
             self.assertEqual(olymmath["dataset_size"], 100)
             self.assertTrue(olymmath["local_dataset_only"])
@@ -215,13 +218,13 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(aime_2026["split"], "test")
             self.assertEqual(planbench["dataset_size"], 2270)
             self.assertTrue(planbench["local_dataset_only"])
-            self.assertEqual(planbench["track"], "reasoning_verified")
+            self.assertEqual(planbench["track"], "planning_verified")
             self.assertTrue(planbench["included_in_main_comparison"])
             self.assertEqual(arc_challenge["dataset_size"], 299)
             self.assertEqual(arc_challenge["track"], "reasoning_verified")
             self.assertEqual(arc_challenge["split"], "validation:ARC-Challenge")
             self.assertEqual(longbench["dataset_size"], 503)
-            self.assertEqual(longbench["track"], "longcontext_verified")
+            self.assertEqual(longbench["track"], "deepsearch_verified")
             self.assertEqual(longbench["split"], "train")
             self.assertTrue(longbench["included_in_main_comparison"])
             self.assertEqual(sciq["track"], "science_verified")
@@ -238,6 +241,30 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(livecodebench["track"], "coding_verified")
             self.assertEqual(livecodebench["split"], "release_v6:test")
             self.assertTrue(livecodebench["local_dataset_only"])
+            self.assertEqual(livecodebench["runtime_backend"], "dataset")
+            self.assertEqual(livecodebench["task_mode"], "artifact")
+            self.assertEqual(livecodebench["optimization_scope"], "implementation")
+            self.assertFalse(livecodebench["supports_runtime_config"])
+            self.assertTrue(livecodebench["supports_max_items"])
+            self.assertEqual(livecodebench["default_max_items"], 1055)
+            self.assertEqual(terminal_bench["track"], "agent_verified")
+            self.assertFalse(terminal_bench["included_in_main_comparison"])
+            self.assertEqual(terminal_bench["runtime_backend"], "external")
+            self.assertEqual(terminal_bench["task_mode"], "agent")
+            self.assertEqual(terminal_bench["optimization_scope"], "wrapper")
+            self.assertTrue(terminal_bench["supports_runtime_config"])
+            self.assertEqual(terminal_bench["external_run_config"]["dataset"], "terminal-bench@2.0")
+            self.assertTrue(terminal_bench["supports_max_items"])
+            self.assertEqual(terminal_bench["default_max_items"], 5)
+            self.assertEqual(tau_bench_retail["track"], "agent_verified")
+            self.assertEqual(tau_bench_retail["task_mode"], "agent")
+            self.assertTrue(tau_bench_retail["supports_runtime_config"])
+            self.assertEqual(tau_bench_retail["default_max_items"], 10)
+            self.assertEqual(nl4opt["track"], "or_verified")
+            self.assertFalse(nl4opt["included_in_main_comparison"])
+            self.assertEqual(nl4opt["task_mode"], "artifact")
+            self.assertEqual(nl4opt["optimization_scope"], "wrapper")
+            self.assertTrue(nl4opt["supports_max_items"])
             self.assertEqual([task["id"] for task in payload["tasks"][:5]], ["olymmath", "math-500", "aime-2024", "aime-2025", "aime-2026"])
         finally:
             httpd.shutdown()
@@ -323,6 +350,40 @@ class ServerApiTest(unittest.TestCase):
                     self.assertEqual(completed["candidate_budget"], 1)
                     self.assertEqual(write_artifacts.call_args.kwargs["generation_budget"], 10)
                     self.assertEqual(write_artifacts.call_args.kwargs["candidate_budget"], 1)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
+    def test_external_config_is_forwarded_to_job_runner(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=terminal-bench",
+                        method="POST",
+                        body=json.dumps({"external_config": {"n_tasks": 2, "agent_name": "custom-agent"}}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["external_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
+                    self.assertEqual(write_artifacts.call_args.kwargs["external_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
                 finally:
                     httpd.shutdown()
                     httpd.server_close()

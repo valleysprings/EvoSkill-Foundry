@@ -7,8 +7,14 @@
   "dataset_id": "olymmath_numeric_small_v1",
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "task_signature": ["single-file-optimization", "comparable-benchmark", "exact-numeric-math"],
-  "source_type": "benchmark-task",
+  "runtime_backend": "single",
+  "task_mode": "answer",
+  "optimization_scope": "implementation",
+  "task_signature": [
+    "single-file-optimization",
+    "comparable-benchmark",
+    "exact-numeric-math"
+  ],
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "solve",

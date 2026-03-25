@@ -13,13 +13,15 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "qa",
+  "runtime_backend": "dataset",
+  "task_mode": "answer",
+  "optimization_scope": "implementation",
   "task_signature": [
     "single-file-optimization",
     "dataset-task",
     "long-context-reasoning",
     "multiple-choice-qa"
   ],
-  "source_type": "dataset-task",
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "solve",

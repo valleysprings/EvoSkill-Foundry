@@ -44,7 +44,14 @@ function task(id: string): TaskSummary {
     dataset_size: 1,
     local_dataset_only: true,
     split: "test",
+    runtime_backend: "dataset",
+    task_mode: "artifact",
+    optimization_scope: "implementation",
     included_in_main_comparison: true,
+    supports_runtime_config: false,
+    external_run_config: null,
+    supports_max_items: true,
+    default_max_items: 1,
   };
 }
 
@@ -98,7 +105,7 @@ function payload(taskIds: string[]): Payload {
       included_in_main_comparison: true,
       task: {
         ...task(id),
-        source_type: "dataset-task",
+        runtime_backend: "dataset",
       },
       baseline: {
         agent: "baseline",

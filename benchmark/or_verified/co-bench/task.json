@@ -1,0 +1,34 @@
+{
+  "id": "co-bench",
+  "title": "CO-Bench",
+  "description": "Evaluate the configured model on CO-Bench by generating solve(**kwargs) implementations and scoring them with the official evaluator.",
+  "benchmark_tier": "experiment",
+  "track": "or_verified",
+  "dataset_id": "CO-Bench/CO-Bench",
+  "answer_metric": "avg_test_score",
+  "family": "operations-research",
+  "runtime_backend": "external",
+  "task_mode": "artifact",
+  "optimization_scope": "wrapper",
+  "task_signature": [
+    "external-benchmark",
+    "operations-research",
+    "co-bench",
+    "algorithm-search"
+  ],
+  "editable_file": "editable.py",
+  "verifier": "verifier.py",
+  "entry_symbol": "build_run_config",
+  "generation_budget": 2,
+  "candidate_budget": 2,
+  "branching_factor": 1,
+  "baseline_summary": "Checked-in CO-Bench wrapper that selects the task subset and the prompting policy used to generate per-task Python code.",
+  "prompt_context": "Edit editable.py only. This file is the CO-Bench wrapper. Preserve def build_run_config(), SYSTEM_PROMPT, build_user_prompt(problem_description), and RUN_CONFIG = build_run_config(). The benchmark evaluates the wrapper by using it to prompt the model for each CO-Bench task.",
+  "objective_spec": {
+    "display_name": "Average normalized test score",
+    "direction": "max",
+    "unit": "score",
+    "summary_template": "Higher average normalized CO-Bench test score is better.",
+    "formula": "avg_test_score = mean(test_score(task_i))"
+  }
+}

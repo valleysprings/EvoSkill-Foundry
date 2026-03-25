@@ -70,6 +70,28 @@ def _parse_positive_int(raw_value: str | None, field: str) -> int | None:
     return parsed
 
 
+def _read_json_body(handler: SimpleHTTPRequestHandler) -> dict[str, object]:
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None:
+        return {}
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        raise ConfigError("Content-Length must be an integer") from exc
+    if length <= 0:
+        return {}
+    raw_body = handler.rfile.read(length)
+    if not raw_body:
+        return {}
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError("Request body must be valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError("Request body must be a JSON object.")
+    return payload
+
+
 def _parse_port(raw_value: str) -> int:
     try:
         port = int(raw_value)
@@ -285,6 +307,7 @@ def _run_job_process(
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    external_config: dict[str, object] | None,
 ) -> None:
     def progress(event: dict) -> None:
         event_queue.put({"type": "event", "event": event})
@@ -301,6 +324,7 @@ def _run_job_process(
             branching_factor=branching_factor,
             item_workers=item_workers,
             max_items=max_items,
+            external_config=external_config,
         )
         event_queue.put({"type": "completed", "artifact_path": str(artifact)})
     except Exception as exc:  # noqa: BLE001
@@ -316,6 +340,7 @@ def _run_job(
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    external_config: dict[str, object] | None,
 ) -> None:
     if _should_run_job_inline():
         def progress(event: dict) -> None:
@@ -334,6 +359,7 @@ def _run_job(
                 branching_factor=branching_factor,
                 item_workers=item_workers,
                 max_items=max_items,
+                external_config=external_config,
             )
             payload = json.loads(Path(artifact).read_text())
             with JOB_LOCK:
@@ -360,6 +386,7 @@ def _run_job(
             candidate_budget,
             item_workers,
             max_items,
+            external_config,
         ),
         daemon=True,
     )
@@ -450,6 +477,7 @@ def _start_job(
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    external_config: dict[str, object] | None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
     with JOB_LOCK:
@@ -461,6 +489,7 @@ def _start_job(
             "candidate_budget": candidate_budget,
             "item_workers": item_workers,
             "max_items": max_items,
+            "external_config": external_config,
             "events": [],
             "payload": None,
             "terminal": False,
@@ -473,7 +502,17 @@ def _start_job(
         }
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, task_id, proposal_runtime, branching_factor, generation_budget, candidate_budget, item_workers, max_items),
+        args=(
+            job_id,
+            task_id,
+            proposal_runtime,
+            branching_factor,
+            generation_budget,
+            candidate_budget,
+            item_workers,
+            max_items,
+            external_config,
+        ),
         daemon=True,
     )
     thread.start()
@@ -544,6 +583,11 @@ class DemoHandler(SimpleHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if parsed.path == "/api/run-task":
+            try:
+                request_body = _read_json_body(self)
+            except ConfigError as exc:
+                _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
+                return
             task_id = query.get("task_id", [None])[0]
             model = query.get("model", [None])[0]
             branching_value = query.get("branching_factor", [None])[0]
@@ -551,6 +595,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             candidate_value = query.get("candidate_budget", [None])[0]
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
+            external_config_value = request_body.get("external_config")
             if task_id is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "task_id is required")
                 return
@@ -560,8 +605,14 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                if external_config_value is not None and not isinstance(external_config_value, dict):
+                    raise ConfigError("external_config must be a JSON object.")
+                external_config = dict(external_config_value) if isinstance(external_config_value, dict) else None
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
+                return
+            except ConfigError as exc:
+                _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
                 runtime = _runtime_for_request(model)
@@ -579,6 +630,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         candidate_budget,
                         item_workers,
                         max_items,
+                        external_config,
                     ),
                     "model": runtime.active_model,
                 },
@@ -587,6 +639,11 @@ class DemoHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/run-sequence":
+            try:
+                request_body = _read_json_body(self)
+            except ConfigError as exc:
+                _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
+                return
             model = query.get("model", [None])[0]
             branching_value = query.get("branching_factor", [None])[0]
             generation_value = query.get("generation_budget", [None])[0]
@@ -599,8 +656,14 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                external_config_value = request_body.get("external_config")
+                if external_config_value is not None:
+                    raise ConfigError("external_config is only supported for /api/run-task.")
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
+                return
+            except ConfigError as exc:
+                _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
                 runtime = _runtime_for_request(model)
@@ -618,6 +681,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         candidate_budget,
                         item_workers,
                         max_items,
+                        None,
                     ),
                     "model": runtime.active_model,
                 },

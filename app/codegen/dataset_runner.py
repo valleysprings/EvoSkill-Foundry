@@ -15,6 +15,7 @@ from app.codegen.dataset_support import (
     load_question_manifest,
 )
 from app.codegen.llm import ProposalRuntime
+from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.codegen.trainer import run_codegen_task
 from app.memory.store import MemoryStore
 
@@ -167,7 +168,7 @@ def run_dataset_task(
     pace_ms: int = 0,
 ) -> dict[str, Any]:
     if not is_dataset_task(task):
-        raise ValueError(f"Task {task['id']} is not a dataset-task.")
+        raise ValueError(f"Task {task['id']} does not use the dataset runtime backend.")
 
     requested_items = max_items if isinstance(max_items, int) and max_items > 0 else int(task.get("dataset_size") or 0) or None
     items = load_question_manifest(task, min_items=requested_items)
@@ -265,7 +266,9 @@ def run_dataset_task(
             "candidate_budget": task["candidate_budget"],
             "branching_factor": task["branching_factor"],
             "item_workers": configured_workers,
-            "source_type": task["source_type"],
+            "runtime_backend": infer_runtime_backend(task),
+            "task_mode": infer_task_mode(task),
+            "optimization_scope": infer_optimization_scope(task),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
             "dataset_id": task["dataset_id"],

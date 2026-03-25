@@ -12,8 +12,14 @@
   "allow_browsing": false,
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "task_signature": ["single-file-optimization", "dataset-task", "math-question-solving"],
-  "source_type": "dataset-task",
+  "runtime_backend": "dataset",
+  "task_mode": "answer",
+  "optimization_scope": "implementation",
+  "task_signature": [
+    "single-file-optimization",
+    "dataset-task",
+    "math-question-solving"
+  ],
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "solve",

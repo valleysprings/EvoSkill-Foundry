@@ -55,7 +55,14 @@ export type TaskSummary = {
   dataset_size?: number;
   local_dataset_only?: boolean;
   split?: string | null;
+  runtime_backend: string;
+  task_mode: string;
+  optimization_scope: string;
   included_in_main_comparison: boolean;
+  supports_runtime_config: boolean;
+  external_run_config?: Record<string, unknown> | null;
+  supports_max_items: boolean;
+  default_max_items?: number | null;
 };
 
 export type CandidateMetrics = {
@@ -181,7 +188,6 @@ export type RunTask = {
   candidate_budget: number;
   branching_factor: number;
   item_workers: number;
-  source_type: string;
   benchmark_tier: string;
   track: string;
   dataset_id: string;
@@ -189,6 +195,13 @@ export type RunTask = {
   local_dataset_only?: boolean;
   split?: string | null;
   included_in_main_comparison: boolean;
+  runtime_backend?: string;
+  task_mode?: string;
+  optimization_scope?: string;
+  supports_runtime_config?: boolean;
+  external_run_config?: Record<string, unknown> | null;
+  supports_max_items?: boolean;
+  default_max_items?: number | null;
 };
 
 export type DatasetSummary = {
@@ -348,6 +361,7 @@ export type JobState = {
   error?: string | null;
   model?: string | null;
   details?: unknown;
+  external_config?: Record<string, unknown> | null;
   events: LiveEvent[];
   payload?: Payload;
 };

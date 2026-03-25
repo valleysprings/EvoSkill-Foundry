@@ -16,12 +16,14 @@ from app.codegen.selection import (
 DEFAULT_BRANCHING_FACTOR = 4
 DEFAULT_EDITABLE_FILE = "editable.py"
 DEFAULT_ENTRY_SYMBOL = "solve"
-DEFAULT_SOURCE_TYPE = "benchmark-task"
 VALID_BENCHMARK_TIERS = {"experiment", "comparable"}
 REQUIRED_TASK_FIELDS = (
     "benchmark_tier",
     "track",
     "answer_metric",
+    "runtime_backend",
+    "task_mode",
+    "optimization_scope",
     "editable_file",
     "entry_symbol",
     "verifier",

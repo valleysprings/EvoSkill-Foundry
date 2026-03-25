@@ -11,24 +11,41 @@ from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks
 
 
 class CodegenCatalogTest(unittest.TestCase):
-    def test_active_registry_contains_only_comparable_tasks(self) -> None:
+    def test_active_registry_separates_comparable_and_experiment_tasks(self) -> None:
         tasks = load_codegen_tasks()
         experiment_tasks = [task for task in tasks if task["benchmark_tier"] == "experiment"]
         comparable_tasks = [task for task in tasks if task["benchmark_tier"] == "comparable"]
 
-        self.assertFalse(experiment_tasks)
+        self.assertEqual(
+            {task["id"] for task in experiment_tasks},
+            {
+                "terminal-bench",
+                "tau-bench-retail",
+                "tau-bench-airline",
+                "nl4opt",
+                "industryor",
+                "co-bench",
+            },
+        )
         self.assertTrue(comparable_tasks)
         self.assertEqual(
             {task["track"] for task in comparable_tasks},
-            {"math_verified", "reasoning_verified", "longcontext_verified", "science_verified", "terminal_verified", "coding_verified"},
+            {
+                "math_verified",
+                "reasoning_verified",
+                "planning_verified",
+                "deepsearch_verified",
+                "science_verified",
+                "coding_verified",
+            },
         )
         self.assertTrue(all(task["included_in_main_comparison"] for task in comparable_tasks))
         self.assertEqual([task["id"] for task in comparable_tasks[:5]], ["olymmath", "math-500", "aime-2024", "aime-2025", "aime-2026"])
 
-    def test_main_comparison_filter_returns_all_active_tasks(self) -> None:
+    def test_main_comparison_filter_returns_only_comparable_tasks(self) -> None:
         all_tasks = load_codegen_tasks()
         main_tasks = load_codegen_tasks(included_in_main_comparison=True)
-        self.assertEqual([task["id"] for task in main_tasks], [task["id"] for task in all_tasks])
+        self.assertLess(len(main_tasks), len(all_tasks))
         self.assertTrue(main_tasks)
         self.assertTrue(all(task["benchmark_tier"] == "comparable" for task in main_tasks))
 
@@ -47,6 +64,9 @@ class CodegenCatalogTest(unittest.TestCase):
         scienceqa = next(task for task in summaries if task["id"] == "scienceqa")
         openbookqa = next(task for task in summaries if task["id"] == "openbookqa")
         livecodebench = next(task for task in summaries if task["id"] == "livecodebench")
+        terminal_bench = next(task for task in summaries if task["id"] == "terminal-bench")
+        tau_bench_retail = next(task for task in summaries if task["id"] == "tau-bench-retail")
+        nl4opt = next(task for task in summaries if task["id"] == "nl4opt")
         summary_ids = {task["id"] for task in summaries}
         self.assertNotIn("contains-duplicates", summary_ids)
         self.assertNotIn("planbench-lite", summary_ids)
@@ -64,7 +84,7 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertEqual(aime_2026["split"], "test")
         self.assertTrue(planbench["local_dataset_only"])
         self.assertEqual(planbench["dataset_size"], 2270)
-        self.assertEqual(planbench["track"], "reasoning_verified")
+        self.assertEqual(planbench["track"], "planning_verified")
         self.assertTrue(planbench["included_in_main_comparison"])
         self.assertEqual(planbench["split"], "task_1_plan_generation:train")
         self.assertEqual(planbench["selection_spec"]["profile"], "plan_length")
@@ -72,7 +92,7 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertEqual(arc_challenge["track"], "reasoning_verified")
         self.assertEqual(arc_challenge["split"], "validation:ARC-Challenge")
         self.assertEqual(longbench["dataset_size"], 503)
-        self.assertEqual(longbench["track"], "longcontext_verified")
+        self.assertEqual(longbench["track"], "deepsearch_verified")
         self.assertEqual(longbench["split"], "train")
         self.assertTrue(longbench["included_in_main_comparison"])
         self.assertEqual(sciq["dataset_size"], 1000)
@@ -89,6 +109,30 @@ class CodegenCatalogTest(unittest.TestCase):
         self.assertEqual(livecodebench["track"], "coding_verified")
         self.assertEqual(livecodebench["split"], "release_v6:test")
         self.assertTrue(livecodebench["included_in_main_comparison"])
+        self.assertEqual(livecodebench["runtime_backend"], "dataset")
+        self.assertEqual(livecodebench["task_mode"], "artifact")
+        self.assertEqual(livecodebench["optimization_scope"], "implementation")
+        self.assertFalse(livecodebench["supports_runtime_config"])
+        self.assertTrue(livecodebench["supports_max_items"])
+        self.assertEqual(livecodebench["default_max_items"], 1055)
+        self.assertEqual(terminal_bench["track"], "agent_verified")
+        self.assertFalse(terminal_bench["included_in_main_comparison"])
+        self.assertEqual(terminal_bench["runtime_backend"], "external")
+        self.assertEqual(terminal_bench["task_mode"], "agent")
+        self.assertEqual(terminal_bench["optimization_scope"], "wrapper")
+        self.assertTrue(terminal_bench["supports_runtime_config"])
+        self.assertEqual(terminal_bench["external_run_config"]["agent_name"], "terminus-2")
+        self.assertTrue(terminal_bench["supports_max_items"])
+        self.assertEqual(terminal_bench["default_max_items"], 5)
+        self.assertEqual(tau_bench_retail["track"], "agent_verified")
+        self.assertEqual(tau_bench_retail["task_mode"], "agent")
+        self.assertTrue(tau_bench_retail["supports_runtime_config"])
+        self.assertEqual(tau_bench_retail["default_max_items"], 10)
+        self.assertEqual(nl4opt["track"], "or_verified")
+        self.assertFalse(nl4opt["included_in_main_comparison"])
+        self.assertEqual(nl4opt["task_mode"], "artifact")
+        self.assertEqual(nl4opt["optimization_scope"], "wrapper")
+        self.assertTrue(nl4opt["supports_max_items"])
 
     def test_missing_local_benchmark_assets_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -146,7 +190,9 @@ class CodegenCatalogTest(unittest.TestCase):
                         "answer_metric": "test_pass_rate",
                         "family": "coding",
                         "task_signature": ["dataset-task"],
-                        "source_type": "dataset-task",
+                        "runtime_backend": "dataset",
+                        "task_mode": "artifact",
+                        "optimization_scope": "implementation",
                         "editable_file": "editable.py",
                         "verifier": "verifier.py",
                         "entry_symbol": "solve",

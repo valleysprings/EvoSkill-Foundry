@@ -229,6 +229,10 @@ docs/
 !/benchmark/math_verified/**
 !/benchmark/coding_verified/
 !/benchmark/coding_verified/**
+!/benchmark/agent_verified/
+!/benchmark/agent_verified/**
+!/benchmark/or_verified/
+!/benchmark/or_verified/**
 !/benchmark/science_verified/
 /benchmark/science_verified/**
 !/benchmark/science_verified/openbookqa/

@@ -1,0 +1,32 @@
+{
+  "id": "external-score",
+  "title": "External Score Fixture",
+  "description": "Test-only external benchmark fixture that bypasses codegen and returns a normalized external result.",
+  "benchmark_tier": "experiment",
+  "track": "test_fixtures",
+  "dataset_id": "external_score_fixture_v1",
+  "answer_metric": "success_rate",
+  "family": "agent",
+  "runtime_backend": "external",
+  "task_mode": "agent",
+  "optimization_scope": "wrapper",
+  "task_signature": [
+    "external-benchmark",
+    "fixture"
+  ],
+  "editable_file": "editable.py",
+  "verifier": "verifier.py",
+  "entry_symbol": "build_run_config",
+  "generation_budget": 0,
+  "candidate_budget": 0,
+  "branching_factor": 0,
+  "baseline_summary": "Checked-in external benchmark fixture wrapper.",
+  "prompt_context": "Edit editable.py only. This file is the fixture wrapper. Preserve def build_run_config() and RUN_CONFIG = build_run_config().",
+  "objective_spec": {
+    "display_name": "Success rate",
+    "direction": "max",
+    "unit": "ratio",
+    "summary_template": "Higher success rate is better on this external benchmark fixture.",
+    "formula": "success_rate = passed / total"
+  }
+}

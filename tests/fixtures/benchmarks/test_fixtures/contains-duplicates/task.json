@@ -7,8 +7,14 @@
   "dataset_id": "contains-duplicates-v1",
   "answer_metric": "speedup_vs_baseline",
   "family": "set-logic",
-  "task_signature": ["single-file-optimization", "test-fixture", "duplicate-detection"],
-  "source_type": "benchmark-task",
+  "runtime_backend": "single",
+  "task_mode": "answer",
+  "optimization_scope": "implementation",
+  "task_signature": [
+    "single-file-optimization",
+    "test-fixture",
+    "duplicate-detection"
+  ],
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "contains_duplicates",

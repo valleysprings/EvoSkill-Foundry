@@ -226,13 +226,10 @@ class CodegenVerifierTest(unittest.TestCase):
             self.assertEqual(metrics["status"], "pass")
             self.assertGreater(metrics["speedup_vs_baseline"], 1.0)
 
-    def test_legacy_comparable_tracks_are_available_in_active_research_lane(self) -> None:
+    def test_no_standalone_non_dataset_comparable_tracks_remain_in_active_research_lane(self) -> None:
         comparable_tasks = load_codegen_tasks(included_in_main_comparison=True)
         comparable_tasks = [task for task in comparable_tasks if not task.get("local_dataset_only")]
-        self.assertEqual(
-            {task["id"] for task in comparable_tasks},
-            {"tbench-lite"},
-        )
+        self.assertEqual(comparable_tasks, [])
 
     def test_dataset_question_microtasks_generate_item_level_records(self) -> None:
         dataset_tasks = [task for task in load_codegen_tasks(included_in_main_comparison=True) if task.get("local_dataset_only")]

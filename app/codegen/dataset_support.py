@@ -14,12 +14,13 @@ from app.configs.codegen import (
     DATASET_SINGLE_QUESTION_INSTRUCTION,
     QUESTION_PREVIEW_LIMIT,
 )
+from app.codegen.task_contracts import infer_runtime_backend
 
 VALID_MATH_ANSWER_FORMATS = {"symbolic", "numeric", "choice"}
 
 
 def is_dataset_task(task: dict[str, Any]) -> bool:
-    return bool(task.get("local_dataset_only")) and str(task.get("source_type") or "") == "dataset-task"
+    return bool(task.get("local_dataset_only")) and infer_runtime_backend(task) == "dataset"
 
 
 def _slugify(value: str) -> str:

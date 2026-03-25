@@ -14,6 +14,11 @@
       "id": "planbench-lite",
       "path": "test_fixtures/planbench-lite",
       "enabled": true
+    },
+    {
+      "id": "external-score",
+      "path": "test_fixtures/external-score",
+      "enabled": true
     }
   ]
 }

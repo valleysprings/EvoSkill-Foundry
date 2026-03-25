@@ -8,13 +8,14 @@ from app.configs.codegen import (
     DEFAULT_BRANCHING_FACTOR,
     DEFAULT_EDITABLE_FILE,
     DEFAULT_ENTRY_SYMBOL,
-    DEFAULT_SOURCE_TYPE,
     REQUIRED_TASK_FIELDS,
     SEED_STRATEGY_EXPERIENCES,
     VALID_BENCHMARK_TIERS,
     speedup_objective_spec,
 )
+from app.codegen.external import is_external_task, load_value_from_candidate
 from app.codegen.selection import selection_spec_for_task
+from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.configs.paths import BENCHMARK_ROOT as CONFIG_BENCHMARK_ROOT
 from app.configs.paths import REGISTRY_PATH as CONFIG_REGISTRY_PATH
 
@@ -30,7 +31,9 @@ TRACK_ORDER = {
     "browse_snapshot": 3,
     "science_verified": 4,
     "terminal_verified": 5,
-    "coding_verified": 6,
+    "agent_verified": 6,
+    "coding_verified": 7,
+    "or_verified": 8,
 }
 TASK_ORDER = {
     "olymmath": 0,
@@ -46,11 +49,26 @@ TASK_ORDER = {
     "scienceqa": 10,
     "openbookqa": 11,
     "livecodebench": 12,
+    "terminal-bench": 13,
+    "tau-bench-retail": 14,
+    "tau-bench-airline": 15,
+    "nl4opt": 16,
+    "industryor": 17,
+    "co-bench": 18,
+}
+
+TRACK_ALIASES = {
+    ("planbench", "reasoning_verified"): "planning_verified",
+    ("longbench-v2", "longcontext_verified"): "deepsearch_verified",
 }
 
 
 def _speedup_objective_spec() -> dict[str, str]:
     return speedup_objective_spec()
+
+
+def _canonical_track(task_id: str, track: str) -> str:
+    return TRACK_ALIASES.get((task_id, track), track)
 
 
 def _count_manifest_items(path: Path) -> int:
@@ -82,7 +100,10 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["objective_direction"] = normalized.get("objective_direction") or objective_spec["direction"]
     normalized["branching_factor"] = int(normalized.get("branching_factor", DEFAULT_BRANCHING_FACTOR))
     normalized["benchmark_tier"] = benchmark_tier
-    normalized["track"] = str(normalized["track"]).strip()
+    normalized["track"] = _canonical_track(
+        str(normalized.get("id") or "").strip(),
+        str(normalized["track"]).strip(),
+    )
     normalized["answer_metric"] = str(normalized["answer_metric"]).strip()
     normalized["dataset_id"] = str(normalized.get("dataset_id") or normalized["id"])
     normalized["dataset_size"] = int(normalized.get("dataset_size") or 0)
@@ -91,7 +112,9 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["editable_file"] = str(normalized.get("editable_file") or DEFAULT_EDITABLE_FILE)
     normalized["editable_filename"] = Path(normalized["editable_file"]).name
     normalized["included_in_main_comparison"] = normalized["benchmark_tier"] == "comparable"
-    normalized["source_type"] = str(normalized.get("source_type") or DEFAULT_SOURCE_TYPE)
+    normalized["runtime_backend"] = infer_runtime_backend(normalized)
+    normalized["task_mode"] = infer_task_mode(normalized)
+    normalized["optimization_scope"] = infer_optimization_scope(normalized)
     normalized["local_dataset_only"] = bool(normalized.get("local_dataset_only"))
     split = normalized.get("split")
     normalized["split"] = str(split).strip() if isinstance(split, str) and split.strip() else None
@@ -103,12 +126,101 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["verifier_path"] = str(normalized["verifier_path"])
     normalized["editable_path"] = str(normalized["editable_path"])
     normalized["selection_spec"] = selection_spec_for_task(normalized)
+    if normalized["runtime_backend"] == "dataset" and not normalized["local_dataset_only"]:
+        raise ValueError(f"Dataset runtime task {normalized['id']} must declare local_dataset_only=true.")
+    if normalized["runtime_backend"] != "dataset" and normalized["local_dataset_only"]:
+        raise ValueError(
+            f"Task {normalized['id']} declares local_dataset_only=true but runtime_backend={normalized['runtime_backend']!r}."
+        )
     if normalized["local_dataset_only"]:
         if normalized["dataset_size"] <= 0:
             raise ValueError(f"Dataset task {normalized['id']} must declare dataset_size > 0.")
         if normalized["item_manifest"] is None:
             raise ValueError(f"Dataset task {normalized['id']} must declare item_manifest.")
     return normalized
+
+
+def _external_run_config(task: dict[str, Any]) -> dict[str, Any] | None:
+    if not is_external_task(task):
+        return None
+    config = dict(load_value_from_candidate(Path(str(task["editable_path"])), "RUN_CONFIG", {}) or {})
+    build_run_config = load_value_from_candidate(Path(str(task["editable_path"])), "build_run_config", None)
+    if callable(build_run_config):
+        built = build_run_config()
+        if isinstance(built, dict):
+            config = dict(built)
+    override = task.get("runtime_external_config")
+    if isinstance(override, dict):
+        config.update(override)
+    return config
+
+
+def _external_default_max_items(config: dict[str, Any] | None) -> int | None:
+    if not config:
+        return None
+    for key in ("n_tasks", "cases"):
+        value = config.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    for key in ("problem_names", "task_names", "tasks"):
+        value = config.get(key)
+        if isinstance(value, list) and value:
+            return len(value)
+    return None
+
+
+def _task_supports_max_items(task: dict[str, Any]) -> bool:
+    return bool(task.get("local_dataset_only") or is_external_task(task))
+
+
+def _task_default_max_items(task: dict[str, Any], external_run_config: dict[str, Any] | None) -> int | None:
+    if bool(task.get("local_dataset_only")):
+        size = int(task.get("dataset_size") or 0)
+        return size if size > 0 else None
+    return _external_default_max_items(external_run_config)
+
+
+def task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    external_run_config = _external_run_config(task)
+    default_item_workers = 0 if is_external_task(task) else 20
+    return {
+        "id": task["id"],
+        "title": task["title"],
+        "description": task["description"],
+        "family": task["family"],
+        "function_name": task["function_name"],
+        "entry_symbol": task["entry_symbol"],
+        "editable_file": task["editable_file"],
+        "answer_metric": task["answer_metric"],
+        "objective_label": task["objective_label"],
+        "objective_direction": task["objective_direction"],
+        "objective_spec": task["objective_spec"],
+        "selection_spec": task["selection_spec"],
+        "generation_budget": task["generation_budget"],
+        "candidate_budget": task["candidate_budget"],
+        "branching_factor": task["branching_factor"],
+        "item_workers": int(task.get("item_workers") or default_item_workers),
+        "benchmark_tier": task["benchmark_tier"],
+        "track": task["track"],
+        "dataset_id": task["dataset_id"],
+        "dataset_size": task["dataset_size"],
+        "local_dataset_only": task["local_dataset_only"],
+        "split": task["split"],
+        "runtime_backend": task["runtime_backend"],
+        "task_mode": task["task_mode"],
+        "optimization_scope": task["optimization_scope"],
+        "included_in_main_comparison": task["included_in_main_comparison"],
+        "supports_runtime_config": external_run_config is not None,
+        "external_run_config": external_run_config,
+        "supports_max_items": _task_supports_max_items(task),
+        "default_max_items": _task_default_max_items(task, external_run_config),
+    }
 
 
 def _registry_entries() -> list[dict[str, Any]]:
@@ -133,9 +245,13 @@ def _load_task(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(task, dict):
         raise ValueError(f"Task spec must be a JSON object: {task_path}")
     track_from_path = Path(relative_path).parts[0]
-    if isinstance(task.get("track"), str) and task["track"] != track_from_path:
+    task_id = str(task.get("id") or "").strip()
+    declared_track = str(task.get("track") or "").strip()
+    canonical_path_track = _canonical_track(task_id, track_from_path)
+    canonical_declared_track = _canonical_track(task_id, declared_track)
+    if declared_track and canonical_declared_track != canonical_path_track:
         raise ValueError(
-            f"Task {task.get('id') or '<unknown>'} declares track={task['track']!r} "
+            f"Task {task.get('id') or '<unknown>'} declares track={declared_track!r} "
             f"but registry path lives under {track_from_path!r}."
         )
     merged = {**task, "task_dir": str(task_dir), "task_path": str(task_path)}
@@ -196,34 +312,7 @@ def load_codegen_tasks(
 
 
 def list_codegen_task_summaries() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": task["id"],
-            "title": task["title"],
-            "description": task["description"],
-            "family": task["family"],
-            "function_name": task["function_name"],
-            "entry_symbol": task["entry_symbol"],
-            "editable_file": task["editable_file"],
-            "answer_metric": task["answer_metric"],
-            "objective_label": task["objective_label"],
-            "objective_direction": task["objective_direction"],
-            "objective_spec": task["objective_spec"],
-            "selection_spec": task["selection_spec"],
-            "generation_budget": task["generation_budget"],
-            "candidate_budget": task["candidate_budget"],
-            "branching_factor": task["branching_factor"],
-            "item_workers": int(task.get("item_workers") or 20),
-            "benchmark_tier": task["benchmark_tier"],
-            "track": task["track"],
-            "dataset_id": task["dataset_id"],
-            "dataset_size": task["dataset_size"],
-            "local_dataset_only": task["local_dataset_only"],
-            "split": task["split"],
-            "included_in_main_comparison": task["included_in_main_comparison"],
-        }
-        for task in load_codegen_tasks()
-    ]
+    return [task_summary(task) for task in load_codegen_tasks()]
 
 
 def seed_strategy_experiences() -> list[dict[str, Any]]:

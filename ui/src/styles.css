@@ -11,6 +11,8 @@
   --good-soft: rgba(20, 95, 82, 0.14);
   --warn: #a46a21;
   --warn-soft: rgba(164, 106, 33, 0.16);
+  --bad: #a23b32;
+  --bad-soft: rgba(162, 59, 50, 0.14);
   --code: #f4ede2;
   --shadow: 0 28px 80px rgba(73, 48, 19, 0.12);
   --bg:
@@ -32,6 +34,8 @@
   --good-soft: rgba(103, 206, 181, 0.12);
   --warn: #f0c277;
   --warn-soft: rgba(240, 194, 119, 0.12);
+  --bad: #ff8b7c;
+  --bad-soft: rgba(255, 139, 124, 0.12);
   --code: #0f1621;
   --shadow: 0 32px 82px rgba(0, 0, 0, 0.34);
   --bg:
@@ -225,6 +229,11 @@ pre {
   color: var(--warn);
 }
 
+.badge.bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
 .summary-pill {
   text-transform: none;
   letter-spacing: 0.02em;
@@ -297,6 +306,10 @@ h4 {
   gap: 8px;
 }
 
+.field-span-full {
+  grid-column: 1 / -1;
+}
+
 .launcher-warning {
   color: var(--warn);
   line-height: 1.45;
@@ -334,6 +347,13 @@ h4 {
   width: 100%;
   min-width: 0;
   max-width: 100%;
+}
+
+.code-textarea {
+  min-height: 260px;
+  padding: 14px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 .action {

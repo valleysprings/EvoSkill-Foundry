@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences
+from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences, task_summary
+from app.codegen.external import is_external_task, run_external_task
 from app.codegen.errors import ConfigError
 from app.configs.codegen import (
     DEFAULT_SESSION_ID,
@@ -34,6 +35,12 @@ from app.memory.store import MemoryStore
 
 RUNS = RUNS_ROOT
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _external_task_uses_codegen_loop(task: dict[str, Any]) -> bool:
+    if not is_external_task(task):
+        return False
+    return int(task.get("generation_budget") or 0) > 0 and int(task.get("candidate_budget") or 0) > 0
 
 
 def _relative(path: Path) -> str:
@@ -100,6 +107,7 @@ def generate_discrete_payload(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    external_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if task_id is not None:
         tasks = load_codegen_tasks(task_id)
@@ -121,6 +129,12 @@ def generate_discrete_payload(
                 patched["item_workers"] = item_workers
             overridden_tasks.append(patched)
         tasks = overridden_tasks
+    if external_config is not None:
+        if task_id is None or len(tasks) != 1:
+            raise ConfigError("external_config requires running exactly one task.")
+        if not is_external_task(tasks[0]):
+            raise ConfigError("external_config is only supported for external benchmark tasks.")
+        tasks = [{**tasks[0], "runtime_external_config": dict(external_config)}]
     _validate_runtime_dependencies(tasks)
 
     active_runs_root = runs_root or RUNS
@@ -143,7 +157,39 @@ def generate_discrete_payload(
     total_memory_before = 0
     total_memory_after = 0
     for task in tasks:
-        if is_dataset_task(task):
+        if _external_task_uses_codegen_loop(task):
+            task = {
+                **task,
+                "runtime_model_override": runtime.active_model,
+                "runtime_max_items": max_items,
+            }
+            before_count = legacy_store.count()
+            result = run_codegen_task(
+                task,
+                legacy_store,
+                proposal_runtime=runtime,
+                workspace_root=active_workspace_root,
+                session_id=session_id or DEFAULT_SESSION_ID,
+                progress_callback=progress_callback,
+                pace_ms=pace_ms,
+            )
+            after_count = legacy_store.count()
+            delta = after_count - before_count
+            result["memory_markdown"] = legacy_store.load_markdown()
+        elif is_external_task(task):
+            before_count = legacy_store.count()
+            result = run_external_task(
+                task,
+                proposal_runtime=runtime,
+                workspace_root=active_workspace_root / task["id"],
+                session_id=session_id or DEFAULT_SESSION_ID,
+                max_items=max_items,
+                progress_callback=progress_callback,
+                pace_ms=pace_ms,
+            )
+            after_count = legacy_store.count()
+            delta = after_count - before_count
+        elif is_dataset_task(task):
             result = run_dataset_task(
                 task,
                 proposal_runtime=runtime,
@@ -200,6 +246,10 @@ def generate_discrete_payload(
             )
 
     winners = Counter(run["winner"]["agent"] for run in runs if run["included_in_main_comparison"])
+    task_catalog = list_codegen_task_summaries()
+    if len(tasks) == 1 and task_id is not None:
+        current_summary = task_summary(tasks[0])
+        task_catalog = [current_summary if task["id"] == current_summary["id"] else task for task in task_catalog]
     return {
         "run_mode": "llm-required",
         "summary": {
@@ -232,7 +282,7 @@ def generate_discrete_payload(
             "workspace_root": _relative(active_workspace_root),
             "max_items": max_items,
         },
-        "task_catalog": list_codegen_task_summaries(),
+        "task_catalog": task_catalog,
         "memory_markdown": legacy_store.load_markdown(),
         "runs": runs,
     }
@@ -319,6 +369,7 @@ def write_discrete_artifacts(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    external_config: dict[str, Any] | None = None,
 ) -> Path:
     active_runs_root = runs_root or RUNS
     session_id = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
@@ -348,6 +399,7 @@ def write_discrete_artifacts(
         branching_factor=branching_factor,
         item_workers=item_workers,
         max_items=max_items,
+        external_config=external_config,
     )
     payload["audit"]["session_id"] = session_id
     generated_at = str(payload["summary"]["generated_at"])

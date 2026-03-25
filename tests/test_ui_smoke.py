@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class UiSmokeTest(unittest.TestCase):
     def test_react_app_mentions_llm_required_and_dynamic_runtime(self) -> None:
         source = (ROOT / "ui" / "src" / "App.tsx").read_text()
+        self.assertIn('reasoning_verified: "Reasoning"', source)
         self.assertIn('planning_verified: "Planning"', source)
         self.assertIn('deepsearch_verified: "Deep Search"', source)
         self.assertIn("llm-required", source)
@@ -35,6 +36,10 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("Dataset size:", source)
         self.assertIn("Demo warning: running more than 50 LiveCodeBench items here is not recommended.", source)
         self.assertIn("Single-item task: cap disabled", source)
+        self.assertIn("External RUN_CONFIG", source)
+        self.assertIn("configured via RUN_CONFIG", source)
+        self.assertIn("Blank uses the current RUN_CONFIG default", source)
+        self.assertIn("selectedTask?.supports_runtime_config", source)
         self.assertIn("dataset brief", source)
         self.assertIn("Frontier Parents", source)
         self.assertIn("Max Search Rounds", source)
@@ -53,7 +58,6 @@ class UiSmokeTest(unittest.TestCase):
         self.assertNotIn("sidecar", source)
         self.assertNotIn("Cached run reports", source)
         self.assertNotIn("Benchmark Reports", source)
-        self.assertNotIn('reasoning_verified: "Reasoning"', source)
         self.assertNotIn('longcontext_verified: "Long Context"', source)
         self.assertNotIn("Multihop Reasoning", source)
         self.assertNotIn("Smoke / Regression", source)
