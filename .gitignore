@@ -257,3 +257,4 @@ docs/
 /benchmark/**/*.pyc
 node_modules/
 ui/dist/
+assets/report.pdf

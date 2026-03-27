@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from app.codegen.catalog import list_codegen_task_summaries
 from app.codegen.errors import AutoresearchError, ConfigError
 from app.codegen.llm import ProposalRuntime
+from app.configs.prompts import MODEL_COMPLETION_MAX_ATTEMPTS
 from app.entries.runner import ROOT, load_cached_discrete_payload, write_discrete_artifacts
 
 
@@ -29,7 +30,10 @@ JOB_LOCK = threading.Lock()
 JOBS: dict[str, dict[str, object]] = {}
 PORT_CONFLICT_MODES = ("auto", "next", "kill", "error")
 JOB_PROCESS_START_METHOD = os.getenv("AUTORESEARCH_JOB_PROCESS_START_METHOD", "spawn").strip().lower() or "spawn"
-JOB_STALL_TIMEOUT_S = 180.0
+DEFAULT_JOB_STALL_TIMEOUT_S = 180.0
+JOB_STALL_TIMEOUT_S = DEFAULT_JOB_STALL_TIMEOUT_S
+JOB_STALL_PROGRESS_GRACE_S = 60.0
+JOB_STALL_REASONER_EXTRA_S = 120.0
 QUIET_ACCESS_LOG_PATHS = frozenset({"/api/latest-run", "/api/job", "/api/health"})
 
 
@@ -38,11 +42,33 @@ def _runtime_for_request(model: str | None = None) -> ProposalRuntime:
     return runtime.with_model(model)
 
 
+def _retry_backoff_budget_s() -> float:
+    return float(sum(min(2 ** (attempt - 1), 5) for attempt in range(1, MODEL_COMPLETION_MAX_ATTEMPTS)))
+
+
+def _job_stall_timeout_s(proposal_runtime: ProposalRuntime) -> float:
+    configured_timeout = float(JOB_STALL_TIMEOUT_S)
+    if configured_timeout != DEFAULT_JOB_STALL_TIMEOUT_S:
+        return configured_timeout
+
+    derived_timeout = (
+        float(proposal_runtime.config.timeout_s) * MODEL_COMPLETION_MAX_ATTEMPTS
+        + _retry_backoff_budget_s()
+        + JOB_STALL_PROGRESS_GRACE_S
+    )
+    if "reasoner" in proposal_runtime.active_model.lower():
+        derived_timeout += JOB_STALL_REASONER_EXTRA_S
+    return max(configured_timeout, derived_timeout)
+
+
 def _json_response(handler: SimpleHTTPRequestHandler, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
     body = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Expires", "0")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -68,6 +94,14 @@ def _parse_positive_int(raw_value: str | None, field: str) -> int | None:
     if parsed <= 0:
         raise ValueError(f"{field} must be a positive integer")
     return parsed
+
+
+def _parse_item_ids(raw_value: str | None) -> list[str] | None:
+    if raw_value is None:
+        return None
+    tokens = [token.strip() for token in raw_value.replace("\n", ",").split(",")]
+    selected = [token for token in tokens if token]
+    return selected or None
 
 
 def _read_json_body(handler: SimpleHTTPRequestHandler) -> dict[str, object]:
@@ -307,6 +341,7 @@ def _run_job_process(
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    selected_item_ids: list[str] | None,
     external_config: dict[str, object] | None,
 ) -> None:
     def progress(event: dict) -> None:
@@ -324,6 +359,7 @@ def _run_job_process(
             branching_factor=branching_factor,
             item_workers=item_workers,
             max_items=max_items,
+            selected_item_ids=selected_item_ids,
             external_config=external_config,
         )
         event_queue.put({"type": "completed", "artifact_path": str(artifact)})
@@ -335,11 +371,13 @@ def _run_job(
     job_id: str,
     task_id: str | None,
     proposal_runtime: ProposalRuntime,
+    stall_timeout_s: float,
     branching_factor: int | None,
     generation_budget: int | None,
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    selected_item_ids: list[str] | None,
     external_config: dict[str, object] | None,
 ) -> None:
     if _should_run_job_inline():
@@ -359,6 +397,7 @@ def _run_job(
                 branching_factor=branching_factor,
                 item_workers=item_workers,
                 max_items=max_items,
+                selected_item_ids=selected_item_ids,
                 external_config=external_config,
             )
             payload = json.loads(Path(artifact).read_text())
@@ -386,6 +425,7 @@ def _run_job(
             candidate_budget,
             item_workers,
             max_items,
+            selected_item_ids,
             external_config,
         ),
         daemon=True,
@@ -398,7 +438,7 @@ def _run_job(
             try:
                 message = event_queue.get(timeout=0.5)
             except queue_module.Empty:
-                if time.monotonic() - last_progress_at > JOB_STALL_TIMEOUT_S:
+                if time.monotonic() - last_progress_at > stall_timeout_s:
                     if process.is_alive():
                         process.terminate()
                         process.join(timeout=2)
@@ -412,7 +452,7 @@ def _run_job(
                                 "terminal": True,
                                 "error_type": "runtime_error",
                                 "error": (
-                                    f"Job stalled for more than {int(JOB_STALL_TIMEOUT_S)} seconds without progress and was terminated."
+                                    f"Job stalled for more than {stall_timeout_s:g} seconds without progress and was terminated."
                                 ),
                                 "model": proposal_runtime.active_model,
                             }
@@ -477,9 +517,11 @@ def _start_job(
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    selected_item_ids: list[str] | None,
     external_config: dict[str, object] | None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
+    stall_timeout_s = _job_stall_timeout_s(proposal_runtime)
     with JOB_LOCK:
         JOBS[job_id] = {
             "status": "running",
@@ -489,6 +531,7 @@ def _start_job(
             "candidate_budget": candidate_budget,
             "item_workers": item_workers,
             "max_items": max_items,
+            "item_ids": list(selected_item_ids) if selected_item_ids is not None else None,
             "external_config": external_config,
             "events": [],
             "payload": None,
@@ -498,7 +541,7 @@ def _start_job(
             "model": proposal_runtime.active_model,
             "started_at": time.time(),
             "last_progress_at": time.time(),
-            "stall_timeout_s": JOB_STALL_TIMEOUT_S,
+            "stall_timeout_s": stall_timeout_s,
         }
     thread = threading.Thread(
         target=_run_job,
@@ -506,11 +549,13 @@ def _start_job(
             job_id,
             task_id,
             proposal_runtime,
+            stall_timeout_s,
             branching_factor,
             generation_budget,
             candidate_budget,
             item_workers,
             max_items,
+            selected_item_ids,
             external_config,
         ),
         daemon=True,
@@ -547,8 +592,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/runtime":
+            model = query.get("model", [None])[0]
             try:
-                runtime = _runtime_for_request()
+                runtime = _runtime_for_request(model)
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, _error_payload(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
@@ -595,6 +641,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             candidate_value = query.get("candidate_budget", [None])[0]
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
+            item_ids_value = query.get("item_ids", [None])[0]
             external_config_value = request_body.get("external_config")
             if task_id is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "task_id is required")
@@ -605,6 +652,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                selected_item_ids = _parse_item_ids(item_ids_value)
                 if external_config_value is not None and not isinstance(external_config_value, dict):
                     raise ConfigError("external_config must be a JSON object.")
                 external_config = dict(external_config_value) if isinstance(external_config_value, dict) else None
@@ -630,6 +678,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         candidate_budget,
                         item_workers,
                         max_items,
+                        selected_item_ids,
                         external_config,
                     ),
                     "model": runtime.active_model,
@@ -650,15 +699,19 @@ class DemoHandler(SimpleHTTPRequestHandler):
             candidate_value = query.get("candidate_budget", [None])[0]
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
+            item_ids_value = query.get("item_ids", [None])[0]
             try:
                 branching_factor = _parse_positive_int(branching_value, "branching_factor")
                 generation_budget = _parse_positive_int(generation_value, "generation_budget")
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                selected_item_ids = _parse_item_ids(item_ids_value)
                 external_config_value = request_body.get("external_config")
                 if external_config_value is not None:
                     raise ConfigError("external_config is only supported for /api/run-task.")
+                if selected_item_ids is not None:
+                    raise ConfigError("item_ids is only supported for /api/run-task.")
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -681,6 +734,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         candidate_budget,
                         item_workers,
                         max_items,
+                        selected_item_ids,
                         None,
                     ),
                     "model": runtime.active_model,

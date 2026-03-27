@@ -340,6 +340,9 @@ export type LiveEvent = {
   parent_candidate?: string;
   candidate?: string;
   candidate_actual?: string;
+  candidate_status?: string;
+  retry_attempt?: number;
+  max_attempts?: number;
   timestamp?: string;
   message?: string;
   accepted_to_frontier?: boolean;
@@ -356,6 +359,7 @@ export type JobState = {
   candidate_budget?: number | null;
   item_workers?: number | null;
   max_items?: number | null;
+  item_ids?: string[] | null;
   terminal?: boolean;
   error_type?: string | null;
   error?: string | null;

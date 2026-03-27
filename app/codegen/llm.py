@@ -46,6 +46,7 @@ from app.codegen.errors import LlmResponseError, LlmTransportError
 
 
 Transport = Callable[[dict[str, Any], RuntimeConfig], str]
+RetryProgressCallback = Callable[[dict[str, Any]], None]
 _TRANSPORT_GATE_LOCK = threading.Lock()
 _TRANSPORT_DISPATCHERS: dict[str, tuple[int, "_TransportDispatcher"]] = {}
 
@@ -332,6 +333,33 @@ def _response_envelope_error(
     )
 
 
+def _emit_retry_progress(
+    *,
+    progress_callback: RetryProgressCallback | None,
+    purpose: str,
+    runtime: "ProposalRuntime",
+    attempt: int,
+    parse_status: str,
+) -> None:
+    if progress_callback is None or attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
+        return
+    next_attempt = attempt + 1
+    progress_callback(
+        {
+            "phase": "llm_retry",
+            "purpose": purpose,
+            "selected_model": runtime.active_model,
+            "parse_status": parse_status,
+            "retry_attempt": next_attempt,
+            "max_attempts": MODEL_COMPLETION_MAX_ATTEMPTS,
+            "message": (
+                f"Retrying {purpose} with {runtime.active_model} "
+                f"(attempt {next_attempt}/{MODEL_COMPLETION_MAX_ATTEMPTS}) after {parse_status}."
+            ),
+        }
+    )
+
+
 def _normalize_imports(raw_imports: Any) -> list[str]:
     if raw_imports is None:
         return []
@@ -452,6 +480,7 @@ class ProposalRuntime:
         system_prompt: str,
         user_prompt: str,
         queue_priority: int = 1000,
+        progress_callback: RetryProgressCallback | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -484,6 +513,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_transport_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status="transport_error",
+                )
                 time.sleep(min(2**(attempt - 1), 5))
                 continue
             except TimeoutError as exc:
@@ -496,6 +532,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_transport_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status="transport_error",
+                )
                 time.sleep(min(2**(attempt - 1), 5))
                 continue
             except urllib.error.URLError as exc:
@@ -508,6 +551,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_transport_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status="transport_error",
+                )
                 time.sleep(min(2**(attempt - 1), 5))
                 continue
             try:
@@ -523,6 +573,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_parse_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status="invalid_http_json",
+                )
                 continue
 
             try:
@@ -538,6 +595,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_parse_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status="invalid_http_json",
+                )
                 continue
 
             text = _message_text(message)
@@ -556,6 +620,13 @@ class ProposalRuntime:
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_parse_error from exc
+                _emit_retry_progress(
+                    progress_callback=progress_callback,
+                    purpose=purpose,
+                    runtime=self,
+                    attempt=attempt,
+                    parse_status=str(last_parse_error.details.get("parse_status") or "invalid_json"),
+                )
                 continue
             trace = {
                 "purpose": purpose,
@@ -685,6 +756,7 @@ def propose_code_candidates(
     current_best: dict[str, Any],
     candidate_history: list[dict[str, Any]],
     memories: list[dict[str, Any]],
+    progress_callback: RetryProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     system_prompt, user_prompt = _proposal_prompt(
         task=task,
@@ -699,6 +771,7 @@ def propose_code_candidates(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         queue_priority=_proposal_queue_priority(generation),
+        progress_callback=progress_callback,
     )
     candidates = _normalize_candidate_payload(payload, task, trace)
     trace["candidate_count"] = len(candidates)

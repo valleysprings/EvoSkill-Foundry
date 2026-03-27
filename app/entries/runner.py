@@ -109,6 +109,7 @@ def generate_discrete_payload(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    selected_item_ids: list[str] | None = None,
     external_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if task_id is not None:
@@ -137,6 +138,11 @@ def generate_discrete_payload(
         if not is_external_task(tasks[0]):
             raise ConfigError("external_config is only supported for external benchmark tasks.")
         tasks = [{**tasks[0], "runtime_external_config": dict(external_config)}]
+    if selected_item_ids is not None:
+        if task_id is None or len(tasks) != 1:
+            raise ConfigError("item_ids requires running exactly one task.")
+        if not is_dataset_task(tasks[0]):
+            raise ConfigError("item_ids is only supported for dataset tasks.")
     _validate_runtime_dependencies(tasks)
 
     active_runs_root = runs_root or RUNS
@@ -199,6 +205,7 @@ def generate_discrete_payload(
                 memory_root=active_runs_root / ITEM_MEMORY_DIR_NAME,
                 session_id=session_id or DEFAULT_SESSION_ID,
                 max_items=max_items,
+                selected_item_ids=selected_item_ids,
                 progress_callback=progress_callback,
                 pace_ms=pace_ms,
             )
@@ -283,6 +290,7 @@ def generate_discrete_payload(
         "audit": {
             "workspace_root": _relative(active_workspace_root),
             "max_items": max_items,
+            "selected_item_ids": list(selected_item_ids) if selected_item_ids is not None else None,
         },
         "task_catalog": task_catalog,
         "memory_markdown": legacy_store.load_markdown(),
@@ -371,6 +379,7 @@ def write_discrete_artifacts(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    selected_item_ids: list[str] | None = None,
     external_config: dict[str, Any] | None = None,
 ) -> Path:
     active_runs_root = runs_root or RUNS
@@ -401,6 +410,7 @@ def write_discrete_artifacts(
         branching_factor=branching_factor,
         item_workers=item_workers,
         max_items=max_items,
+        selected_item_ids=selected_item_ids,
         external_config=external_config,
     )
     payload["audit"]["session_id"] = session_id

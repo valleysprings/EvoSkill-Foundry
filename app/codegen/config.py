@@ -10,13 +10,13 @@ from app.configs.runtime import (
     DEFAULT_AVAILABLE_MODELS,
     DEFAULT_LLM_CONCURRENCY,
     DEFAULT_PRIMARY_MODEL,
-    DEFAULT_RUNTIME_MAX_TOKENS,
     DEFAULT_RUNTIME_TEMPERATURE,
-    DEFAULT_RUNTIME_TIMEOUT_S,
     LLM_CONCURRENCY_ENV_KEY,
     PRIMARY_MODEL_ENV_KEY,
     REQUIRED_ENV_KEYS,
     ROOT,
+    default_max_tokens_for_model,
+    default_timeout_for_model,
 )
 from app.codegen.errors import ConfigError
 
@@ -145,6 +145,8 @@ class RuntimeConfig:
     timeout_s: int
     llm_concurrency: int
     selected_model: str | None = None
+    max_tokens_is_default: bool = False
+    timeout_s_is_default: bool = False
 
     @property
     def active_model(self) -> str:
@@ -152,12 +154,21 @@ class RuntimeConfig:
 
     def with_model(self, model: str | None) -> "RuntimeConfig":
         if model is None or model == "":
-            return replace(self, selected_model=None)
-        if model not in self.available_models:
-            raise ConfigError(
-                f"Model {model} is not enabled. Choose one of: {', '.join(self.available_models)}."
-            )
-        return replace(self, selected_model=model)
+            updated = replace(self, selected_model=None)
+        else:
+            if model not in self.available_models:
+                raise ConfigError(
+                    f"Model {model} is not enabled. Choose one of: {', '.join(self.available_models)}."
+                )
+            updated = replace(self, selected_model=model)
+        overrides: dict[str, int] = {}
+        if updated.max_tokens_is_default:
+            overrides["max_tokens"] = default_max_tokens_for_model(updated.active_model)
+        if updated.timeout_s_is_default:
+            overrides["timeout_s"] = default_timeout_for_model(updated.active_model)
+        if overrides:
+            updated = replace(updated, **overrides)
+        return updated
 
     def describe(self) -> dict[str, object]:
         return {
@@ -176,13 +187,19 @@ class RuntimeConfig:
 def load_runtime_config(root: Path | None = None) -> RuntimeConfig:
     load_repo_env(root or ROOT)
     primary_model = _primary_model()
+    raw_max_tokens = os.getenv("AUTORESEARCH_MAX_TOKENS")
+    raw_timeout_s = os.getenv("AUTORESEARCH_TIMEOUT_S")
+    max_tokens_is_default = raw_max_tokens is None or not raw_max_tokens.strip()
+    timeout_s_is_default = raw_timeout_s is None or not raw_timeout_s.strip()
     return RuntimeConfig(
         api_key=_require_non_empty("AUTORESEARCH_API_KEY"),
         api_base=_parse_api_base("AUTORESEARCH_API_BASE"),
         primary_model=primary_model,
         available_models=_parse_available_models(primary_model),
         temperature=_parse_float("AUTORESEARCH_TEMPERATURE", default=DEFAULT_RUNTIME_TEMPERATURE),
-        max_tokens=_parse_int("AUTORESEARCH_MAX_TOKENS", default=DEFAULT_RUNTIME_MAX_TOKENS),
-        timeout_s=_parse_int("AUTORESEARCH_TIMEOUT_S", default=DEFAULT_RUNTIME_TIMEOUT_S),
+        max_tokens=_parse_int("AUTORESEARCH_MAX_TOKENS", default=default_max_tokens_for_model(primary_model)),
+        timeout_s=_parse_int("AUTORESEARCH_TIMEOUT_S", default=default_timeout_for_model(primary_model)),
         llm_concurrency=_parse_optional_positive_int(LLM_CONCURRENCY_ENV_KEY, default=DEFAULT_LLM_CONCURRENCY),
+        max_tokens_is_default=max_tokens_is_default,
+        timeout_s_is_default=timeout_s_is_default,
     )

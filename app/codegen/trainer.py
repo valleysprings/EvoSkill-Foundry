@@ -367,6 +367,25 @@ def run_codegen_task(
                 message=_branch_message(branch_id, parent_candidate, len(retrieved)),
             )
 
+        def proposal_progress(branch_input: dict[str, Any]) -> ProgressCallback:
+            def emit_retry(event: dict[str, Any]) -> None:
+                _emit(
+                    progress_callback,
+                    pace_ms,
+                    task_id=task["id"],
+                    generation=generation,
+                    branch_id=branch_input["branch_id"],
+                    branch_index=branch_input["branch_index"],
+                    parent_candidate=branch_input["parent_candidate"]["agent"],
+                    candidate=event.get("selected_model") or proposal_runtime.active_model,
+                    accepted_to_frontier=False,
+                    improved_global_best=False,
+                    memory_delta=0,
+                    **event,
+                )
+
+            return emit_retry
+
         if len(branch_inputs) == 1:
             candidate_specs, proposal_trace = propose_code_candidates(
                 proposal_runtime,
@@ -376,6 +395,7 @@ def run_codegen_task(
                 current_best=generation_best_before,
                 candidate_history=candidate_history,
                 memories=branch_inputs[0]["retrieved_memories"],
+                progress_callback=proposal_progress(branch_inputs[0]),
             )
             branch_inputs[0]["candidate_specs"] = candidate_specs
             branch_inputs[0]["proposal_trace"] = proposal_trace
@@ -391,6 +411,7 @@ def run_codegen_task(
                         current_best=generation_best_before,
                         candidate_history=candidate_history,
                         memories=branch_input["retrieved_memories"],
+                        progress_callback=proposal_progress(branch_input),
                     ): branch_input
                     for branch_input in branch_inputs
                 }
@@ -683,6 +704,7 @@ def run_codegen_task(
             parent_candidate=winner_branch["parent_candidate"]["agent"],
             candidate=current_best["agent"],
             candidate_actual=_first_test_actual(current_best["metrics"]),
+            candidate_status=current_best["metrics"].get("verifier_status"),
             accepted_to_frontier=winner_branch["winner_accepted"],
             improved_global_best=winner_branch["winner_improved_global_best"],
             memory_delta=memory_delta,

@@ -22,6 +22,11 @@ import type {
 
 type ThemePreference = "system" | "light" | "dark";
 
+type RetryState = {
+  attempt: number;
+  maxAttempts: number;
+};
+
 type LiveItemCard = {
   itemKey: string;
   itemId: string;
@@ -38,15 +43,22 @@ type LiveItemCard = {
   bestObjective: number | null;
   itemBrief: string | null;
   expectedAnswer: string | null;
+  latestResponseOutput: string | null;
+  latestResponseStatus: string | null;
   responseOutput: string | null;
   responseStatus: string | null;
   latestMessage: string | null;
+  retryLabel: string | null;
+  startedAtMs: number | null;
+  latestEventAtMs: number | null;
+  finishedAtMs: number | null;
 };
 
 type LiveTaskCard = {
   taskId: string;
   title: string;
   description: string;
+  answerMetric: string | null;
   objectiveLabel: string;
   objectiveUnit: string | null;
   model: string;
@@ -71,7 +83,9 @@ type LiveTaskCard = {
 };
 
 type MutableLiveItemCard = LiveItemCard & {
+  acceptedKeys: Set<string>;
   branchIds: Set<string>;
+  retryStates: Map<string, RetryState>;
 };
 
 type MutableLiveTaskCard = Omit<LiveTaskCard, "items" | "totalItems" | "completedItems" | "passItems" | "acceptedCount" | "memoryDelta" | "bestPrimaryScore"> & {
@@ -165,6 +179,78 @@ function numeric(value: string | number | undefined | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isBinaryItemScoreTask(task: Pick<LiveTaskCard, "usesMaxItems" | "answerMetric">): boolean {
+  const metric = String(task.answerMetric ?? "").trim().toLowerCase();
+  return task.usesMaxItems && (metric === "exact_match_rate" || metric === "accuracy");
+}
+
+function parseTimestampMs(value: string | undefined | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatElapsedDuration(ms: number | null): string | null {
+  if (ms == null || !Number.isFinite(ms)) {
+    return null;
+  }
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
+function itemElapsedDuration(item: Pick<LiveItemCard, "status" | "startedAtMs" | "latestEventAtMs" | "finishedAtMs">, nowMs: number): string | null {
+  if (item.startedAtMs == null) {
+    return null;
+  }
+  const endAtMs =
+    item.status === "running"
+      ? Math.max(nowMs, item.latestEventAtMs ?? item.startedAtMs)
+      : item.finishedAtMs ?? item.latestEventAtMs;
+  if (endAtMs == null) {
+    return null;
+  }
+  return formatElapsedDuration(endAtMs - item.startedAtMs);
+}
+
+function statusWithDuration(status: string | null | undefined, duration: string | null): string {
+  return duration ? `${status ?? "pending"} ${duration}` : status ?? "pending";
+}
+
+function eventBranchKey(event: Pick<LiveEvent, "branch_id" | "generation">, fallback: string): string {
+  if (event.branch_id) {
+    return event.branch_id;
+  }
+  if (typeof event.generation === "number") {
+    return `g${event.generation}`;
+  }
+  return fallback;
+}
+
+function summarizeRetryStates(retryStates: Map<string, RetryState>): string | null {
+  if (!retryStates.size) {
+    return null;
+  }
+  if (retryStates.size > 1) {
+    return `retries ${retryStates.size}`;
+  }
+  const current = retryStates.values().next().value as RetryState | undefined;
+  if (!current) {
+    return null;
+  }
+  return `retry ${current.attempt}/${current.maxAttempts}`;
+}
+
 function parseExternalConfigInput(
   input: string,
   fallback: Record<string, unknown> | null = null,
@@ -181,6 +267,15 @@ function parseExternalConfigInput(
   } catch {
     return { config: null, error: "External RUN_CONFIG is not valid JSON." };
   }
+}
+
+function parseItemIdsInput(input: string): string[] | null {
+  const selected = input
+    .replace(/\n/g, ",")
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+  return selected.length ? selected : null;
 }
 
 function prettyJson(value: unknown): string {
@@ -704,6 +799,7 @@ function summarizeLiveTasks(
       taskId,
       title: catalogTask?.title ?? completedRun?.task.title ?? taskId,
       description: catalogTask?.description ?? completedRun?.task.description ?? "Benchmark description unavailable.",
+      answerMetric: catalogTask?.answer_metric ?? completedRun?.task.answer_metric ?? null,
       objectiveLabel: objectiveLabel(catalogTask?.objective_spec ?? completedRun?.task.objective_spec ?? { display_name: "Benchmark objective", direction: "max", summary_template: "", formula: "" }),
       objectiveUnit: catalogTask?.objective_spec?.unit ?? completedRun?.task.objective_spec?.unit ?? null,
       model: liveJob?.model ?? completedRun?.active_model ?? "n/a",
@@ -769,10 +865,18 @@ function summarizeLiveTasks(
       bestObjective: null,
       itemBrief: event.item_brief ?? null,
       expectedAnswer: event.expected_answer ?? null,
-      responseOutput: event.candidate_actual ?? null,
+      latestResponseOutput: event.candidate_actual ?? null,
+      latestResponseStatus: event.candidate_status ?? null,
+      responseOutput: null,
       responseStatus: null,
       latestMessage: null,
+      retryLabel: null,
+      startedAtMs: null,
+      latestEventAtMs: null,
+      finishedAtMs: null,
+      acceptedKeys: new Set<string>(),
       branchIds: new Set<string>(),
+      retryStates: new Map<string, RetryState>(),
     };
     task.itemsMap.set(itemKey, item);
     return item;
@@ -787,12 +891,18 @@ function summarizeLiveTasks(
     task.events.push(event);
     const displayMessage = formatLiveEventMessage(event, task.objectiveLabel, task.objectiveUnit);
     const item = getItem(task, event);
+    const eventTimestampMs = parseTimestampMs(event.timestamp);
     if (item) {
       item.displayName = humanizeItemName(event.item_name ?? item.displayName, item.itemId);
       item.itemBrief = event.item_brief ?? item.itemBrief;
       item.expectedAnswer = event.expected_answer ?? item.expectedAnswer;
-      item.responseOutput = event.candidate_actual ?? item.responseOutput;
+      item.latestResponseOutput = event.candidate_actual ?? item.latestResponseOutput;
+      item.latestResponseStatus = event.candidate_status ?? item.latestResponseStatus;
       item.latestMessage = displayMessage ?? item.latestMessage;
+      if (eventTimestampMs != null) {
+        item.startedAtMs = item.startedAtMs == null ? eventTimestampMs : Math.min(item.startedAtMs, eventTimestampMs);
+        item.latestEventAtMs = item.latestEventAtMs == null ? eventTimestampMs : Math.max(item.latestEventAtMs, eventTimestampMs);
+      }
       if (typeof event.generation === "number") {
         item.latestGeneration = Math.max(item.latestGeneration, event.generation);
       }
@@ -805,10 +915,22 @@ function summarizeLiveTasks(
       task.status = "running";
       if (item) {
         item.status = "running";
+        if (event.phase === "branch_started" || event.phase === "proposal_generated") {
+          item.retryStates.delete(eventBranchKey(event, item.itemKey));
+          item.retryLabel = summarizeRetryStates(item.retryStates);
+        }
+      }
+    }
+    if (event.phase === "llm_retry" && item) {
+      if (typeof event.retry_attempt === "number" && typeof event.max_attempts === "number") {
+        item.retryStates.set(eventBranchKey(event, item.itemKey), { attempt: event.retry_attempt, maxAttempts: event.max_attempts });
+        item.retryLabel = summarizeRetryStates(item.retryStates);
       }
     }
     if (event.phase === "candidate_verified" && item) {
       const metrics = parseCandidateMetrics(event.message);
+      item.retryStates.delete(eventBranchKey(event, item.itemKey));
+      item.retryLabel = summarizeRetryStates(item.retryStates);
       if (metrics.status === "pass") {
         item.passCount += 1;
       } else if (metrics.status === "fail") {
@@ -826,14 +948,22 @@ function summarizeLiveTasks(
         item.bestObjective = item.bestObjective == null ? metrics.objective : Math.max(item.bestObjective, metrics.objective);
       }
       if (metrics.status) {
-        item.responseStatus = metrics.status;
+        item.latestResponseStatus = metrics.status;
       }
+    }
+    if (event.phase === "generation_finished" && item) {
+      item.responseOutput = event.candidate_actual ?? item.responseOutput;
+      item.responseStatus = event.candidate_status ?? item.responseStatus;
+      item.retryStates.clear();
+      item.retryLabel = null;
     }
     if (event.accepted_to_frontier) {
       if (item) {
-        item.acceptCount += 1;
+        const acceptedKey =
+          event.branch_id ?? (typeof event.generation === "number" ? `g${event.generation}` : `${event.phase ?? "event"}-${task.events.length}`);
+        item.acceptedKeys.add(acceptedKey);
+        item.acceptCount = item.acceptedKeys.size;
       }
-      task.acceptedCount += 1;
     }
     if (item) {
       item.memoryDelta += event.memory_delta ?? 0;
@@ -843,6 +973,7 @@ function summarizeLiveTasks(
       task.currentBest = generationSummaryPill(event, task.objectiveLabel, task.objectiveUnit) ?? task.currentBest;
       if (item && item.latestGeneration >= task.generationBudget) {
         item.status = "completed";
+        item.finishedAtMs = eventTimestampMs ?? item.latestEventAtMs ?? item.finishedAtMs;
       }
     }
   }
@@ -856,21 +987,28 @@ function summarizeLiveTasks(
         .map((itemKey) => {
           const item = task.itemsMap.get(itemKey);
           const completedItemRun = completedItemRuns.get(itemKey);
+          const latestResponseOutput = item?.latestResponseOutput ?? null;
+          const latestResponseStatus = item?.latestResponseStatus ?? null;
           const responseOutput = candidateResponseOutput(completedItemRun?.winner) ?? item?.responseOutput ?? null;
           const responseStatus = candidateResponseStatus(completedItemRun?.winner) ?? item?.responseStatus ?? null;
           const winnerPassed = passedCandidate(completedItemRun?.winner);
           const winnerStatus = completedItemRun?.winner.metrics.verifier_status ?? completedItemRun?.winner.metrics.status ?? null;
           const latestGeneration = item?.latestGeneration ?? completedItemRun?.generations.length ?? 0;
+          const itemStatus =
+            liveJob?.status === "completed" || completedItemRun || latestGeneration >= task.generationBudget
+              ? "completed"
+              : liveJob?.status === "failed" && item
+                ? "failed"
+              : item?.status ?? "queued";
+          const finishedAtMs =
+            itemStatus === "running"
+              ? null
+              : item?.finishedAtMs ?? item?.latestEventAtMs ?? null;
           return {
             itemKey,
             itemId: completedItemRun?.item_id ?? item?.itemId ?? itemKey,
             displayName: humanizeItemName(completedItemRun?.item_name ?? item?.displayName ?? itemKey, itemKey),
-            status:
-              liveJob?.status === "completed" || completedItemRun || latestGeneration >= task.generationBudget
-                ? "completed"
-                : liveJob?.status === "failed" && item
-                  ? "failed"
-                : item?.status ?? "queued",
+            status: itemStatus,
             latestGeneration,
             branchCount: item?.branchIds.size ?? 0,
             passCount: item?.passCount ?? (winnerPassed ? 1 : 0),
@@ -883,9 +1021,15 @@ function summarizeLiveTasks(
             bestObjective: item?.bestObjective ?? (completedItemRun ? numeric(completedItemRun.winner.metrics.objective) : null),
             itemBrief: completedItemRun ? questionPreview(completedItemRun.question.prompt, 240) : item?.itemBrief ?? null,
             expectedAnswer: completedItemRun ? String(completedItemRun.question.expected_answer) : item?.expectedAnswer ?? null,
+            latestResponseOutput,
+            latestResponseStatus,
             responseOutput,
             responseStatus,
             latestMessage: item?.latestMessage ?? completedItemRun?.selection_reason ?? null,
+            retryLabel: item?.retryLabel ?? null,
+            startedAtMs: item?.startedAtMs ?? null,
+            latestEventAtMs: item?.latestEventAtMs ?? null,
+            finishedAtMs,
           };
         })
         .sort((left, right) => left.itemId.localeCompare(right.itemId));
@@ -898,9 +1042,10 @@ function summarizeLiveTasks(
             : liveJob?.status === "failed"
               ? "failed"
               : task.status,
+        acceptedCount: items.reduce((count, item) => count + item.acceptCount, 0),
         totalItems,
         completedItems: items.filter((item) => item.status === "completed").length,
-        passItems: items.filter((item) => item.passCount > 0 || item.responseStatus === "pass").length,
+        passItems: items.filter((item) => item.responseStatus === "pass").length,
         items,
       };
     })
@@ -1202,9 +1347,10 @@ function generationCard(generation: Generation, objectiveSpec: ObjectiveSpec, op
   );
 }
 
-function liveTaskSection(task: LiveTaskCard) {
+function liveTaskSection(task: LiveTaskCard, nowMs: number) {
   const completedRatio = task.totalItems ? task.completedItems / task.totalItems : 0;
   const passRatio = task.totalItems ? task.passItems / task.totalItems : 0;
+  const showScore = !isBinaryItemScoreTask(task);
   return (
     <article className="task-card live-task-card" key={task.taskId}>
       <div className="panel-header">
@@ -1235,13 +1381,18 @@ function liveTaskSection(task: LiveTaskCard) {
         {metric("completion", formatPercent(completedRatio))}
         {metric("items solved", `${task.passItems}/${task.totalItems || "?"}`)}
         {metric("solve rate", formatPercent(passRatio))}
-        {metric("best score seen", task.bestPrimaryScore == null ? "n/a" : task.bestPrimaryScore.toFixed(3))}
+        {showScore ? metric("best score seen", task.bestPrimaryScore == null ? "n/a" : task.bestPrimaryScore.toFixed(3)) : null}
         {metric("frontier accepts", task.acceptedCount)}
         {metric("memory delta", task.memoryDelta > 0 ? `+${task.memoryDelta}` : task.memoryDelta)}
       </div>
       <div className="live-scroll">
         {task.items.length ? (
-          task.items.map((item) => (
+          task.items.map((item) => {
+            const responseTone = verifierTone(item.responseStatus ?? item.latestResponseStatus);
+            const itemDuration = itemElapsedDuration(item, nowMs);
+            const isFinalItem = item.status === "completed" || item.status === "failed";
+            const finalResponseDuration = isFinalItem ? itemDuration : null;
+            return (
             <article className="live-item-row" key={item.itemKey}>
               <div className="panel-header">
                 <div className="live-item-main">
@@ -1249,13 +1400,14 @@ function liveTaskSection(task: LiveTaskCard) {
                   <div className="detail-summary-copy live-item-id">{item.itemId}</div>
                 </div>
                 <div className="badge-row">
-                  <span className={`badge ${statusTone(item.status)}`}>{item.status}</span>
+                  <span className={`badge ${statusTone(item.status)}`}>{statusWithDuration(item.status, itemDuration)}</span>
                   {task.generationBudget > 0 ? <span className="badge">Generation {item.latestGeneration || 0}/{task.generationBudget || "?"}</span> : null}
                   <span className="badge">branches {item.branchCount}</span>
-                  <span className="badge">solved {item.passCount}</span>
+                  <span className="badge">passes {item.passCount}</span>
                   <span className="badge">fail {item.failCount}</span>
                   <span className="badge">accepted {item.acceptCount}</span>
-                  <span className="badge">score {item.bestPrimaryScore == null ? "n/a" : item.bestPrimaryScore.toFixed(3)}</span>
+                  {item.retryLabel ? <span className="badge warn">{item.retryLabel}</span> : null}
+                  {showScore ? <span className="badge">score {item.bestPrimaryScore == null ? "n/a" : item.bestPrimaryScore.toFixed(3)}</span> : null}
                 </div>
               </div>
               <div className="split-grid report-grid">
@@ -1266,19 +1418,38 @@ function liveTaskSection(task: LiveTaskCard) {
                     <span className="badge">Answer {item.expectedAnswer ?? "n/a"}</span>
                   </div>
                 </section>
-                <section className={`subpanel response-panel ${verifierTone(item.responseStatus)}`}>
+                <section className={`subpanel response-panel ${responseTone}`}>
                   <div className="section-label">Response</div>
-                  <div className={`response-value ${verifierTone(item.responseStatus)}`}>
-                    {item.responseOutput ?? (item.status === "completed" ? "No verified output captured." : "Waiting for verified model output.")}
-                  </div>
-                  <div className="badge-row">
-                    <span className={`badge ${verifierTone(item.responseStatus)}`}>{item.responseStatus ?? "pending"}</span>
+                  <div className="response-stack">
+                    <div className="response-entry">
+                      <div className="response-caption">Latest Event</div>
+                      <div className={`response-value compact ${verifierTone(item.latestResponseStatus)}`}>
+                        {item.latestResponseOutput ?? (item.status === "completed" ? "No event output captured." : "Waiting for the latest candidate.")}
+                      </div>
+                      <div className="badge-row">
+                        <span className={`badge ${verifierTone(item.latestResponseStatus)}`}>
+                          {statusWithDuration(item.latestResponseStatus, item.latestResponseStatus && item.latestResponseStatus !== "pending" ? finalResponseDuration : null)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="response-entry">
+                      <div className="response-caption">Winner</div>
+                      <div className={`response-value compact ${verifierTone(item.responseStatus)}`}>
+                        {item.responseOutput ?? (item.status === "completed" ? "No winner output captured." : "Waiting for the selected candidate.")}
+                      </div>
+                      <div className="badge-row">
+                        <span className={`badge ${verifierTone(item.responseStatus)}`}>
+                          {statusWithDuration(item.responseStatus, item.responseStatus && item.responseStatus !== "pending" ? finalResponseDuration : null)}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 </section>
               </div>
               {item.latestMessage ? <p className="small live-item-message">{item.latestMessage}</p> : null}
             </article>
-          ))
+            );
+          })
         ) : (
           <p className="small">Waiting for task events.</p>
         )}
@@ -1519,9 +1690,11 @@ export function App() {
   const [candidateBudgetInput, setCandidateBudgetInput] = useState("");
   const [itemWorkersInput, setItemWorkersInput] = useState("");
   const [maxItemsInput, setMaxItemsInput] = useState("");
+  const [selectedItemIdsInput, setSelectedItemIdsInput] = useState("");
   const [externalConfigInput, setExternalConfigInput] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [datasetIntroTaskId, setDatasetIntroTaskId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [liveJob, setLiveJob] = useState<JobState | null>({
     status: "loading",
     events: [{ phase: "boot", message: "Loading runtime config and task registry." }],
@@ -1644,6 +1817,40 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
+    let cancelled = false;
+
+    async function refreshRuntimeForModel() {
+      try {
+        const runtime = await loadRuntime(selectedModel);
+        if (!cancelled) {
+          setRuntimeInfo(runtime);
+        }
+      } catch {
+        if (!cancelled) {
+          return;
+        }
+      }
+    }
+
+    void refreshRuntimeForModel();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedModel]);
+
+  useEffect(() => {
+    setNowMs(Date.now());
+    if (liveJob?.status !== "running") {
+      return;
+    }
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [liveJob?.status]);
+
+  useEffect(() => {
     if (!selectedTask) {
       return;
     }
@@ -1652,6 +1859,7 @@ export function App() {
     setCandidateBudgetInput(String(selectedTask.candidate_budget ?? 1));
     setItemWorkersInput(selectedTask.runtime_backend === "external" ? "" : String(selectedTask.item_workers ?? 20));
     setMaxItemsInput("");
+    setSelectedItemIdsInput("");
     setExternalConfigInput(selectedTask.supports_runtime_config ? prettyJson(selectedTask.external_run_config ?? {}) : "");
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1761,6 +1969,7 @@ export function App() {
   async function runTask(taskId: string | null) {
     const model = selectedModel || runtimeInfo.active_model;
     const isExternalTask = selectedTask?.runtime_backend === "external";
+    const isDatasetTask = selectedTask?.runtime_backend === "dataset";
     const supportsMaxItems = Boolean(selectedTask?.supports_max_items);
     const branchingFactor = Math.max(1, Math.floor(numeric(branchingFactorInput || selectedTask?.branching_factor || 4)));
     const generationBudget = Math.max(
@@ -1772,7 +1981,8 @@ export function App() {
       Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1)),
     );
     const itemWorkers = isExternalTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20)));
-    const maxItems = supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
+    const selectedItemIds = isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null;
+    const maxItems = selectedItemIds ? null : supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
     const externalConfig = selectedTask?.supports_runtime_config
       ? parseExternalConfigInput(externalConfigInput, selectedTask.external_run_config ?? null)
       : { config: null, error: null };
@@ -1797,6 +2007,7 @@ export function App() {
       candidate_budget: candidateBudget,
       item_workers: itemWorkers,
       max_items: maxItems,
+      item_ids: selectedItemIds,
       external_config: externalConfig.config,
       events: [
         {
@@ -1804,10 +2015,10 @@ export function App() {
           message: isExternalTask
             ? `Launching ${taskId ?? "selected task"} on ${model} ` +
               `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}` +
-              `${maxItems ? `, item cap=${maxItems}` : ""}).`
+              `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxItems ? `, item cap=${maxItems}` : ""}).`
             : `Launching ${taskId ?? "selected task"} on ${model} ` +
               `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}, workers=${itemWorkers}` +
-              `${maxItems ? `, item cap=${maxItems}` : ""}).`,
+              `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxItems ? `, item cap=${maxItems}` : ""}).`,
         },
       ],
     });
@@ -1819,6 +2030,7 @@ export function App() {
         candidateBudget,
         itemWorkers,
         maxItems,
+        itemIds: selectedItemIds,
         externalConfig: externalConfig.config,
       });
       let job = await loadJob(start.job_id);
@@ -1835,13 +2047,29 @@ export function App() {
         setError(normalizeErrorPayload(job));
         return;
       }
-      if (job.payload) {
-        const normalized = normalizePayload(job.payload, payload.task_catalog);
+      let completedPayload = job.payload ?? null;
+      try {
+        completedPayload = await loadLatestRun(taskId ?? undefined);
+      } catch {
+        completedPayload = job.payload ?? null;
+      }
+      if (token !== pollToken.current) {
+        return;
+      }
+      if (completedPayload) {
+        if (taskId) {
+          hydratedTaskId.current = taskId;
+        }
+        setLiveJob({ ...job, payload: completedPayload });
+        setPayload((previous) => {
+          const normalized = normalizePayload(completedPayload, previous.task_catalog);
+          if (taskId) {
+            return scopedPayloadOrEmpty(normalized, taskId, previous.task_catalog);
+          }
+          return normalized;
+        });
         if (taskId) {
           setSelectedTaskId(taskId);
-          setPayload(scopedPayloadOrEmpty(normalized, taskId, payload.task_catalog));
-        } else {
-          setPayload(normalized);
         }
         setError(null);
       }
@@ -1858,6 +2086,7 @@ export function App() {
         generation_budget: Math.max(1, Math.floor(numeric(generationBudgetInput || selectedTask?.generation_budget || 1))),
         candidate_budget: Math.max(1, Math.floor(numeric(candidateBudgetInput || selectedTask?.candidate_budget || 1))),
         item_workers: isExternalTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || selectedTask?.item_workers || 20))),
+        item_ids: isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null,
         events: [],
       });
     }
@@ -1872,9 +2101,11 @@ export function App() {
     : inferExternalDefaultMaxItems(externalConfigDraft.config ?? selectedTask?.external_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
   const selectedTaskUsesMaxItems = Boolean(selectedTask?.supports_max_items);
   const selectedTaskHasDatasetIntro = Boolean(selectedTask?.local_dataset_only);
+  const selectedTaskIsDataset = selectedTask?.runtime_backend === "dataset";
   const selectedTaskIsExternal = selectedTask?.runtime_backend === "external";
   const selectedTaskIsCoding = selectedTask?.track === "coding_verified";
-  const parsedMaxItems = selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
+  const parsedSelectedItemIds = selectedTaskIsDataset ? parseItemIdsInput(selectedItemIdsInput) : null;
+  const parsedMaxItems = parsedSelectedItemIds ? null : selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
   const requestedItemCount = selectedTaskUsesMaxItems ? (parsedMaxItems ?? selectedTaskDefaultMaxItems ?? null) : null;
   const showDemoMaxItemsWarning = Boolean(selectedTaskIsCoding && requestedItemCount && requestedItemCount > 50);
   const maxItemsLabel = selectedTaskUsesMaxItems && selectedTask?.dataset_size
@@ -2005,15 +2236,30 @@ export function App() {
               placeholder={selectedTaskUsesMaxItems ? (selectedTask?.dataset_size ? "all" : "default") : "n/a"}
               value={maxItemsInput}
               onChange={(event) => setMaxItemsInput(event.target.value)}
-              disabled={!selectedTaskUsesMaxItems}
+              disabled={!selectedTaskUsesMaxItems || Boolean(parsedSelectedItemIds)}
             />
-            <span className="small muted">{maxItemsHelper}</span>
+            <span className="small muted">
+              {parsedSelectedItemIds ? "Specific item ids selected: Item Cap is ignored for this run." : maxItemsHelper}
+            </span>
             {showDemoMaxItemsWarning ? (
               <span className="small launcher-warning">
                 Demo warning: running more than 50 LiveCodeBench items here is not recommended.
               </span>
             ) : null}
           </label>
+          {selectedTaskIsDataset ? (
+            <label className="field">
+              <span className="field-label">Item IDs (Optional)</span>
+              <input
+                className="control"
+                type="text"
+                placeholder="1,2,3 or aime-2026-01,aime-2026-10"
+                value={selectedItemIdsInput}
+                onChange={(event) => setSelectedItemIdsInput(event.target.value)}
+              />
+              <span className="small muted">Comma-separated manifest ids or source question numbers. When set, this overrides Item Cap.</span>
+            </label>
+          ) : null}
           {selectedTask?.supports_runtime_config ? (
             <label className="field field-span-full">
               <span className="field-label">External RUN_CONFIG</span>
@@ -2056,6 +2302,7 @@ export function App() {
                 cap {generationBudgetInput || selectedTask.generation_budget} rounds | {candidateBudgetInput || selectedTask.candidate_budget} candidates/branch | {branchingFactorInput} frontier parents
               </span>
               {selectedTaskIsExternal ? <span className="summary-pill">configured via RUN_CONFIG</span> : <span className="summary-pill">workers {itemWorkersInput || selectedTask.item_workers}</span>}
+              {parsedSelectedItemIds ? <span className="summary-pill">items {parsedSelectedItemIds.join(", ")}</span> : null}
               {selectedTaskIsExternal ? (
                 <span className="summary-pill">
                   {parsedMaxItems ? `task cap ${parsedMaxItems}` : selectedTaskDefaultMaxItems ? `task cap default ${selectedTaskDefaultMaxItems}` : "task cap default"}
@@ -2096,15 +2343,10 @@ export function App() {
             <h2>Runtime and verifier configuration</h2>
           </div>
           <div className="badge-row">
-            <span className="badge">primary {runtimeInfo.primary_model}</span>
             <span className="badge">active {selectedModel || runtimeInfo.active_model}</span>
           </div>
         </div>
         <div className="metric-grid">
-          {metric("payload timestamp", payload.summary.generated_at)}
-          {metric("memory entries", payload.summary.memory_size_after_run)}
-          {metric("benchmark writes", payload.summary.write_backs)}
-          {metric("experiment writes", payload.summary.experiment_write_backs)}
           {metric("temperature", runtimeInfo.temperature)}
           {metric("max tokens", runtimeInfo.max_tokens)}
           {metric("timeout", `${runtimeInfo.timeout_s}s`)}
@@ -2119,7 +2361,7 @@ export function App() {
           </div>
         </div>
         {liveTasks.length ? (
-          liveTasks.map((task) => liveTaskSection(task))
+          liveTasks.map((task) => liveTaskSection(task, nowMs))
         ) : (
           <section className="empty-state">
             <h3>No active run</h3>
@@ -2150,7 +2392,6 @@ export function App() {
           ) : (
             <section className="empty-state">
               <h3>No cached report for this task yet</h3>
-              <p className="muted">Run the selected task once to persist its latest report and make it survive refresh.</p>
             </section>
           )}
         </div>

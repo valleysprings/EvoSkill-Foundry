@@ -6,6 +6,7 @@ type StartJobOptions = {
   candidateBudget?: number | null;
   itemWorkers?: number | null;
   maxItems?: number | null;
+  itemIds?: string[] | null;
   externalConfig?: Record<string, unknown> | null;
 };
 
@@ -27,8 +28,9 @@ async function fetchJson<T>(url: string, options?: JsonOptions): Promise<T> {
   return payload as T;
 }
 
-export async function loadRuntime(): Promise<RuntimeInfo> {
-  return fetchJson<RuntimeInfo>("/api/runtime");
+export async function loadRuntime(model?: string): Promise<RuntimeInfo> {
+  const query = model ? `?model=${encodeURIComponent(model)}` : "";
+  return fetchJson<RuntimeInfo>(`/api/runtime${query}`);
 }
 
 export async function loadTasks(): Promise<TaskSummary[]> {
@@ -38,7 +40,7 @@ export async function loadTasks(): Promise<TaskSummary[]> {
 
 export async function loadLatestRun(taskId?: string): Promise<Payload> {
   const query = taskId ? `?task_id=${encodeURIComponent(taskId)}` : "";
-  return fetchJson<Payload>(`/api/latest-run${query}`);
+  return fetchJson<Payload>(`/api/latest-run${query}`, { cache: "no-store" });
 }
 
 export async function startJob(
@@ -53,7 +55,7 @@ export async function startJob(
   if (taskId) {
     params.set("task_id", taskId);
   }
-  const { branchingFactor, generationBudget, candidateBudget, itemWorkers, maxItems } = options;
+  const { branchingFactor, generationBudget, candidateBudget, itemWorkers, maxItems, itemIds } = options;
   const externalConfig = options.externalConfig;
   if (typeof branchingFactor === "number" && Number.isFinite(branchingFactor)) {
     params.set("branching_factor", String(Math.max(1, Math.floor(branchingFactor))));
@@ -70,6 +72,9 @@ export async function startJob(
   if (typeof maxItems === "number" && Number.isFinite(maxItems)) {
     params.set("max_items", String(Math.max(1, Math.floor(maxItems))));
   }
+  if (Array.isArray(itemIds) && itemIds.length) {
+    params.set("item_ids", itemIds.join(","));
+  }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const url = taskId ? `/api/run-task${suffix}` : `/api/run-sequence${suffix}`;
   const request: RequestInit = { method: "POST" };
@@ -81,5 +86,5 @@ export async function startJob(
 }
 
 export async function loadJob(jobId: string): Promise<JobState> {
-  return fetchJson<JobState>(`/api/job?job_id=${encodeURIComponent(jobId)}`);
+  return fetchJson<JobState>(`/api/job?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
 }

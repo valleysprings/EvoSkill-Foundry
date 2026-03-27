@@ -771,15 +771,22 @@ class CodegenRunnerTest(unittest.TestCase):
             tmp = Path(tmp_dir)
             store = MemoryStore(tmp / "memory.json", markdown_path=tmp / "memory.md")
             store.ensure_seed_records(seed_strategy_experiences())
+            events: list[dict[str, object]] = []
             result = run_codegen_task(
                 task,
                 store,
                 proposal_runtime=runtime,
                 workspace_root=tmp / "workspace",
                 session_id="retry-transport-error",
+                progress_callback=events.append,
             )
             self.assertEqual(result["winner"]["metrics"]["status"], "pass")
             self.assertEqual(result["llm_traces"][0]["attempt"], 2)
+            retry_events = [event for event in events if event.get("phase") == "llm_retry"]
+            self.assertEqual(len(retry_events), 1)
+            self.assertEqual(retry_events[0]["retry_attempt"], 2)
+            self.assertEqual(retry_events[0]["max_attempts"], 3)
+            self.assertEqual(retry_events[0]["branch_id"], "g1-b1")
 
     def test_branching_factor_triggers_parallel_proposals_and_branch_events(self) -> None:
         runtime = make_runtime(
@@ -1057,6 +1064,88 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertTrue(any(event.get("item_id") == items[1]["item_id"] for event in events))
             self.assertTrue(any(event.get("item_brief") for event in events if event.get("item_id") == items[0]["item_id"]))
             self.assertTrue(any(event.get("expected_answer") == items[0]["expected_answer"] for event in events if event.get("item_id") == items[0]["item_id"]))
+
+    def test_dataset_task_can_run_selected_item_ids_only(self) -> None:
+        runtime = make_runtime(
+            [
+                chat_response(QUESTION_SOLVER_PROPOSAL_PAYLOAD),
+                chat_response(REFLECTION_PAYLOAD),
+                chat_response(QUESTION_SOLVER_PROPOSAL_PAYLOAD),
+                chat_response(REFLECTION_PAYLOAD),
+            ]
+        )
+        task = next(item for item in load_codegen_tasks() if item["id"] == "olymmath")
+        task = dict(task)
+        task["generation_budget"] = 1
+        task["candidate_budget"] = 1
+        task["branching_factor"] = 1
+        task["item_workers"] = 1
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            items = [
+                {
+                    "item_id": "olymmath-r1",
+                    "raw_item_id": "olymmath-r1",
+                    "id": "olymmath-r1",
+                    "question_id": "olymmath-r1",
+                    "name": "Remainders mod 2 through 6",
+                    "prompt": "What is the smallest positive integer that leaves remainder 1 when divided by 2 through 6 and 0 mod 7?",
+                    "raw_prompt": "What is the smallest positive integer that leaves remainder 1 when divided by 2 through 6 and 0 mod 7?",
+                    "context": None,
+                    "raw_context": None,
+                    "choices": [],
+                    "raw_choices": [],
+                    "expected_answer": "301",
+                    "raw_expected_answer": "301",
+                    "metadata": {"dataset": "olymmath", "answer_format": "numeric", "source_id": "1", "source_index": 0},
+                },
+                {
+                    "item_id": "olymmath-r2",
+                    "raw_item_id": "olymmath-r2",
+                    "id": "olymmath-r2",
+                    "question_id": "olymmath-r2",
+                    "name": "Triangle area",
+                    "prompt": "A triangle has side lengths 13, 14, and 15. What is its area?",
+                    "raw_prompt": "A triangle has side lengths 13, 14, and 15. What is its area?",
+                    "context": None,
+                    "raw_context": None,
+                    "choices": [],
+                    "raw_choices": [],
+                    "expected_answer": "84",
+                    "raw_expected_answer": "84",
+                    "metadata": {"dataset": "olymmath", "answer_format": "numeric", "source_id": "2", "source_index": 1},
+                },
+                {
+                    "item_id": "olymmath-r3",
+                    "raw_item_id": "olymmath-r3",
+                    "id": "olymmath-r3",
+                    "question_id": "olymmath-r3",
+                    "name": "Square count",
+                    "prompt": "How many squares are on a standard chessboard?",
+                    "raw_prompt": "How many squares are on a standard chessboard?",
+                    "context": None,
+                    "raw_context": None,
+                    "choices": [],
+                    "raw_choices": [],
+                    "expected_answer": "204",
+                    "raw_expected_answer": "204",
+                    "metadata": {"dataset": "olymmath", "answer_format": "numeric", "source_id": "3", "source_index": 2},
+                },
+            ]
+            manifest = tmp / "questions.json"
+            manifest.write_text(json.dumps(items, indent=2))
+            task["item_manifest_path"] = str(manifest)
+            task["dataset_size"] = len(items)
+            result = run_dataset_task(
+                task,
+                proposal_runtime=runtime,
+                workspace_root=tmp / "workspace",
+                memory_root=tmp / "item-memory",
+                session_id="dataset-selected-items",
+                selected_item_ids=["2", "olymmath-r1"],
+            )
+            self.assertEqual(result["dataset_summary"]["total_items"], 2)
+            self.assertEqual({item_run["item_id"] for item_run in result["item_runs"]}, {"olymmath-r1", "olymmath-r2"})
 
     def test_dataset_runs_stay_inline_without_handoff_artifacts(self) -> None:
         runtime = make_runtime(

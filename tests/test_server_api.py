@@ -51,6 +51,7 @@ class ServerApiTest(unittest.TestCase):
                 candidate_budget=None,
                 item_workers=None,
                 max_items=None,
+                selected_item_ids=None,
                 external_config=None,
             )
             try:
@@ -68,6 +69,12 @@ class ServerApiTest(unittest.TestCase):
             finally:
                 with server.JOB_LOCK:
                     server.JOBS.pop(job_id, None)
+
+    def test_stall_timeout_tracks_runtime_timeout_and_reasoner_models(self) -> None:
+        runtime = make_runtime([], model="deepseek-reasoner")
+        timeout_s = server._job_stall_timeout_s(runtime)
+        self.assertGreater(timeout_s, runtime.config.timeout_s)
+        self.assertGreater(timeout_s, server.DEFAULT_JOB_STALL_TIMEOUT_S)
 
     def test_latest_run_reads_cached_payload_without_starting_a_run(self) -> None:
         cached_payload = {"summary": {"generated_at": "cached"}, "runs": [], "task_catalog": []}
@@ -175,6 +182,7 @@ class ServerApiTest(unittest.TestCase):
                 status, payload = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/runtime")
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["primary_model"], "deepseek-chat")
+                self.assertIn("deepseek-reasoner", payload["available_models"])
                 self.assertIn("glm-5", payload["available_models"])
             finally:
                 httpd.shutdown()
@@ -450,6 +458,38 @@ class ServerApiTest(unittest.TestCase):
                     self.assertEqual(completed["status"], "completed")
                     self.assertEqual(completed["max_items"], 100)
                     self.assertEqual(write_artifacts.call_args.kwargs["max_items"], 100)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
+    def test_item_ids_are_forwarded_to_job_runner(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=aime-2026&item_ids=10,1",
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["item_ids"], ["10", "1"])
+                    self.assertEqual(write_artifacts.call_args.kwargs["selected_item_ids"], ["10", "1"])
                 finally:
                     httpd.shutdown()
                     httpd.server_close()

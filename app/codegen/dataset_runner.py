@@ -14,6 +14,7 @@ from app.codegen.dataset_support import (
     is_dataset_task,
     load_question_manifest,
 )
+from app.codegen.errors import ConfigError
 from app.codegen.llm import ProposalRuntime
 from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.codegen.trainer import run_codegen_task
@@ -79,6 +80,68 @@ def _question_payload_for_result(task: dict[str, Any], item: dict[str, Any]) -> 
         "raw_expected_answer": item.get("raw_expected_answer"),
         "metadata": dict(item.get("metadata") or {}),
     }
+
+
+def _item_selector_aliases(item: dict[str, Any]) -> set[str]:
+    metadata = dict(item.get("metadata") or {})
+    aliases = {
+        str(item.get("item_id") or "").strip().lower(),
+        str(item.get("raw_item_id") or "").strip().lower(),
+        str(item.get("question_id") or "").strip().lower(),
+        str(item.get("name") or "").strip().lower(),
+        str(metadata.get("source_id") or "").strip().lower(),
+    }
+    source_index = metadata.get("source_index")
+    if isinstance(source_index, int) and source_index >= 0:
+        aliases.add(str(source_index + 1))
+    return {alias for alias in aliases if alias}
+
+
+def _select_requested_items(items: list[dict[str, Any]], selected_item_ids: list[str] | None) -> list[dict[str, Any]]:
+    if not selected_item_ids:
+        return items
+
+    alias_map: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        for alias in _item_selector_aliases(item):
+            alias_map.setdefault(alias, []).append(item)
+
+    selected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    unmatched: list[str] = []
+    ambiguous: list[str] = []
+    for raw_token in selected_item_ids:
+        token = str(raw_token).strip().lower()
+        if not token:
+            continue
+        matches = alias_map.get(token, [])
+        unique_matches: list[dict[str, Any]] = []
+        unique_ids: set[str] = set()
+        for item in matches:
+            item_id = str(item["item_id"])
+            if item_id not in unique_ids:
+                unique_ids.add(item_id)
+                unique_matches.append(item)
+        if not unique_matches:
+            unmatched.append(raw_token)
+            continue
+        if len(unique_matches) > 1:
+            ambiguous.append(f"{raw_token} -> {', '.join(str(item['item_id']) for item in unique_matches)}")
+            continue
+        item = unique_matches[0]
+        item_id = str(item["item_id"])
+        if item_id not in seen_ids:
+            seen_ids.add(item_id)
+            selected.append(item)
+
+    if unmatched or ambiguous:
+        fragments: list[str] = []
+        if unmatched:
+            fragments.append(f"unknown item ids: {', '.join(unmatched)}")
+        if ambiguous:
+            fragments.append(f"ambiguous item ids: {'; '.join(ambiguous)}")
+        raise ConfigError("Invalid item selection: " + ". ".join(fragments))
+    return selected
 
 
 def _progress_wrapper(
@@ -164,6 +227,7 @@ def run_dataset_task(
     memory_root: Path,
     session_id: str,
     max_items: int | None = None,
+    selected_item_ids: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
@@ -172,7 +236,9 @@ def run_dataset_task(
 
     requested_items = max_items if isinstance(max_items, int) and max_items > 0 else int(task.get("dataset_size") or 0) or None
     items = load_question_manifest(task, min_items=requested_items)
-    if isinstance(max_items, int) and max_items > 0:
+    if selected_item_ids:
+        items = _select_requested_items(items, selected_item_ids)
+    elif isinstance(max_items, int) and max_items > 0:
         items = items[:max_items]
     if progress_callback is not None:
         progress_callback(

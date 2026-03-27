@@ -468,6 +468,23 @@ h4 {
   line-height: 1.6;
 }
 
+.response-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.response-entry {
+  display: grid;
+  gap: 6px;
+}
+
+.response-caption {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .response-panel.good {
   border-color: rgba(20, 95, 82, 0.26);
   background: linear-gradient(180deg, var(--panel-strong), rgba(20, 95, 82, 0.08));
@@ -490,6 +507,12 @@ h4 {
   font-size: 1.25rem;
   line-height: 1.35;
   word-break: break-word;
+}
+
+.response-value.compact {
+  min-height: 0;
+  padding: 12px 14px;
+  font-size: 1rem;
 }
 
 .response-value.good {
