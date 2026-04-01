@@ -49,7 +49,7 @@ SAMPLE_TASK = {
     "optimization_scope": "implementation",
     "included_in_main_comparison": True,
     "supports_runtime_config": False,
-    "external_run_config": None,
+    "suite_run_config": None,
     "supports_max_items": True,
     "default_max_items": 1055,
 }
@@ -129,7 +129,7 @@ class RunnerCliTest(unittest.TestCase):
             branching_factor=None,
             item_workers=None,
             max_items=3,
-            external_config=None,
+            suite_config=None,
         )
         payload = json.loads(output)
         self.assertEqual(payload["summary"]["generated_at"], "now")

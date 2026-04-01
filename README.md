@@ -76,10 +76,8 @@ Current enabled experiment-task setup note:
 
 - `co-bench` uses dataset fan-out with the checked-in official evaluator plus local dataset assets
 
-Checked-in but currently disabled external-harness tasks:
+Current disabled experiment-task setup note:
 
-- `terminal-bench` requires Harbor plus a working local Docker daemon
-- `tau-bench-*` requires isolated environment setup, but not the Harbor Docker path
 - `nl4opt` and `industryor` require local `coptpy` execution
 
 ## Dataset Preparation

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from app.codegen.benchmark_support import choice_answer_matches, public_question_payload
+from app.bench.benchmark_support import choice_answer_matches, public_question_payload
 from app.codegen.verifier import load_callable_from_path
 
 

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from app.codegen.co_benchmarks import (
+ROOT = Path(__file__).resolve().parents[1]
+CO_BENCH_ROOT = ROOT / "benchmark" / "or_verified" / "co-bench"
+if str(CO_BENCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(CO_BENCH_ROOT))
+
+from co_bench_support import (
     build_co_bench_manifest,
     _canonical_problem_name,
     _co_bench_data_dir,

@@ -113,6 +113,53 @@ def _message_text(content: Any) -> str:
     return json.dumps(content)
 
 
+def _normalize_tool_choice(tool_choice: str | dict[str, Any]) -> str | dict[str, Any]:
+    if isinstance(tool_choice, str):
+        normalized = tool_choice.strip() or "auto"
+        if normalized not in {"none", "auto", "required"}:
+            raise ValueError(f"Unsupported tool_choice={normalized!r}.")
+        return normalized
+    if isinstance(tool_choice, dict):
+        return dict(tool_choice)
+    raise ValueError("tool_choice must be a string or dict.")
+
+
+def _normalize_tool_call_payloads(raw_tool_calls: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_tool_calls, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_tool_calls:
+        if not isinstance(item, dict):
+            continue
+        function_payload = item.get("function")
+        if not isinstance(function_payload, dict):
+            continue
+        name = str(function_payload.get("name") or "").strip()
+        if not name:
+            continue
+        raw_arguments = function_payload.get("arguments")
+        if isinstance(raw_arguments, dict):
+            arguments = dict(raw_arguments)
+        elif isinstance(raw_arguments, str):
+            try:
+                parsed_arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw_arguments}
+            else:
+                arguments = dict(parsed_arguments) if isinstance(parsed_arguments, dict) else {"_raw": raw_arguments}
+        else:
+            arguments = {}
+        normalized_item = {
+            "name": name,
+            "arguments": arguments,
+        }
+        identifier = item.get("id")
+        if isinstance(identifier, str) and identifier.strip():
+            normalized_item["id"] = identifier.strip()
+        normalized.append(normalized_item)
+    return normalized
+
+
 def _transport_dispatcher(config: RuntimeConfig) -> _TransportDispatcher:
     with _TRANSPORT_GATE_LOCK:
         dispatcher_entry = _TRANSPORT_DISPATCHERS.get(config.api_base)
@@ -473,28 +520,32 @@ class ProposalRuntime:
     def describe(self) -> dict[str, object]:
         return self.config.describe()
 
-    def complete_json(
+    def chat(
         self,
         *,
         purpose: str,
-        system_prompt: str,
-        user_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] = "auto",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         queue_priority: int = 1000,
         progress_callback: RetryProgressCallback | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        request_body = {
+        normalized_messages = [{"role": str(message.get("role") or ""), "content": message.get("content")} for message in messages]
+        request_body: dict[str, Any] = {
             "model": self.active_model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "messages": normalized_messages,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
         }
+        if tools:
+            request_body["tools"] = list(tools)
+            request_body["tool_choice"] = _normalize_tool_choice(tool_choice)
         sender = self.transport or _default_transport
         last_parse_error: LlmResponseError | None = None
         last_transport_error: LlmTransportError | None = None
+        max_response_tokens = int(request_body["max_tokens"])
         for attempt in range(1, MODEL_COMPLETION_MAX_ATTEMPTS + 1):
             try:
                 raw_response = _transport_dispatcher(self.config).submit(
@@ -507,7 +558,7 @@ class ProposalRuntime:
                 last_transport_error = _transport_failure_error(
                     purpose=purpose,
                     runtime=self,
-                    messages=messages,
+                    messages=normalized_messages,
                     attempt=attempt,
                     exc=exc,
                 )
@@ -526,7 +577,7 @@ class ProposalRuntime:
                 last_transport_error = _transport_failure_error(
                     purpose=purpose,
                     runtime=self,
-                    messages=messages,
+                    messages=normalized_messages,
                     attempt=attempt,
                     exc=LlmTransportError("Model request timed out.", model=self.active_model),
                 )
@@ -545,7 +596,7 @@ class ProposalRuntime:
                 last_transport_error = _transport_failure_error(
                     purpose=purpose,
                     runtime=self,
-                    messages=messages,
+                    messages=normalized_messages,
                     attempt=attempt,
                     exc=LlmTransportError(f"Model request failed: {exc.reason}", model=self.active_model),
                 )
@@ -566,7 +617,7 @@ class ProposalRuntime:
                 last_parse_error = _response_envelope_error(
                     purpose=purpose,
                     runtime=self,
-                    messages=messages,
+                    messages=normalized_messages,
                     raw_response=raw_response,
                     attempt=attempt,
                     message="Model HTTP response was not valid JSON.",
@@ -583,15 +634,15 @@ class ProposalRuntime:
                 continue
 
             try:
-                message = parsed_response["choices"][0]["message"]["content"]
+                response_message = parsed_response["choices"][0]["message"]
             except (KeyError, IndexError, TypeError) as exc:
                 last_parse_error = _response_envelope_error(
                     purpose=purpose,
                     runtime=self,
-                    messages=messages,
+                    messages=normalized_messages,
                     raw_response=raw_response,
                     attempt=attempt,
-                    message="Model response did not contain choices[0].message.content.",
+                    message="Model response did not contain choices[0].message.",
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_parse_error from exc
@@ -604,8 +655,62 @@ class ProposalRuntime:
                 )
                 continue
 
-            text = _message_text(message)
+            text = _message_text(response_message.get("content"))
             usage = parsed_response.get("usage", {})
+            trace = {
+                "purpose": purpose,
+                "selected_model": self.active_model,
+                "parse_status": "ok",
+                "api_base": self.config.api_base,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "max_tokens": max_response_tokens,
+                "request_preview": _request_preview(
+                    [
+                        {"role": str(item.get("role") or ""), "content": _message_text(item.get("content"))}
+                        for item in normalized_messages
+                    ]
+                ),
+                "raw_preview": _trim(text, limit=RAW_PREVIEW_LIMIT),
+                "attempt": attempt,
+            }
+            return (
+                {
+                    "message": text.strip() or None,
+                    "tool_calls": _normalize_tool_call_payloads(response_message.get("tool_calls")),
+                    "raw": parsed_response,
+                },
+                trace,
+            )
+        if last_transport_error is not None:
+            raise last_transport_error
+        if last_parse_error is not None:
+            raise last_parse_error
+        raise LlmResponseError("Model response did not contain a valid chat message.", model=self.active_model)
+
+    def complete_json(
+        self,
+        *,
+        purpose: str,
+        system_prompt: str,
+        user_prompt: str,
+        queue_priority: int = 1000,
+        progress_callback: RetryProgressCallback | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        last_parse_error: LlmResponseError | None = None
+        for attempt in range(1, MODEL_COMPLETION_MAX_ATTEMPTS + 1):
+            response, trace = self.chat(
+                purpose=purpose,
+                messages=messages,
+                queue_priority=queue_priority,
+                progress_callback=progress_callback,
+            )
+            text = str(response.get("message") or "")
+            usage = dict((response.get("raw") or {}).get("usage") or {})
             try:
                 payload = _extract_json_object(text)
             except LlmResponseError as exc:
@@ -619,7 +724,7 @@ class ProposalRuntime:
                     fallback_message=str(exc),
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
-                    raise last_parse_error from exc
+                    break
                 _emit_retry_progress(
                     progress_callback=progress_callback,
                     purpose=purpose,
@@ -628,21 +733,9 @@ class ProposalRuntime:
                     parse_status=str(last_parse_error.details.get("parse_status") or "invalid_json"),
                 )
                 continue
-            trace = {
-                "purpose": purpose,
-                "selected_model": self.active_model,
-                "parse_status": "ok",
-                "api_base": self.config.api_base,
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "max_tokens": self.config.max_tokens,
-                "request_preview": _request_preview(messages),
-                "raw_preview": _trim(text, limit=RAW_PREVIEW_LIMIT),
-                "attempt": attempt,
-            }
+            trace["raw_preview"] = _trim(text, limit=RAW_PREVIEW_LIMIT)
+            trace["attempt"] = max(int(trace.get("attempt") or 0), attempt)
             return payload, trace
-        if last_transport_error is not None:
-            raise last_transport_error
         if last_parse_error is not None:
             raise last_parse_error
         raise LlmResponseError("Model response did not contain a valid JSON object.", model=self.active_model)

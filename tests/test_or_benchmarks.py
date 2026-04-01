@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.codegen.or_benchmarks import _dataset_rows, _load_local_or_dataset_rows
+from app.bench.or_benchmarks import _dataset_rows, _load_local_or_dataset_rows
 
 
 class OrBenchmarksTest(unittest.TestCase):

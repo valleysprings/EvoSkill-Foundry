@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from app.codegen.external import effective_external_run_config, load_candidate_module, runtime_for_external_task
+from app.bench.benchmark_adapter_support import effective_suite_run_config, load_candidate_module, runtime_for_benchmark_adapter_task
 from app.codegen.llm import ProposalRuntime
 
 
@@ -362,8 +362,8 @@ def evaluate_co_bench_candidate(
     proposal_runtime: ProposalRuntime | None = None,
 ) -> dict[str, Any]:
     item = _co_bench_question_item(task)
-    config = effective_external_run_config(task, candidate_path)
-    runtime = proposal_runtime or runtime_for_external_task(task)
+    config = effective_suite_run_config(task, candidate_path)
+    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
     evaluation_dir = _co_bench_evaluation_dir(task, config)
     if not (evaluation_dir / "controller.py").exists():
         raise FileNotFoundError(

@@ -17,7 +17,7 @@ Evaluation contract:
 
 Operational notes:
 
-- `evaluation/` is checked into this repo directly under the task, rather than hidden behind `external/` or another nested checkout
+- `evaluation/` is checked into this repo directly under the task, rather than hidden behind `External/` or another nested checkout
 - `prepare.py` writes a manifest where each item is one official problem; use `--max-items` or item selection at runtime to limit fan-out
 - Docker is not required for the current official evaluator path; the upstream README explicitly says Docker support is still "coming soon"
 - the upstream controller uses `TSP` and `MIS` aliases, but the dataset folders use the full names; this integration normalizes them automatically

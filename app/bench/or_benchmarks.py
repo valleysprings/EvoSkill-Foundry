@@ -8,14 +8,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from app.codegen.external import (
-    build_external_candidate,
-    build_external_result,
-    effective_external_run_config,
+from app.bench.benchmark_adapter_support import (
+    build_benchmark_adapter_candidate,
+    build_benchmark_adapter_result,
+    effective_suite_run_config,
     emit_progress,
     load_candidate_module,
-    render_external_run_config_source,
-    runtime_for_external_task,
+    render_suite_run_config_source,
+    runtime_for_benchmark_adapter_task,
 )
 from app.codegen.llm import ProposalRuntime
 
@@ -230,8 +230,8 @@ def evaluate_coptpy_value_candidate(
     progress_callback=None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
-    config = effective_external_run_config(task, candidate_path)
-    runtime = proposal_runtime or runtime_for_external_task(task)
+    config = effective_suite_run_config(task, candidate_path)
+    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
     execution_timeout_s = int(config.get("execution_timeout_s") or 600)
     tolerance = float(config.get("numerical_err_tolerance") or 1e-4)
     dataset_name = str(config.get("dataset_name") or dataset_name)
@@ -326,7 +326,7 @@ def evaluate_coptpy_value_candidate(
         "objective_score": objective,
         "objective_signal": objective,
         "test_results": item_results,
-        "external_summary": {
+        "suite_summary": {
             "dataset_name": dataset_name,
             "dataset_split": dataset_split,
             "dataset_source": dataset_source,
@@ -350,8 +350,8 @@ def run_coptpy_value_benchmark(
     progress_callback,
     pace_ms: int,
 ) -> dict[str, Any]:
-    config = effective_external_run_config(task, candidate_path)
-    rendered_source = render_external_run_config_source(config)
+    config = effective_suite_run_config(task, candidate_path)
+    rendered_source = render_suite_run_config_source(config)
     raw_metrics = evaluate_coptpy_value_candidate(
         task=task,
         candidate_path=candidate_path,
@@ -369,7 +369,7 @@ def run_coptpy_value_benchmark(
     passed = int(raw_metrics.get("passed_tests") or 0)
     total = int(raw_metrics.get("total_tests") or 0)
 
-    baseline = build_external_candidate(
+    baseline = build_benchmark_adapter_candidate(
         task=task,
         source_code=rendered_source,
         agent="checked-in-config",
@@ -380,7 +380,7 @@ def run_coptpy_value_benchmark(
         raw_metrics={"status": "not-run", "verifier_status": "not-run"},
         workspace_path=str(candidate_path),
     )
-    winner = build_external_candidate(
+    winner = build_benchmark_adapter_candidate(
         task=task,
         source_code=rendered_source,
         agent=proposal_runtime.active_model,
@@ -392,12 +392,12 @@ def run_coptpy_value_benchmark(
         workspace_path=str(workspace_root),
         proposal_model=proposal_runtime.active_model,
     )
-    return build_external_result(
+    return build_benchmark_adapter_result(
         task=task,
         proposal_runtime=proposal_runtime,
         baseline=baseline,
         winner=winner,
         selection_reason=f"{summary_label} finished with {passed}/{total} exact optimal-value matches.",
         llm_traces=[],
-        extra_fields={"external_summary": dict(raw_metrics.get("external_summary") or {})},
+        extra_fields={"suite_summary": dict(raw_metrics.get("suite_summary") or {})},
     )

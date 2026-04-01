@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences, task_summary
-from app.codegen.external import is_external_task, run_external_task
+from app.bench.benchmark_adapter_support import uses_benchmark_adapter_runtime, run_benchmark_adapter_task
 from app.codegen.errors import ConfigError
 from app.codegen.task_contracts import optimization_scope_summary, task_mode_summary
 from app.configs.codegen import (
@@ -39,8 +39,8 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 CLI_COMMANDS = frozenset({"tasks", "runtime", "latest-run", "run-task", "run-sequence"})
 
 
-def _external_task_uses_codegen_loop(task: dict[str, Any]) -> bool:
-    if not is_external_task(task):
+def _benchmark_adapter_task_uses_codegen_loop(task: dict[str, Any]) -> bool:
+    if not uses_benchmark_adapter_runtime(task):
         return False
     return int(task.get("generation_budget") or 0) > 0 and int(task.get("candidate_budget") or 0) > 0
 
@@ -110,7 +110,7 @@ def generate_discrete_payload(
     item_workers: int | None = None,
     max_items: int | None = None,
     selected_item_ids: list[str] | None = None,
-    external_config: dict[str, Any] | None = None,
+    suite_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if task_id is not None:
         tasks = load_codegen_tasks(task_id)
@@ -132,12 +132,12 @@ def generate_discrete_payload(
                 patched["item_workers"] = item_workers
             overridden_tasks.append(patched)
         tasks = overridden_tasks
-    if external_config is not None:
+    if suite_config is not None:
         if task_id is None or len(tasks) != 1:
-            raise ConfigError("external_config requires running exactly one task.")
-        if not is_external_task(tasks[0]):
-            raise ConfigError("external_config is only supported for external benchmark tasks.")
-        tasks = [{**tasks[0], "runtime_external_config": dict(external_config)}]
+            raise ConfigError("suite_config requires running exactly one task.")
+        if not uses_benchmark_adapter_runtime(tasks[0]):
+            raise ConfigError("suite_config is only supported for benchmark-adapter tasks.")
+        tasks = [{**tasks[0], "runtime_suite_config": dict(suite_config)}]
     if selected_item_ids is not None:
         if task_id is None or len(tasks) != 1:
             raise ConfigError("item_ids requires running exactly one task.")
@@ -165,7 +165,7 @@ def generate_discrete_payload(
     total_memory_before = 0
     total_memory_after = 0
     for task in tasks:
-        if _external_task_uses_codegen_loop(task):
+        if _benchmark_adapter_task_uses_codegen_loop(task):
             task = {
                 **task,
                 "runtime_model_override": runtime.active_model,
@@ -184,9 +184,9 @@ def generate_discrete_payload(
             after_count = legacy_store.count()
             delta = after_count - before_count
             result["memory_markdown"] = legacy_store.load_markdown()
-        elif is_external_task(task):
+        elif uses_benchmark_adapter_runtime(task):
             before_count = legacy_store.count()
-            result = run_external_task(
+            result = run_benchmark_adapter_task(
                 task,
                 proposal_runtime=runtime,
                 workspace_root=active_workspace_root / task["id"],
@@ -380,7 +380,7 @@ def write_discrete_artifacts(
     item_workers: int | None = None,
     max_items: int | None = None,
     selected_item_ids: list[str] | None = None,
-    external_config: dict[str, Any] | None = None,
+    suite_config: dict[str, Any] | None = None,
 ) -> Path:
     active_runs_root = runs_root or RUNS
     session_id = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
@@ -411,7 +411,7 @@ def write_discrete_artifacts(
         item_workers=item_workers,
         max_items=max_items,
         selected_item_ids=selected_item_ids,
-        external_config=external_config,
+        suite_config=suite_config,
     )
     payload["audit"]["session_id"] = session_id
     generated_at = str(payload["summary"]["generated_at"])
@@ -430,7 +430,7 @@ def _add_common_run_arguments(
     parser: argparse.ArgumentParser,
     *,
     require_task_id: bool,
-    allow_external_config: bool,
+    allow_suite_config: bool,
 ) -> None:
     if require_task_id:
         parser.add_argument("--task-id", required=True, help="Task id from benchmark/registry.json.")
@@ -440,10 +440,10 @@ def _add_common_run_arguments(
     parser.add_argument("--branching-factor", type=int, help="Override branching factor for this run.")
     parser.add_argument("--item-workers", type=int, help="Override dataset item worker count for this run.")
     parser.add_argument("--max-items", type=int, help="Run only the first N items from the selected task or sequence.")
-    if allow_external_config:
+    if allow_suite_config:
         parser.add_argument(
-            "--external-config",
-            help="JSON object used as runtime external_config, matching the server-side /api/run-task body.",
+            "--suite-config",
+            help="JSON object used as runtime suite_config, matching the server-side /api/run-task body.",
         )
     parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
 
@@ -552,11 +552,11 @@ def _print_task_detail(summary: dict[str, Any]) -> None:
     print()
     print("description")
     print(summary["description"])
-    external_run_config = summary.get("external_run_config")
-    if external_run_config is not None:
+    suite_run_config = summary.get("suite_run_config")
+    if suite_run_config is not None:
         print()
-        print("external_run_config")
-        print(json.dumps(external_run_config, indent=2, sort_keys=False))
+        print("suite_run_config")
+        print(json.dumps(suite_run_config, indent=2, sort_keys=False))
 
 
 def _print_cached_run_summary(payload: dict[str, Any]) -> None:
@@ -596,15 +596,15 @@ def _print_cached_run_summary(payload: dict[str, Any]) -> None:
         print(line)
 
 
-def _parse_external_config_arg(raw_value: str | None) -> dict[str, Any] | None:
+def _parse_suite_config_arg(raw_value: str | None) -> dict[str, Any] | None:
     if raw_value is None:
         return None
     try:
         parsed = json.loads(raw_value)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"--external-config must be valid JSON: {exc.msg}") from exc
+        raise SystemExit(f"--suite-config must be valid JSON: {exc.msg}") from exc
     if not isinstance(parsed, dict):
-        raise SystemExit("--external-config must decode to a JSON object.")
+        raise SystemExit("--suite-config must decode to a JSON object.")
     return dict(parsed)
 
 
@@ -624,10 +624,10 @@ def _print_json(payload: dict[str, Any]) -> None:
 def _handle_tasks_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/tasks surface on the CLI.")
     parser.add_argument("--task-id", help="Filter down to one task id.")
-    parser.add_argument("--track", help="Filter by track such as coding_verified or agent_verified.")
+    parser.add_argument("--track", help="Filter by track such as coding_verified or science_verified.")
     parser.add_argument("--tier", choices=["comparable", "experiment"], help="Filter by benchmark tier.")
     parser.add_argument("--mode", choices=["answer", "artifact", "agent"], help="Filter by task contract mode.")
-    parser.add_argument("--backend", choices=["dataset", "external"], help="Filter by runtime backend.")
+    parser.add_argument("--backend", choices=["dataset", "benchmark_adapter"], help="Filter by runtime backend.")
     parser.add_argument("--main-only", action="store_true", help="Show only comparable tasks included in the main comparison.")
     parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
     args = parser.parse_args(argv)
@@ -662,10 +662,10 @@ def _handle_runtime_command(argv: list[str]) -> None:
 
 def _handle_run_task_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/run-task surface on the CLI.")
-    _add_common_run_arguments(parser, require_task_id=True, allow_external_config=True)
+    _add_common_run_arguments(parser, require_task_id=True, allow_suite_config=True)
     args = parser.parse_args(argv)
     runtime = _runtime_for_cli(args.model)
-    external_config = _parse_external_config_arg(args.external_config)
+    suite_config = _parse_suite_config_arg(args.suite_config)
     out = write_discrete_artifacts(
         task_id=args.task_id,
         proposal_runtime=runtime,
@@ -674,7 +674,7 @@ def _handle_run_task_command(argv: list[str]) -> None:
         branching_factor=args.branching_factor,
         item_workers=args.item_workers,
         max_items=args.max_items,
-        external_config=external_config,
+        suite_config=suite_config,
     )
     payload = _payload_from_artifact(out)
     if args.pretty:
@@ -697,7 +697,7 @@ def _handle_latest_run_command(argv: list[str]) -> None:
 
 def _handle_run_sequence_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/run-sequence surface on the CLI.")
-    _add_common_run_arguments(parser, require_task_id=False, allow_external_config=False)
+    _add_common_run_arguments(parser, require_task_id=False, allow_suite_config=False)
     args = parser.parse_args(argv)
     runtime = _runtime_for_cli(args.model)
     out = write_discrete_artifacts(

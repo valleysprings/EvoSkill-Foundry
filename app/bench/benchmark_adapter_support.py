@@ -17,8 +17,8 @@ from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_b
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
-def is_external_task(task: dict[str, Any]) -> bool:
-    return infer_runtime_backend(task) == "external"
+def uses_benchmark_adapter_runtime(task: dict[str, Any]) -> bool:
+    return infer_runtime_backend(task) == "benchmark_adapter"
 
 
 def _load_module_from_path(path: Path, module_name: str):
@@ -31,17 +31,17 @@ def _load_module_from_path(path: Path, module_name: str):
 
 
 def load_candidate_module(path: Path):
-    module_name = f"external_candidate_{path.parent.name}_{path.stem}".replace("-", "_")
+    module_name = f"benchmark_adapter_candidate_{path.parent.name}_{path.stem}".replace("-", "_")
     return _load_module_from_path(path, module_name)
 
 
 def _load_task_runner(task: dict[str, Any]):
     verifier_path = Path(str(task["verifier_path"]))
-    module_name = f"task_external_runner_{task['id'].replace('-', '_')}"
+    module_name = f"task_benchmark_adapter_runner_{task['id'].replace('-', '_')}"
     module = _load_module_from_path(verifier_path, module_name)
-    runner = getattr(module, "run_external_task", None)
+    runner = getattr(module, "run_benchmark_adapter_task", None)
     if not callable(runner):
-        raise ValueError(f"{verifier_path} must export callable run_external_task().")
+        raise ValueError(f"{verifier_path} must export callable run_benchmark_adapter_task().")
     return runner
 
 
@@ -50,7 +50,7 @@ def load_value_from_candidate(path: Path, name: str, default: Any = None) -> Any
     return getattr(module, name, default)
 
 
-def effective_external_run_config(task: dict[str, Any], candidate_path: Path) -> dict[str, Any]:
+def effective_suite_run_config(task: dict[str, Any], candidate_path: Path) -> dict[str, Any]:
     module = load_candidate_module(candidate_path)
     builder = getattr(module, "build_run_config", None)
     if callable(builder):
@@ -62,14 +62,14 @@ def effective_external_run_config(task: dict[str, Any], candidate_path: Path) ->
     elif isinstance(base_config, dict):
         base = dict(base_config)
     else:
-        raise ValueError("External candidate build_run_config()/RUN_CONFIG must produce a dict.")
-    override = task.get("runtime_external_config")
+        raise ValueError("Benchmark adapter build_run_config()/RUN_CONFIG must produce a dict.")
+    override = task.get("runtime_suite_config")
     if isinstance(override, dict):
         return {**base, **override}
     return base
 
 
-def render_external_run_config_source(config: dict[str, Any]) -> str:
+def render_suite_run_config_source(config: dict[str, Any]) -> str:
     rendered = pprint.pformat(config, sort_dicts=False)
     return (
         "def build_run_config() -> dict:\n"
@@ -79,7 +79,7 @@ def render_external_run_config_source(config: dict[str, Any]) -> str:
     )
 
 
-def runtime_for_external_task(task: dict[str, Any]) -> ProposalRuntime:
+def runtime_for_benchmark_adapter_task(task: dict[str, Any]) -> ProposalRuntime:
     requested_model = str(task.get("runtime_model_override") or "").strip() or None
     return ProposalRuntime.from_env().with_model(requested_model)
 
@@ -173,7 +173,7 @@ def _default_raw_metrics(status: str = "not-run") -> dict[str, Any]:
     }
 
 
-def build_external_candidate(
+def build_benchmark_adapter_candidate(
     *,
     task: dict[str, Any],
     source_code: str,
@@ -226,7 +226,7 @@ def _objective_point(generation: int, candidate: dict[str, Any], *, improved_glo
     }
 
 
-def build_external_result(
+def build_benchmark_adapter_result(
     *,
     task: dict[str, Any],
     proposal_runtime: ProposalRuntime,
@@ -243,7 +243,7 @@ def build_external_result(
         objective_curve.append(_objective_point(1, winner, improved_global_best=True))
 
     result = {
-        "run_mode": "external-benchmark",
+        "run_mode": "benchmark-adapter",
         "active_model": proposal_runtime.active_model,
         "selection_spec": dict(task["selection_spec"]),
         "benchmark_tier": task["benchmark_tier"],
@@ -277,9 +277,10 @@ def build_external_result(
             "local_dataset_only": bool(task.get("local_dataset_only")),
             "split": task.get("split"),
             "included_in_main_comparison": task["included_in_main_comparison"],
-            "supports_runtime_config": isinstance(task.get("runtime_external_config"), dict) or is_external_task(task),
-            "external_run_config": task.get("runtime_external_config"),
-            "supports_max_items": bool(task.get("local_dataset_only") or is_external_task(task)),
+            "supports_runtime_config": isinstance(task.get("runtime_suite_config"), dict)
+            or uses_benchmark_adapter_runtime(task),
+            "suite_run_config": task.get("runtime_suite_config"),
+            "supports_max_items": bool(task.get("local_dataset_only") or uses_benchmark_adapter_runtime(task)),
             "default_max_items": None,
         },
         "baseline": baseline,
@@ -330,7 +331,7 @@ def emit_progress(
     )
 
 
-def run_external_task(
+def run_benchmark_adapter_task(
     task: dict[str, Any],
     *,
     proposal_runtime: ProposalRuntime,

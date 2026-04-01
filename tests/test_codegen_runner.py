@@ -276,66 +276,80 @@ class CodegenRunnerTest(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 generate_discrete_payload(task_id="contains-duplicates", runs_root=Path(tmp_dir), env_root=Path(tmp_dir))
 
-    def test_external_benchmark_task_runs_without_codegen_loop(self) -> None:
+    def test_benchmark_adapter_task_runs_without_codegen_loop(self) -> None:
         runtime = make_runtime([])
         with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
             payload = generate_discrete_payload(
-                task_id="external-score",
+                task_id="shared-agent-contract",
                 proposal_runtime=runtime,
                 runs_root=Path(tmp_dir),
             )
         self.assertEqual(payload["summary"]["total_runs"], 1)
         run = payload["runs"][0]
-        self.assertEqual(run["run_mode"], "external-benchmark")
+        self.assertEqual(run["run_mode"], "benchmark-adapter")
         self.assertEqual(run["winner"]["agent"], "fixture-agent")
-        self.assertEqual(run["winner"]["metrics"]["objective"], 0.75)
+        self.assertEqual(run["winner"]["metrics"]["objective"], 0.0)
         self.assertEqual(run["winner"]["metrics"]["verifier_status"], "pass")
         self.assertEqual(run["baseline"]["metrics"]["verifier_status"], "not-run")
-        self.assertEqual(run["selection_reason"], "External fixture finished with 3/4 successful cases.")
-        self.assertEqual(run["external_summary"], {"passed": 3, "total": 4})
+        self.assertEqual(run["selection_reason"], "Shared-agent fixture finished with 0/1 successful episodes.")
+        self.assertEqual(run["suite_summary"], {"suite": "fixture-suite", "domain": "fixture", "passed": 0, "total": 1, "source": "scripted"})
+        self.assertEqual(run["item_runs"][0]["item_id"], "fixture-episode-1")
+        self.assertEqual(run["item_runs"][0]["success"], False)
+        self.assertEqual(len(run["item_runs"][0]["turns"]), 1)
         self.assertEqual(run["generations"], [])
-        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "external-score")
+        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "shared-agent-contract")
         self.assertTrue(task_summary["supports_runtime_config"])
-        self.assertEqual(task_summary["external_run_config"]["cases"], 4)
+        self.assertEqual(task_summary["suite_run_config"]["inline_episodes"][0]["episode_id"], "fixture-episode-1")
         self.assertTrue(task_summary["supports_max_items"])
-        self.assertEqual(task_summary["default_max_items"], 4)
+        self.assertEqual(task_summary["default_max_items"], 1)
 
-    def test_external_config_override_updates_external_task_without_editing_file(self) -> None:
+    def test_suite_config_override_updates_benchmark_adapter_task_without_editing_file(self) -> None:
         runtime = make_runtime([])
         with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
             payload = generate_discrete_payload(
-                task_id="external-score",
+                task_id="shared-agent-contract",
                 proposal_runtime=runtime,
                 runs_root=Path(tmp_dir),
-                external_config={"agent_name": "override-agent", "cases": 5, "passed": 4},
+                suite_config={
+                    "inline_episodes": [
+                        {
+                            "episode_id": "override-episode",
+                            "instruction": "This override succeeds when the agent emits no tool call.",
+                            "turns": [{"observation": {"hint": "stay idle"}, "expected_tool_count": 0, "stop_after_step": True}],
+                        }
+                    ]
+                },
             )
         run = payload["runs"][0]
-        self.assertEqual(run["winner"]["agent"], "override-agent")
-        self.assertEqual(run["winner"]["metrics"]["objective"], 0.8)
-        self.assertIn("'cases': 5", run["winner"]["source_code"])
-        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "external-score")
-        self.assertEqual(task_summary["external_run_config"]["cases"], 5)
-        self.assertEqual(task_summary["default_max_items"], 5)
+        self.assertEqual(run["winner"]["metrics"]["objective"], 1.0)
+        self.assertEqual(run["item_runs"][0]["item_id"], "override-episode")
+        task_summary = next(task for task in payload["task_catalog"] if task["id"] == "shared-agent-contract")
+        self.assertEqual(task_summary["suite_run_config"]["inline_episodes"][0]["episode_id"], "override-episode")
+        self.assertEqual(task_summary["default_max_items"], 1)
 
-    def test_external_task_can_enter_codegen_search_loop_when_budgets_are_positive(self) -> None:
+    def test_benchmark_adapter_task_can_enter_codegen_search_loop_when_budgets_are_positive(self) -> None:
         runtime = make_runtime(
             [
                 chat_response(
                     {
                         "candidates": [
                             {
-                                "name": "perfect fixture wrapper",
-                                "strategy": "Increase the passed count to the full case count.",
-                                "rationale": "The fixture objective is passed / total, so making both values equal reaches 1.0.",
-                                "candidate_summary": "Wrapper with a perfect synthetic pass rate.",
+                                "name": "complete immediately",
+                                "strategy": "Emit the expected completion tool call on the first turn.",
+                                "rationale": "The fixture succeeds when step(...) calls the complete tool in response to the hint.",
+                                "candidate_summary": "Multi-turn adapter that completes as soon as the task is solved.",
                                 "file_body": (
-                                    "def build_run_config() -> dict:\n"
+                                    "def init_episode(episode: dict) -> dict:\n"
+                                    "    return {'episode_id': episode['episode_id']}\n\n"
+                                    "def step(turn: dict, runtime) -> dict:\n"
+                                    "    del runtime\n"
                                     "    return {\n"
-                                    "        'agent_name': 'evolved-agent',\n"
-                                    "        'cases': 5,\n"
-                                    "        'passed': 5,\n"
-                                    "    }\n\n"
-                                    "RUN_CONFIG = build_run_config()\n"
+                                    "        'message': 'done',\n"
+                                    "        'tool_calls': [{'name': 'complete', 'arguments': {'message': 'done'}}],\n"
+                                    "        'done': True,\n"
+                                    "        'state': dict(turn.get('state') or {}),\n"
+                                    "        'annotations': {},\n"
+                                    "    }\n"
                                 ),
                             }
                         ]
@@ -343,18 +357,18 @@ class CodegenRunnerTest(unittest.TestCase):
                 ),
                 chat_response(
                     {
-                        "failure_pattern": "The baseline leaves synthetic cases unsolved.",
-                        "strategy_hypothesis": "Increasing passed to match cases maximizes the fixture objective.",
-                        "successful_strategy": "Return a wrapper whose build_run_config produces a perfect passed/cases ratio.",
-                        "prompt_fragment": "For this fixture, evolve build_run_config toward passed == cases when that preserves the wrapper contract.",
-                        "tool_trace_summary": "candidate wrapper -> fixture verifier -> accept perfect objective",
+                        "failure_pattern": "The baseline never emits the required completion tool call.",
+                        "strategy_hypothesis": "Producing the complete tool call on the first turn satisfies the fixture contract.",
+                        "successful_strategy": "Return an adapter whose step(...) immediately emits the expected complete tool call.",
+                        "prompt_fragment": "For this fixture, evolve the step(turn, runtime) policy toward the required completion action.",
+                        "tool_trace_summary": "candidate adapter -> scripted fixture -> accept successful completion",
                     }
                 ),
             ]
         )
         with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
             payload = generate_discrete_payload(
-                task_id="external-score",
+                task_id="shared-agent-contract",
                 proposal_runtime=runtime,
                 runs_root=Path(tmp_dir),
                 generation_budget=1,
@@ -367,7 +381,7 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertEqual(run["winner"]["metrics"]["objective"], 1.0)
         self.assertEqual(run["winner"]["metrics"]["verifier_status"], "pass")
         self.assertEqual(len(run["generations"]), 1)
-        self.assertIn("build_run_config", run["winner"]["source_code"])
+        self.assertIn("def step", run["winner"]["source_code"])
         self.assertGreater(float(run["delta_primary_score"]), 0.0)
 
     def test_math_tasks_fail_fast_when_math_verify_is_missing(self) -> None:

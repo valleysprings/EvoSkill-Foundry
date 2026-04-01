@@ -4,10 +4,11 @@ version = "0.1.0"
 description = "Autoresearch workbench with deterministic verification and replayable memory."
 requires-python = ">=3.11"
 # This root package only covers the active app/* implementation.
-# Vendored projects under external/* keep their own dependency manifests.
+# Reference clones under External/ are not part of the runtime environment.
 dependencies = [
   "matplotlib>=3.9,<4",
   "math-verify[antlr4_13_2]>=0.9,<1",
+  "PyYAML>=6,<7",
 ]
 
 [build-system]

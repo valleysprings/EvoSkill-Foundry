@@ -60,7 +60,7 @@ export type TaskSummary = {
   optimization_scope: string;
   included_in_main_comparison: boolean;
   supports_runtime_config: boolean;
-  external_run_config?: Record<string, unknown> | null;
+  suite_run_config?: Record<string, unknown> | null;
   supports_max_items: boolean;
   default_max_items?: number | null;
 };
@@ -213,7 +213,7 @@ export type RunTask = {
   task_mode?: string;
   optimization_scope?: string;
   supports_runtime_config?: boolean;
-  external_run_config?: Record<string, unknown> | null;
+  suite_run_config?: Record<string, unknown> | null;
   supports_max_items?: boolean;
   default_max_items?: number | null;
 };
@@ -248,22 +248,28 @@ export type QuestionRecord = {
 export type ItemRun = {
   item_id: string;
   item_name: string;
-  question: QuestionRecord;
-  baseline: Candidate;
-  winner: Candidate;
-  delta_primary_score: number | string;
+  question?: QuestionRecord;
+  baseline?: Candidate;
+  winner?: Candidate;
+  delta_primary_score?: number | string;
   run_delta_primary_score?: number | string;
   run_delta_objective?: number | string;
-  generations: Generation[];
-  objective_curve: ObjectivePoint[];
-  llm_traces: Array<Record<string, unknown>>;
+  generations?: Generation[];
+  objective_curve?: ObjectivePoint[];
+  llm_traces?: Array<Record<string, unknown>>;
   memory_before_count?: number | string;
   memory_after_count?: number | string;
   positive_experiences_added?: number | string;
   negative_experiences_added?: number | string;
   added_experiences?: AddedExperience[];
-  memory_markdown: string;
-  selection_reason: string;
+  memory_markdown?: string;
+  selection_reason?: string;
+  payload?: Record<string, unknown>;
+  turns?: Array<Record<string, unknown>>;
+  success?: boolean;
+  reward?: number | string;
+  raw_artifact_path?: string | null;
+  messages?: Array<Record<string, unknown>>;
 };
 
 export type Run = {
@@ -279,6 +285,7 @@ export type Run = {
   baseline: Candidate;
   winner: Candidate;
   dataset_summary?: DatasetSummary;
+  suite_summary?: Record<string, unknown>;
   item_runs?: ItemRun[];
   delta_primary_score: number | string;
   run_delta_primary_score?: number | string;
@@ -379,7 +386,7 @@ export type JobState = {
   error?: string | null;
   model?: string | null;
   details?: unknown;
-  external_config?: Record<string, unknown> | null;
+  suite_config?: Record<string, unknown> | null;
   events: LiveEvent[];
   payload?: Payload;
 };

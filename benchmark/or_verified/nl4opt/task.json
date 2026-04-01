@@ -7,11 +7,11 @@
   "dataset_id": "CardinalOperations/NL4OPT",
   "answer_metric": "success_rate",
   "family": "operations-research",
-  "runtime_backend": "external",
+  "runtime_backend": "benchmark_adapter",
   "task_mode": "artifact",
   "optimization_scope": "wrapper",
   "task_signature": [
-    "external-benchmark",
+    "benchmark-adapter",
     "operations-research",
     "coptpy",
     "nl4opt"

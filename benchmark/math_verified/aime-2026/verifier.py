@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.codegen.math_grading import evaluate_math_dataset_candidate
+from app.bench.math_grading import evaluate_math_dataset_candidate
 
 
 def evaluate_candidate(*, task, candidate_path, source_code, baseline_metrics, memory_applied):

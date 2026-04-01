@@ -105,11 +105,9 @@ Expected metric pattern:
 
 Use `agent` when `editable.py` defines a policy or harness wrapper that is evaluated over a multi-step environment.
 
-Typical repo examples:
+Typical repo example:
 
-- `terminal-bench`
-- `tau-bench-retail`
-- `tau-bench-airline`
+- `tests/fixtures/benchmarks/test_fixtures/shared-agent-contract`
 
 Expected metric pattern:
 
@@ -135,9 +133,6 @@ Current mapping:
 
 Checked-in but currently disabled external-harness tasks:
 
-- `terminal-bench`
-- `tau-bench-retail`
-- `tau-bench-airline`
 - `nl4opt`
 - `industryor`
 
@@ -147,10 +142,6 @@ This separation is deliberate: some tasks are scientifically interesting before 
 
 Not every checked-in non-comparable benchmark has the same operational cost.
 
-- `terminal-bench`
-  requires Harbor plus a working local Docker daemon
-- `tau-bench-*`
-  requires isolated environment setup, but not the Harbor Docker path
 - `nl4opt` and `industryor`
   require local `coptpy` execution
 - `co-bench`

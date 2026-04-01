@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from app.codegen.benchmark_support import canonical_text
+from app.bench.benchmark_support import canonical_text
 from app.configs.codegen import (
     DATASET_NETWORK_ACCESS_INSTRUCTION,
     DATASET_SINGLE_QUESTION_INSTRUCTION,

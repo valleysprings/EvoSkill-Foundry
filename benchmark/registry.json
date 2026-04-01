@@ -36,6 +36,21 @@
       "enabled": true
     },
     {
+      "id": "spider",
+      "path": "text2sql_verified/spider",
+      "enabled": true
+    },
+    {
+      "id": "bird",
+      "path": "text2sql_verified/bird",
+      "enabled": true
+    },
+    {
+      "id": "chase",
+      "path": "text2sql_verified/chase",
+      "enabled": true
+    },
+    {
       "id": "longbench-v2",
       "path": "longcontext_verified/longbench-v2",
       "enabled": true
@@ -64,21 +79,6 @@
       "id": "livecodebench",
       "path": "coding_verified/livecodebench",
       "enabled": true
-    },
-    {
-      "id": "terminal-bench",
-      "path": "agent_verified/terminal-bench",
-      "enabled": false
-    },
-    {
-      "id": "tau-bench-retail",
-      "path": "agent_verified/tau-bench-retail",
-      "enabled": false
-    },
-    {
-      "id": "tau-bench-airline",
-      "path": "agent_verified/tau-bench-airline",
-      "enabled": false
     },
     {
       "id": "nl4opt",

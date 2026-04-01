@@ -13,8 +13,10 @@ DEFAULT_MANIFEST_PATH = DEFAULT_DATA_DIR / "questions.json"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from app.codegen.co_benchmarks import (  # noqa: E402
+from co_bench_support import (  # noqa: E402
     build_co_bench_manifest,
     co_bench_problem_names,
     normalize_co_bench_problem_names,

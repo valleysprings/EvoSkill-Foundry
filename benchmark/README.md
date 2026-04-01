@@ -23,7 +23,7 @@ The active tasks live in `benchmark/registry.json`. Each task directory includes
 Each task is expected to declare a clear contract:
 
 - `runtime_backend`
-  use `dataset` for active registry tasks. `external` remains a legacy/internal runtime value and is not enabled right now
+  use `dataset` or `benchmark_adapter`; runtime-managed assets belong under `runs/`, not `External/`
 - `task_mode`
   what the editable file represents: `answer`, `artifact`, or `agent`
 - `optimization_scope`

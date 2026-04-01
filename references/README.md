@@ -17,4 +17,4 @@ Scope notes:
 
 - these docs describe the active `app/*`, `benchmark/*`, and `ui/*` implementation
 - `__init__.py` files are intentionally omitted unless they do more than re-export symbols
-- `external/*` is vendored code and is not the primary implementation path
+- `External/` is a user-managed reference area and is not part of runtime behavior

@@ -5,15 +5,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.codegen.agent_benchmarks import (
+from app.bench.agent_benchmarks import (
     _coerce_tau_results_payload,
     _legacy_tau_cli_is_likely,
     _load_tau_results,
+    runtime_repo_dir,
 )
-from app.codegen.external import strip_socks_proxy_env
+from app.bench.benchmark_adapter_support import strip_socks_proxy_env
 
 
 class AgentBenchmarksTest(unittest.TestCase):
+    def test_runtime_repo_dir_uses_runs_runtime_repos(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertEqual(runtime_repo_dir("harbor"), repo_root / "runs" / "runtime" / "repos" / "harbor")
+
     def test_strip_socks_proxy_env_removes_only_socks_entries(self) -> None:
         cleaned = strip_socks_proxy_env(
             {

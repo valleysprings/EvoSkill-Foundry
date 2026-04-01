@@ -342,7 +342,7 @@ def _run_job_process(
     item_workers: int | None,
     max_items: int | None,
     selected_item_ids: list[str] | None,
-    external_config: dict[str, object] | None,
+    suite_config: dict[str, object] | None,
 ) -> None:
     def progress(event: dict) -> None:
         event_queue.put({"type": "event", "event": event})
@@ -360,7 +360,7 @@ def _run_job_process(
             item_workers=item_workers,
             max_items=max_items,
             selected_item_ids=selected_item_ids,
-            external_config=external_config,
+            suite_config=suite_config,
         )
         event_queue.put({"type": "completed", "artifact_path": str(artifact)})
     except Exception as exc:  # noqa: BLE001
@@ -378,7 +378,7 @@ def _run_job(
     item_workers: int | None,
     max_items: int | None,
     selected_item_ids: list[str] | None,
-    external_config: dict[str, object] | None,
+    suite_config: dict[str, object] | None,
 ) -> None:
     if _should_run_job_inline():
         def progress(event: dict) -> None:
@@ -398,7 +398,7 @@ def _run_job(
                 item_workers=item_workers,
                 max_items=max_items,
                 selected_item_ids=selected_item_ids,
-                external_config=external_config,
+                suite_config=suite_config,
             )
             payload = json.loads(Path(artifact).read_text())
             with JOB_LOCK:
@@ -426,7 +426,7 @@ def _run_job(
             item_workers,
             max_items,
             selected_item_ids,
-            external_config,
+            suite_config,
         ),
         daemon=True,
     )
@@ -518,7 +518,7 @@ def _start_job(
     item_workers: int | None,
     max_items: int | None,
     selected_item_ids: list[str] | None,
-    external_config: dict[str, object] | None,
+    suite_config: dict[str, object] | None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
     stall_timeout_s = _job_stall_timeout_s(proposal_runtime)
@@ -532,7 +532,7 @@ def _start_job(
             "item_workers": item_workers,
             "max_items": max_items,
             "item_ids": list(selected_item_ids) if selected_item_ids is not None else None,
-            "external_config": external_config,
+            "suite_config": suite_config,
             "events": [],
             "payload": None,
             "terminal": False,
@@ -556,7 +556,7 @@ def _start_job(
             item_workers,
             max_items,
             selected_item_ids,
-            external_config,
+            suite_config,
         ),
         daemon=True,
     )
@@ -648,7 +648,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
             item_ids_value = query.get("item_ids", [None])[0]
-            external_config_value = request_body.get("external_config")
+            suite_config_value = request_body.get("suite_config")
             if task_id is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "task_id is required")
                 return
@@ -659,9 +659,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
                 selected_item_ids = _parse_item_ids(item_ids_value)
-                if external_config_value is not None and not isinstance(external_config_value, dict):
-                    raise ConfigError("external_config must be a JSON object.")
-                external_config = dict(external_config_value) if isinstance(external_config_value, dict) else None
+                if suite_config_value is not None and not isinstance(suite_config_value, dict):
+                    raise ConfigError("suite_config must be a JSON object.")
+                suite_config = dict(suite_config_value) if isinstance(suite_config_value, dict) else None
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -685,7 +685,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         item_workers,
                         max_items,
                         selected_item_ids,
-                        external_config,
+                        suite_config,
                     ),
                     "model": runtime.active_model,
                 },
@@ -713,9 +713,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
                 selected_item_ids = _parse_item_ids(item_ids_value)
-                external_config_value = request_body.get("external_config")
-                if external_config_value is not None:
-                    raise ConfigError("external_config is only supported for /api/run-task.")
+                suite_config_value = request_body.get("suite_config")
+                if suite_config_value is not None:
+                    raise ConfigError("suite_config is only supported for /api/run-task.")
                 if selected_item_ids is not None:
                     raise ConfigError("item_ids is only supported for /api/run-task.")
             except ValueError as exc:

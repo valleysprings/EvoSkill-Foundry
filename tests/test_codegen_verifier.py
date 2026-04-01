@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codegen.benchmark_support import public_question_payload
+from app.bench.benchmark_support import public_question_payload
 from app.codegen.catalog import load_codegen_tasks
 from app.codegen.dataset_support import build_micro_task, load_question_manifest
 from app.codegen.verifier import evaluate_materialized_candidate, materialize_candidate
@@ -16,14 +17,40 @@ from tests.helpers import load_fixture_codegen_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
 PLANBENCH_TEST_LAYOUT = {
-    "obfuscated_deceptive_logistics": (
-        "obfuscated_deceptive_logistics/generated_domain.pddl",
-        "obfuscated_deceptive_logistics/generated_basic",
-    ),
-    "logistics": (
-        "logistics/generated_domain.pddl",
-        "logistics/generated_basic",
-    ),
+    "obfuscated_deceptive_logistics": {
+        "domain_file": "obfuscated_deceptive_logistics/generated_domain.pddl",
+        "instance_dir": "obfuscated_deceptive_logistics/generated_basic",
+        "instances_template": "instance-{}.pddl",
+        "actions": {
+            "clip": "clip {} {} {}",
+            "memory": "memory {} {} {}",
+            "paltry": "paltry {} {} {}",
+            "sip": "sip {} {} {}",
+            "tightfisted": "tightfisted {} {} {}",
+            "wretched": "wretched {} {} {} {}",
+        },
+        "encoded_objects": {"o": "object_{}"},
+    },
+    "logistics": {
+        "domain_file": "logistics/generated_domain.pddl",
+        "instance_dir": "logistics/generated_basic",
+        "instances_template": "instance-{}.pddl",
+        "actions": {
+            "load-truck": "load {} into {} at {}",
+            "load-airplane": "load {} into {} at {}",
+            "unload-truck": "unload {} from {} at {}",
+            "unload-airplane": "unload {} from {} at {}",
+            "drive-truck": "drive {} from {} to {} in {}",
+            "fly-airplane": "fly {} from {} to {}",
+        },
+        "encoded_objects": {
+            "p": "package_{}",
+            "t": "truck_{}",
+            "a": "airplane_{}",
+            "l": "location_{}_{}",
+            "c": "city_{}",
+        },
+    },
 }
 
 
@@ -107,18 +134,24 @@ class CodegenVerifierTest(unittest.TestCase):
         instance_id = int(raw_context["instance_id"])
         if domain not in PLANBENCH_TEST_LAYOUT:
             raise ValueError(f"Missing PlanBench test layout for domain {domain!r}.")
-        domain_file, instance_dir = PLANBENCH_TEST_LAYOUT[domain]
+        config_payload = {
+            "domain_name": domain,
+            **PLANBENCH_TEST_LAYOUT[domain],
+        }
 
         temp_dir = tempfile.TemporaryDirectory()
         root = Path(temp_dir.name)
-        domain_path = root / "instances" / domain_file
-        instance_path = root / "instances" / instance_dir / f"instance-{instance_id}.pddl"
+        domain_path = root / "instances" / str(config_payload["domain_file"])
+        instance_path = root / "instances" / str(config_payload["instance_dir"]) / f"instance-{instance_id}.pddl"
+        config_path = root / "configs" / f"{domain}.yaml"
         validator_path = root / "validate_stub.py"
 
         domain_path.parent.mkdir(parents=True, exist_ok=True)
         domain_path.write_text("(define (domain stub))\n")
         instance_path.parent.mkdir(parents=True, exist_ok=True)
         instance_path.write_text("(define (problem stub))\n")
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config_payload))
         validator_path.write_text(
             "#!/usr/bin/env python3\n"
             "import os\n"
@@ -318,6 +351,8 @@ class CodegenVerifierTest(unittest.TestCase):
             for task in eager_dataset_tasks:
                 items = load_question_manifest(task)
                 micro_task = build_micro_task(task, items[0])
+                if task["id"] == "planbench":
+                    self._stub_planbench_assets(items[0], expected_plan=str(items[0]["expected_answer"]))
                 source = Path(task["editable_path"]).read_text()
                 candidate_path, candidate_code = materialize_candidate(
                     task=micro_task,
@@ -674,7 +709,31 @@ class CodegenVerifierTest(unittest.TestCase):
         self.assertIn("Question raw prompt:", micro_task["prompt_context"])
         self.assertIn("[PLAN]", micro_task["prompt_context"])
 
-    def test_planbench_obfuscated_single_line_object_format_is_accepted(self) -> None:
+    def test_planbench_obfuscated_official_object_format_is_accepted(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "planbench")
+        item = next(item for item in load_question_manifest(task) if item["metadata"].get("domain") == "obfuscated_deceptive_logistics")
+        micro_task = build_micro_task(task, item)
+        self._stub_planbench_assets(item, expected_plan=str(item["expected_answer"]))
+        raw_plan = "\n".join(
+            re.sub(r"\bo(\d+)\b", r"object_\1", step)
+            for step in canonical_plan_steps(item["expected_answer"])
+        )
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            f"def solve(question: dict) -> str:\n    return {raw_plan!r}\n",
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "pass")
+        self.assertEqual(metrics["test_results"][0]["actual"], canonical_plan_text(item["expected_answer"]))
+        self.assertIn("Plan valid", metrics["test_results"][0]["validator_output"])
+
+    def test_planbench_obfuscated_single_line_object_format_is_rejected(self) -> None:
         task = next(task for task in load_codegen_tasks() if task["id"] == "planbench")
         item = next(item for item in load_question_manifest(task) if item["metadata"].get("domain") == "obfuscated_deceptive_logistics")
         micro_task = build_micro_task(task, item)
@@ -694,9 +753,8 @@ class CodegenVerifierTest(unittest.TestCase):
             baseline_metrics=None,
             memory_applied=False,
         )
-        self.assertEqual(metrics["status"], "pass")
-        self.assertEqual(metrics["test_results"][0]["actual"], canonical_plan_text(item["expected_answer"]))
-        self.assertIn("Plan valid", metrics["test_results"][0]["validator_output"])
+        self.assertEqual(metrics["status"], "fail")
+        self.assertEqual(metrics["test_results"][0]["reason"], "plan extraction failed")
 
     def test_planbench_logistics_natural_language_plan_is_accepted(self) -> None:
         task = next(task for task in load_codegen_tasks() if task["id"] == "planbench")
@@ -719,7 +777,7 @@ class CodegenVerifierTest(unittest.TestCase):
         self.assertEqual(metrics["test_results"][0]["actual"], canonical_plan_text(item["expected_answer"]))
         self.assertIn("Plan valid", metrics["test_results"][0]["validator_output"])
 
-    def test_planbench_parenthesized_pddl_plan_is_accepted(self) -> None:
+    def test_planbench_parenthesized_pddl_plan_is_rejected(self) -> None:
         task = next(task for task in load_codegen_tasks() if task["id"] == "planbench")
         item = next(item for item in load_question_manifest(task) if item["metadata"].get("domain") == "obfuscated_deceptive_logistics")
         micro_task = build_micro_task(task, item)
@@ -736,8 +794,39 @@ class CodegenVerifierTest(unittest.TestCase):
             baseline_metrics=None,
             memory_applied=False,
         )
-        self.assertEqual(metrics["status"], "pass")
-        self.assertEqual(metrics["test_results"][0]["actual"], canonical_plan_text(item["expected_answer"]))
+        self.assertEqual(metrics["status"], "fail")
+        self.assertEqual(metrics["test_results"][0]["reason"], "plan extraction failed")
+
+    def test_planbench_missing_runtime_official_assets_returns_setup_error(self) -> None:
+        task = next(task for task in load_codegen_tasks() if task["id"] == "planbench")
+        item = next(item for item in load_question_manifest(task) if item["metadata"].get("domain") == "logistics")
+        micro_task = build_micro_task(task, item)
+        env_patch = patch.dict(
+            os.environ,
+            {
+                "PLANBENCH_OFFICIAL_ROOT": "",
+                "PLANBENCH_VAL_BINARY": "",
+                "VAL": "",
+                "PLANBENCH_STUB_EXPECTED_PLAN": "",
+            },
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            "def solve(question: dict) -> str:\n    return 'load package_0 into truck_0 at location_0_0'\n",
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+        self.assertEqual(metrics["status"], "error")
+        self.assertIn("runs/runtime/benchmarks/planbench/plan-bench/configs/logistics.yaml", metrics["error"])
+        self.assertNotIn("external/", metrics["error"])
 
 
 if __name__ == "__main__":

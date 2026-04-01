@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.codegen.or_benchmarks import evaluate_coptpy_value_candidate, run_coptpy_value_benchmark
+from app.bench.or_benchmarks import evaluate_coptpy_value_candidate, run_coptpy_value_benchmark
 
 
 def evaluate_candidate(
@@ -27,7 +27,7 @@ def evaluate_candidate(
     )
 
 
-def run_external_task(
+def run_benchmark_adapter_task(
     *,
     task,
     candidate_path,

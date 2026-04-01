@@ -7,7 +7,7 @@ type StartJobOptions = {
   itemWorkers?: number | null;
   maxItems?: number | null;
   itemIds?: string[] | null;
-  externalConfig?: Record<string, unknown> | null;
+  suiteConfig?: Record<string, unknown> | null;
 };
 
 type JsonOptions = RequestInit | undefined;
@@ -55,7 +55,7 @@ export async function startJob(
     params.set("task_id", taskId);
   }
   const { branchingFactor, generationBudget, candidateBudget, itemWorkers, maxItems, itemIds } = options;
-  const externalConfig = options.externalConfig;
+  const suiteConfig = options.suiteConfig;
   if (typeof branchingFactor === "number" && Number.isFinite(branchingFactor)) {
     params.set("branching_factor", String(Math.max(1, Math.floor(branchingFactor))));
   }
@@ -77,9 +77,9 @@ export async function startJob(
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const url = taskId ? `/api/run-task${suffix}` : `/api/run-sequence${suffix}`;
   const request: RequestInit = { method: "POST" };
-  if (externalConfig && taskId) {
+  if (suiteConfig && taskId) {
     request.headers = { "Content-Type": "application/json" };
-    request.body = JSON.stringify({ external_config: externalConfig });
+    request.body = JSON.stringify({ suite_config: suiteConfig });
   }
   return fetchJson<{ job_id: string; model: string }>(url, request);
 }

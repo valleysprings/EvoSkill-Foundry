@@ -49,7 +49,7 @@ function task(id: string): TaskSummary {
     optimization_scope: "implementation",
     included_in_main_comparison: true,
     supports_runtime_config: false,
-    external_run_config: null,
+    suite_run_config: null,
     supports_max_items: true,
     default_max_items: 1,
   };
@@ -170,7 +170,7 @@ test("prefers current task catalog metadata over stale cached task catalog entri
   };
   const staleCached = {
     ...current,
-    runtime_backend: "external",
+    runtime_backend: "benchmark_adapter",
     task_mode: "agent",
     optimization_scope: "prompt",
     supports_runtime_config: true,

@@ -285,7 +285,7 @@ function summarizeRetryStates(retryStates: Map<string, RetryState>): string | nu
   return `retry ${current.attempt}/${current.maxAttempts}`;
 }
 
-function parseExternalConfigInput(
+function parseSuiteConfigInput(
   input: string,
   fallback: Record<string, unknown> | null = null,
 ): { config: Record<string, unknown> | null; error: string | null } {
@@ -295,11 +295,11 @@ function parseExternalConfigInput(
   try {
     const parsed = JSON.parse(input);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { config: null, error: "External RUN_CONFIG must be a JSON object." };
+      return { config: null, error: "Suite Config must be a JSON object." };
     }
     return { config: parsed as Record<string, unknown>, error: null };
   } catch {
-    return { config: null, error: "External RUN_CONFIG is not valid JSON." };
+    return { config: null, error: "Suite Config is not valid JSON." };
   }
 }
 
@@ -316,11 +316,11 @@ function prettyJson(value: unknown): string {
   return JSON.stringify(value ?? {}, null, 2);
 }
 
-function inferExternalDefaultMaxItems(config: Record<string, unknown> | null | undefined): number | null {
+function inferSuiteDefaultMaxItems(config: Record<string, unknown> | null | undefined): number | null {
   if (!config) {
     return null;
   }
-  for (const key of ["n_tasks", "cases"]) {
+  for (const key of ["task_limit", "n_tasks", "cases"]) {
     const value = config[key];
     if (typeof value === "number" && Number.isFinite(value) && value > 0) {
       return Math.max(1, Math.floor(value));
@@ -332,7 +332,7 @@ function inferExternalDefaultMaxItems(config: Record<string, unknown> | null | u
       }
     }
   }
-  for (const key of ["problem_names", "task_names", "tasks"]) {
+  for (const key of ["task_ids", "problem_names", "task_names", "tasks", "inline_episodes"]) {
     const value = config[key];
     if (Array.isArray(value) && value.length) {
       return value.length;
@@ -647,10 +647,10 @@ function trackLabel(track: string): string {
   const labels: Record<string, string> = {
     math_verified: "Mathematics",
     reasoning_verified: "Reasoning",
+    text2sql_verified: "Text-to-SQL",
     longcontext_verified: "Long Context",
     browse_snapshot: "Browse",
     science_verified: "Science Reasoning",
-    agent_verified: "Agent Benchmarks",
     coding_verified: "Coding",
     or_verified: "Operations Research",
   };
@@ -1739,7 +1739,7 @@ export function App() {
   const [itemWorkersInput, setItemWorkersInput] = useState(String(DEFAULT_FRONTEND_ITEM_WORKERS));
   const [maxItemsInput, setMaxItemsInput] = useState("");
   const [selectedItemIdsInput, setSelectedItemIdsInput] = useState("");
-  const [externalConfigInput, setExternalConfigInput] = useState("");
+  const [suiteConfigInput, setSuiteConfigInput] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [datasetIntroTaskId, setDatasetIntroTaskId] = useState<string | null>(null);
   const [datasetWarnings, setDatasetWarnings] = useState<DatasetWarning[]>([]);
@@ -1912,10 +1912,10 @@ export function App() {
     setBranchingFactorInput(String(DEFAULT_FRONTEND_BRANCHING_FACTOR));
     setGenerationBudgetInput(String(DEFAULT_FRONTEND_GENERATION_BUDGET));
     setCandidateBudgetInput(String(DEFAULT_FRONTEND_CANDIDATE_BUDGET));
-    setItemWorkersInput(selectedTask.runtime_backend === "external" ? "" : String(DEFAULT_FRONTEND_ITEM_WORKERS));
+    setItemWorkersInput(selectedTask.runtime_backend === "benchmark_adapter" ? "" : String(DEFAULT_FRONTEND_ITEM_WORKERS));
     setMaxItemsInput("");
     setSelectedItemIdsInput("");
-    setExternalConfigInput(selectedTask.supports_runtime_config ? prettyJson(selectedTask.external_run_config ?? {}) : "");
+    setSuiteConfigInput(selectedTask.supports_runtime_config ? prettyJson(selectedTask.suite_run_config ?? {}) : "");
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -2023,7 +2023,7 @@ export function App() {
 
   async function runTask(taskId: string | null) {
     const model = selectedModel || runtimeInfo.active_model;
-    const isExternalTask = selectedTask?.runtime_backend === "external";
+    const isBenchmarkAdapterTask = selectedTask?.runtime_backend === "benchmark_adapter";
     const isDatasetTask = selectedTask?.runtime_backend === "dataset";
     const supportsMaxItems = Boolean(selectedTask?.supports_max_items);
     const branchingFactor = Math.max(
@@ -2038,19 +2038,19 @@ export function App() {
       1,
       Math.floor(numeric(candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET)),
     );
-    const itemWorkers = isExternalTask
+    const itemWorkers = isBenchmarkAdapterTask
       ? null
       : Math.max(1, Math.floor(numeric(itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS)));
     const selectedItemIds = isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null;
     const maxItems = selectedItemIds ? null : supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
-    const externalConfig = selectedTask?.supports_runtime_config
-      ? parseExternalConfigInput(externalConfigInput, selectedTask.external_run_config ?? null)
+    const suiteConfig = selectedTask?.supports_runtime_config
+      ? parseSuiteConfigInput(suiteConfigInput, selectedTask.suite_run_config ?? null)
       : { config: null, error: null };
-    if (externalConfig.error) {
+    if (suiteConfig.error) {
       setError({
         terminal: true,
         error_type: "config_error",
-        error: externalConfig.error,
+        error: suiteConfig.error,
         model,
       });
       return;
@@ -2068,11 +2068,11 @@ export function App() {
       item_workers: itemWorkers,
       max_items: maxItems,
       item_ids: selectedItemIds,
-      external_config: externalConfig.config,
+      suite_config: suiteConfig.config,
       events: [
         {
           phase: "queued",
-          message: isExternalTask
+          message: isBenchmarkAdapterTask
             ? `Launching ${taskId ?? "selected task"} on ${model} ` +
               `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}` +
               `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxItems ? `, item cap=${maxItems}` : ""}).`
@@ -2091,7 +2091,7 @@ export function App() {
         itemWorkers,
         maxItems,
         itemIds: selectedItemIds,
-        externalConfig: externalConfig.config,
+        suiteConfig: suiteConfig.config,
       });
       let job = await loadJob(start.job_id);
       while (job.status === "running" && token === pollToken.current) {
@@ -2145,7 +2145,7 @@ export function App() {
         branching_factor: Math.max(1, Math.floor(numeric(branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR))),
         generation_budget: Math.max(1, Math.floor(numeric(generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET))),
         candidate_budget: Math.max(1, Math.floor(numeric(candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET))),
-        item_workers: isExternalTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS))),
+        item_workers: isBenchmarkAdapterTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS))),
         item_ids: isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null,
         events: [],
       });
@@ -2153,16 +2153,16 @@ export function App() {
   }
 
   const defaultSelectionSpec = selectedTask?.selection_spec ?? payload.task_catalog[0]?.selection_spec ?? emptySelectionSpec();
-  const externalConfigDraft = selectedTask?.supports_runtime_config
-    ? parseExternalConfigInput(externalConfigInput, selectedTask.external_run_config ?? null)
+  const suiteConfigDraft = selectedTask?.supports_runtime_config
+    ? parseSuiteConfigInput(suiteConfigInput, selectedTask.suite_run_config ?? null)
     : { config: null, error: null };
   const selectedTaskDefaultMaxItems = selectedTask?.local_dataset_only
     ? selectedTask.dataset_size ?? null
-    : inferExternalDefaultMaxItems(externalConfigDraft.config ?? selectedTask?.external_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
+    : inferSuiteDefaultMaxItems(suiteConfigDraft.config ?? selectedTask?.suite_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
   const selectedTaskUsesMaxItems = Boolean(selectedTask?.supports_max_items);
   const selectedTaskHasDatasetIntro = Boolean(selectedTask?.local_dataset_only);
   const selectedTaskIsDataset = selectedTask?.runtime_backend === "dataset";
-  const selectedTaskIsExternal = selectedTask?.runtime_backend === "external";
+  const selectedTaskIsBenchmarkAdapter = selectedTask?.runtime_backend === "benchmark_adapter";
   const selectedTaskIsCoding = selectedTask?.track === "coding_verified";
   const parsedSelectedItemIds = selectedTaskIsDataset ? parseItemIdsInput(selectedItemIdsInput) : null;
   const parsedMaxItems = parsedSelectedItemIds ? null : selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
@@ -2179,8 +2179,8 @@ export function App() {
     ? `Dataset size: ${selectedTask.dataset_size} ${selectedTaskIsCoding ? "coding problems" : "items"}`
     : selectedTaskUsesMaxItems
       ? selectedTaskDefaultMaxItems
-        ? `Blank uses the current RUN_CONFIG default of ${selectedTaskDefaultMaxItems} tasks.`
-        : "Blank uses the current RUN_CONFIG default task subset."
+        ? `Blank uses the current suite config default of ${selectedTaskDefaultMaxItems} tasks.`
+        : "Blank uses the current suite config default task subset."
       : "Single-item task: cap disabled";
 
   return (
@@ -2282,8 +2282,8 @@ export function App() {
               step={1}
               value={itemWorkersInput}
               onChange={(event) => setItemWorkersInput(event.target.value)}
-              disabled={selectedTaskIsExternal}
-              placeholder={selectedTaskIsExternal ? "n/a" : undefined}
+              disabled={selectedTaskIsBenchmarkAdapter}
+              placeholder={selectedTaskIsBenchmarkAdapter ? "n/a" : undefined}
             />
           </label>
           <label className="field">
@@ -2322,18 +2322,18 @@ export function App() {
           ) : null}
           {selectedTask?.supports_runtime_config ? (
             <label className="field field-span-full">
-              <span className="field-label">External RUN_CONFIG</span>
+              <span className="field-label">Suite Config</span>
               <textarea
                 className="control code-textarea"
                 rows={14}
-                value={externalConfigInput}
-                onChange={(event) => setExternalConfigInput(event.target.value)}
+                value={suiteConfigInput}
+                onChange={(event) => setSuiteConfigInput(event.target.value)}
                 spellCheck={false}
               />
               <span className="small muted">
-                Per-run JSON override for the external benchmark harness. This does not rewrite the checked-in `editable.py`.
+                Per-run JSON override for the benchmark-adapter suite. This does not rewrite the checked-in `editable.py`.
               </span>
-              {externalConfigDraft.error ? <span className="small launcher-warning">{externalConfigDraft.error}</span> : null}
+              {suiteConfigDraft.error ? <span className="small launcher-warning">{suiteConfigDraft.error}</span> : null}
             </label>
           ) : null}
         </div>
@@ -2344,8 +2344,8 @@ export function App() {
           </button>
         </div>
         <p className="small muted">
-          Runs execute one task at a time. For dataset and external benchmark tasks, Item Cap limits how many local items or harness cases are expanded in this session.
-          {selectedTaskIsExternal ? " External benchmark tasks also use the standard search loop; the JSON RUN_CONFIG above defines the wrapper baseline for this run." : ""}
+          Runs execute one task at a time. For dataset and benchmark-adapter tasks, Item Cap limits how many local items or benchmark episodes are expanded in this session.
+          {selectedTaskIsBenchmarkAdapter ? " Benchmark-adapter tasks also use the standard search loop; the JSON suite config above only changes runner-side suite settings for this run." : ""}
           {selectedTaskIsCoding ? " LiveCodeBench lazily caches only the requested prefix on first use." : ""}
         </p>
 
@@ -2361,9 +2361,9 @@ export function App() {
               <span className="summary-pill">
                 cap {generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET} rounds | {candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET} candidates/branch | {branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR} frontier parents
               </span>
-              {selectedTaskIsExternal ? <span className="summary-pill">configured via RUN_CONFIG</span> : <span className="summary-pill">workers {itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS}</span>}
+              {selectedTaskIsBenchmarkAdapter ? <span className="summary-pill">configured via suite config</span> : <span className="summary-pill">workers {itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS}</span>}
               {parsedSelectedItemIds ? <span className="summary-pill">items {parsedSelectedItemIds.join(", ")}</span> : null}
-              {selectedTaskIsExternal ? (
+              {selectedTaskIsBenchmarkAdapter ? (
                 <span className="summary-pill">
                   {parsedMaxItems ? `task cap ${parsedMaxItems}` : selectedTaskDefaultMaxItems ? `task cap default ${selectedTaskDefaultMaxItems}` : "task cap default"}
                 </span>

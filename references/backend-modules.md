@@ -216,7 +216,7 @@ What it owns:
 
 If `trainer.py` is the single-task loop, `dataset_runner.py` is the dataset wrapper around that loop.
 
-### `app/codegen/benchmark_support.py`
+### `app/bench/benchmark_support.py`
 
 Shared grading helpers:
 
@@ -228,7 +228,7 @@ Shared grading helpers:
 
 It is the shared benchmark math for many verifiers.
 
-### `app/codegen/math_grading.py`
+### `app/bench/math_grading.py`
 
 Math-specific grading layer.
 
@@ -293,6 +293,6 @@ Task-specific correctness logic when the generic verifier is not enough.
 - need to add or remove a benchmark task: `benchmark/registry.json`, `benchmark/.../task.json`, `app/codegen/catalog.py`
 - need to change model request format: `app/codegen/llm.py`, `app/configs/prompts.py`
 - need to change selection logic: `app/codegen/trainer.py`, `app/configs/codegen.py`
-- need to change candidate scoring: `app/codegen/verifier.py`, `app/codegen/benchmark_support.py`, `app/codegen/math_grading.py`
+- need to change candidate scoring: `app/codegen/verifier.py`, `app/bench/benchmark_support.py`, `app/bench/math_grading.py`
 - need to change memory retrieval/write-back: `app/memory/store.py`, `app/codegen/trainer.py`
 - need to change API behavior: `app/entries/server.py`

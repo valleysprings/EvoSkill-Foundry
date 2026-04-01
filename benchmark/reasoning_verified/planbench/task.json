@@ -1,7 +1,7 @@
 {
   "id": "planbench",
   "title": "PlanBench",
-  "description": "Evaluate direct PlanBench task_1 plan generation in the unified dataset runtime as an answer-adapter task with official-style extraction plus semantic plan validation.",
+  "description": "Evaluate direct PlanBench task_1 plan generation in the unified dataset runtime as an answer-adapter task with upstream-compatible text_to_plan parsing plus semantic VAL validation.",
   "benchmark_tier": "comparable",
   "track": "reasoning_verified",
   "dataset_id": "planbench_task1_plan_generation",
@@ -43,5 +43,5 @@
   "selection_spec": {
     "profile": "objective_only"
   },
-  "prompt_context": "Edit editable.py only. This task uses the unified dataset runtime, but it is not an exact-match answer task. Treat solve(question: dict) as the answer-adapter boundary: it receives the public PlanBench prompt payload and must return plan text that the official-style adapter/verifier can extract and semantically validate against the official instance. You may return either a list[str] with one action per step or a newline-separated string of actions. Preserve the declared helper symbols when useful. Do not use browsing or external network access."
+  "prompt_context": "Edit editable.py only. This task uses the unified dataset runtime, but it is not an exact-match answer task. Treat solve(question: dict) as the answer-adapter boundary: it receives the public PlanBench prompt payload and must return plan text that the upstream task_1 text_to_plan parser can extract and semantically validate against the official instance. You may return either a list[str] with one official-style action line per step or a newline-separated string of official-style action lines. Return natural-language or official object-token action text accepted by PlanBench task_1 parsing; do not return parenthesized PDDL. Preserve the declared helper symbols when useful. Do not use browsing or external network access."
 }

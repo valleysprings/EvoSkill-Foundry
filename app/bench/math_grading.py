@@ -7,7 +7,7 @@ from typing import Any
 
 from math_verify import parse, verify
 
-from app.codegen.benchmark_support import canonical_numeric_text, choice_answer_matches, public_question_payload
+from app.bench.benchmark_support import canonical_numeric_text, choice_answer_matches, public_question_payload
 from app.codegen.verifier import load_callable_from_path
 
 VALID_MATH_ANSWER_FORMATS = {"symbolic", "numeric", "choice"}

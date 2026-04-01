@@ -26,6 +26,7 @@ class CodegenCatalogTest(unittest.TestCase):
             {
                 "math_verified",
                 "reasoning_verified",
+                "text2sql_verified",
                 "longcontext_verified",
                 "science_verified",
                 "coding_verified",

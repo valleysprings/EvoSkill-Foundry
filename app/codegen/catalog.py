@@ -13,7 +13,7 @@ from app.configs.codegen import (
     VALID_BENCHMARK_TIERS,
     speedup_objective_spec,
 )
-from app.codegen.external import is_external_task, load_value_from_candidate
+from app.bench.benchmark_adapter_support import uses_benchmark_adapter_runtime, load_value_from_candidate
 from app.codegen.selection import selection_spec_for_task
 from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.configs.paths import BENCHMARK_ROOT as CONFIG_BENCHMARK_ROOT
@@ -25,10 +25,10 @@ REGISTRY_PATH = CONFIG_REGISTRY_PATH
 TRACK_ORDER = {
     "math_verified": 0,
     "reasoning_verified": 1,
-    "longcontext_verified": 2,
-    "browse_snapshot": 3,
-    "science_verified": 4,
-    "agent_verified": 5,
+    "text2sql_verified": 2,
+    "longcontext_verified": 3,
+    "browse_snapshot": 4,
+    "science_verified": 5,
     "coding_verified": 6,
     "or_verified": 7,
 }
@@ -46,12 +46,9 @@ TASK_ORDER = {
     "scienceqa": 10,
     "openbookqa": 11,
     "livecodebench": 12,
-    "terminal-bench": 13,
-    "tau-bench-retail": 14,
-    "tau-bench-airline": 15,
-    "nl4opt": 16,
-    "industryor": 17,
-    "co-bench": 18,
+    "nl4opt": 13,
+    "industryor": 14,
+    "co-bench": 15,
 }
 
 def _speedup_objective_spec() -> dict[str, str]:
@@ -123,8 +120,8 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _external_run_config(task: dict[str, Any]) -> dict[str, Any] | None:
-    if not is_external_task(task):
+def _suite_run_config(task: dict[str, Any]) -> dict[str, Any] | None:
+    if not uses_benchmark_adapter_runtime(task):
         return None
     config = dict(load_value_from_candidate(Path(str(task["editable_path"])), "RUN_CONFIG", {}) or {})
     build_run_config = load_value_from_candidate(Path(str(task["editable_path"])), "build_run_config", None)
@@ -132,16 +129,16 @@ def _external_run_config(task: dict[str, Any]) -> dict[str, Any] | None:
         built = build_run_config()
         if isinstance(built, dict):
             config = dict(built)
-    override = task.get("runtime_external_config")
+    override = task.get("runtime_suite_config")
     if isinstance(override, dict):
         config.update(override)
     return config
 
 
-def _external_default_max_items(config: dict[str, Any] | None) -> int | None:
+def _suite_default_max_items(config: dict[str, Any] | None) -> int | None:
     if not config:
         return None
-    for key in ("n_tasks", "cases"):
+    for key in ("task_limit", "n_tasks", "cases"):
         value = config.get(key)
         if isinstance(value, bool):
             continue
@@ -151,7 +148,7 @@ def _external_default_max_items(config: dict[str, Any] | None) -> int | None:
             continue
         if parsed > 0:
             return parsed
-    for key in ("problem_names", "task_names", "tasks"):
+    for key in ("task_ids", "problem_names", "task_names", "tasks", "inline_episodes"):
         value = config.get(key)
         if isinstance(value, list) and value:
             return len(value)
@@ -159,19 +156,19 @@ def _external_default_max_items(config: dict[str, Any] | None) -> int | None:
 
 
 def _task_supports_max_items(task: dict[str, Any]) -> bool:
-    return bool(task.get("local_dataset_only") or is_external_task(task))
+    return bool(task.get("local_dataset_only") or uses_benchmark_adapter_runtime(task))
 
 
-def _task_default_max_items(task: dict[str, Any], external_run_config: dict[str, Any] | None) -> int | None:
+def _task_default_max_items(task: dict[str, Any], suite_run_config: dict[str, Any] | None) -> int | None:
     if bool(task.get("local_dataset_only")):
         size = int(task.get("dataset_size") or 0)
         return size if size > 0 else None
-    return _external_default_max_items(external_run_config)
+    return _suite_default_max_items(suite_run_config)
 
 
 def task_summary(task: dict[str, Any]) -> dict[str, Any]:
-    external_run_config = _external_run_config(task)
-    default_item_workers = 0 if is_external_task(task) else 20
+    suite_run_config = _suite_run_config(task)
+    default_item_workers = 0 if uses_benchmark_adapter_runtime(task) else 20
     return {
         "id": task["id"],
         "title": task["title"],
@@ -200,10 +197,10 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "optimization_scope": task["optimization_scope"],
         "included_in_main_comparison": task["included_in_main_comparison"],
         "run_baseline_verifier": task["run_baseline_verifier"],
-        "supports_runtime_config": external_run_config is not None,
-        "external_run_config": external_run_config,
+        "supports_runtime_config": suite_run_config is not None,
+        "suite_run_config": suite_run_config,
         "supports_max_items": _task_supports_max_items(task),
-        "default_max_items": _task_default_max_items(task, external_run_config),
+        "default_max_items": _task_default_max_items(task, suite_run_config),
     }
 
 

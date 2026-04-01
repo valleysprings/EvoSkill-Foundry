@@ -52,7 +52,7 @@ class ServerApiTest(unittest.TestCase):
                 item_workers=None,
                 max_items=None,
                 selected_item_ids=None,
-                external_config=None,
+                suite_config=None,
             )
             try:
                 deadline = time.time() + 5
@@ -390,7 +390,7 @@ class ServerApiTest(unittest.TestCase):
                     httpd.server_close()
                     thread.join(timeout=5)
 
-    def test_external_config_is_forwarded_to_job_runner(self) -> None:
+    def test_suite_config_is_forwarded_to_job_runner(self) -> None:
         payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
         with tempfile.TemporaryDirectory() as tmp_dir:
             artifact_path = Path(tmp_dir) / "payload.json"
@@ -402,9 +402,9 @@ class ServerApiTest(unittest.TestCase):
                 httpd, thread = self._serve()
                 try:
                     status, start_payload = _fetch_json(
-                        f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=terminal-bench",
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=shared-agent-contract",
                         method="POST",
-                        body=json.dumps({"external_config": {"n_tasks": 2, "agent_name": "custom-agent"}}).encode("utf-8"),
+                        body=json.dumps({"suite_config": {"n_tasks": 2, "agent_name": "custom-agent"}}).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                     )
                     self.assertEqual(status, 202)
@@ -417,8 +417,8 @@ class ServerApiTest(unittest.TestCase):
                             break
                         time.sleep(0.05)
                     self.assertEqual(completed["status"], "completed")
-                    self.assertEqual(completed["external_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
-                    self.assertEqual(write_artifacts.call_args.kwargs["external_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
+                    self.assertEqual(completed["suite_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
+                    self.assertEqual(write_artifacts.call_args.kwargs["suite_config"], {"n_tasks": 2, "agent_name": "custom-agent"})
                 finally:
                     httpd.shutdown()
                     httpd.server_close()

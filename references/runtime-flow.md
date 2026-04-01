@@ -127,7 +127,7 @@ The generic verifier does:
 Dataset tasks can swap in specialized grading logic:
 
 - science / multiple-choice tasks use `choice_answer_matches(...)`
-- math tasks use `app/codegen/math_grading.py`
+- math tasks use `app/bench/math_grading.py`
 - planning tasks can normalize plan text before exact comparison
 
 ## 7. Memory Path

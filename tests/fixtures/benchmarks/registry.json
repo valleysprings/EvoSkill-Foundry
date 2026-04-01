@@ -16,8 +16,8 @@
       "enabled": true
     },
     {
-      "id": "external-score",
-      "path": "test_fixtures/external-score",
+      "id": "shared-agent-contract",
+      "path": "test_fixtures/shared-agent-contract",
       "enabled": true
     }
   ]
