@@ -126,6 +126,41 @@ class MultiTurnAgentTest(unittest.TestCase):
         self.assertEqual(len(metrics["item_runs"][0]["turns"]), 1)
         self.assertTrue(metrics["item_runs"][0]["success"])
 
+    def test_scripted_suite_respects_max_turns_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            candidate_path = Path(tmp_dir) / "editable.py"
+            candidate_path.write_text(
+                "def step(turn: dict, runtime) -> dict:\n"
+                "    del runtime\n"
+                "    return {\n"
+                "        'message': 'working',\n"
+                "        'tool_calls': [{'name': 'act', 'arguments': {'command': f\"step-{turn['turn_index']}\"}}],\n"
+                "        'done': False,\n"
+                "        'state': dict(turn.get('state') or {}),\n"
+                "        'annotations': {},\n"
+                "    }\n"
+            )
+            metrics = run_scripted_multi_turn_suite(
+                task={"id": "fixture", "runtime_backend": "benchmark_adapter"},
+                candidate_path=candidate_path,
+                proposal_runtime=make_runtime([]),
+                suite_name="fixture",
+                domain="fixture",
+                scripted_episodes=[
+                    {
+                        "episode_id": "episode-2",
+                        "instruction": "Only allow one turn.",
+                        "turns": [
+                            {"observation": {"hint": "step 1"}, "reward": 0.0},
+                            {"observation": {"hint": "step 2"}, "expected_tool_name": "act"},
+                        ],
+                    }
+                ],
+                suite_config={"max_turns": 1},
+            )
+        self.assertEqual(len(metrics["item_runs"][0]["turns"]), 1)
+        self.assertFalse(metrics["item_runs"][0]["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

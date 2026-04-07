@@ -7,9 +7,9 @@ from typing import Any, Callable
 
 from app.codegen.errors import AutoresearchError
 from app.configs.codegen import DEFAULT_FRONTIER_SIZE, DEFAULT_MEMORY_RETRIEVAL_TOP_K, DEFAULT_SESSION_ID
-from app.codegen.llm import ProposalRuntime, propose_code_candidates, reflect_strategy_experience
+from app.codegen.llm import ProposalRuntime, propose_code_candidate, reflect_strategy_experience
 from app.codegen.selection import metrics_rank, selection_spec_for_task
-from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.codegen.task_contracts import infer_interaction_mode, infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.codegen.verifier import evaluate_materialized_candidate, finalize_candidate_metrics, materialize_candidate
 from app.memory.store import MemoryStore
 
@@ -77,7 +77,10 @@ def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_baseline_verifier(task: dict[str, Any]) -> bool:
-    return bool(task.get("run_baseline_verifier", True))
+    configured = task.get("run_baseline_verifier")
+    if configured is not None:
+        return bool(configured)
+    return infer_runtime_backend(task) != "benchmark_adapter"
 
 
 def _reference_only_baseline_metrics(task: dict[str, Any], source_code: str) -> dict[str, Any]:
@@ -174,6 +177,13 @@ def _build_experience(
         "successful_strategy": reflection["successful_strategy"],
         "prompt_fragment": reflection["prompt_fragment"],
         "tool_trace_summary": reflection["tool_trace_summary"],
+        "process_failure_mode": reflection.get("process_failure_mode", ""),
+        "process_repair_hint": reflection.get("process_repair_hint", ""),
+        "process_trace_summary": reflection.get("process_trace_summary", ""),
+        "knowledge_scope": "episode_strategy",
+        "distilled_skill": "",
+        "applicability_notes": "",
+        "source_dataset_ids": [],
         "delta_primary_score": delta_primary_score,
         "proposal_model": winner["proposal_model"],
         "candidate_summary": winner["candidate_summary"],
@@ -308,7 +318,7 @@ def _first_test_actual(metrics: dict[str, Any]) -> str | None:
     first = raw_results[0]
     if not isinstance(first, dict):
         return None
-    for key in ("actual", "actual_raw"):
+    for key in ("actual_display", "actual", "actual_raw"):
         value = first.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -382,13 +392,13 @@ def run_codegen_task(
 ) -> dict[str, Any]:
     normalized_task = dict(task)
     normalized_task["selection_spec"] = dict(task.get("selection_spec") or selection_spec_for_task(normalized_task))
-    normalized_task["run_baseline_verifier"] = bool(task.get("run_baseline_verifier", True))
+    normalized_task["run_baseline_verifier"] = _run_baseline_verifier(task)
     task = normalized_task
     _emit(progress_callback, pace_ms, phase="task_loaded", task_id=task["id"], message=f"Loaded task {task['id']}")
     baseline = _baseline_candidate(task, workspace_root / task["id"])
     baseline_metrics = baseline["metrics"] if baseline.get("baseline_metrics_available") else None
-    current_best = baseline
-    frontier = [baseline]
+    current_best: dict[str, Any] | None = None
+    frontier: list[dict[str, Any]] = []
     accepted_history: list[dict[str, Any]] = []
     candidate_history: list[dict[str, Any]] = []
     llm_traces: list[dict[str, Any]] = []
@@ -396,26 +406,7 @@ def run_codegen_task(
     generations: list[dict[str, Any]] = []
     epsilon = float(task.get("epsilon", 0.0))
     branching_factor = int(task.get("branching_factor", 1))
-    objective_curve = [
-        {
-            "generation": 0,
-            "objective": baseline["metrics"]["objective"],
-            "objective_score": baseline["metrics"]["objective_score"],
-            "candidate_objective": baseline["metrics"]["objective"],
-            "candidate_objective_score": baseline["metrics"]["objective_score"],
-            "primary_score": baseline["metrics"]["primary_score"],
-            "candidate_primary_score": baseline["metrics"]["primary_score"],
-            "tie_break_score": baseline["metrics"]["tie_break_score"],
-            "candidate_tie_break_score": baseline["metrics"]["tie_break_score"],
-            "candidate_agent": baseline["agent"],
-            "candidate_label": baseline["label"],
-            "accepted": bool(baseline["metrics"].get("gate_passed")),
-            "accepted_count": 1 if baseline["metrics"].get("gate_passed") else 0,
-            "memory_delta": 0,
-            "proposal_model": None,
-            "run_mode": "llm-required",
-        }
-    ]
+    objective_curve: list[dict[str, Any]] = []
     initial_retrieved = store.retrieve(
         task_signature=task["task_signature"],
         family=task["family"],
@@ -423,15 +414,23 @@ def run_codegen_task(
     )
 
     for generation in range(1, int(task["generation_budget"]) + 1):
-        parents = _select_branch_parents(frontier, current_best, accepted_history, branching_factor)
-        generation_best_before = current_best
+        generation_best_before = current_best or baseline
+        selection_frontier = frontier
+        if (
+            generation_best_before["candidate_id"] != baseline["candidate_id"]
+            and not any(candidate["candidate_id"] == baseline["candidate_id"] for candidate in frontier)
+        ):
+            # Allow the checked-in baseline to remain a proposal parent fallback
+            # without treating it as a real frontier node.
+            selection_frontier = [*frontier, baseline]
+        parents = _select_branch_parents(selection_frontier, generation_best_before, accepted_history, branching_factor)
         _emit(
             progress_callback,
             pace_ms,
             phase="generation_started",
             task_id=task["id"],
             generation=generation,
-            parent_candidate=current_best["agent"],
+            parent_candidate=generation_best_before["agent"],
             accepted_to_frontier=False,
             improved_global_best=False,
             memory_delta=0,
@@ -469,7 +468,7 @@ def run_codegen_task(
                 message=_branch_message(branch_id, parent_candidate, len(retrieved)),
             )
 
-        def proposal_progress(branch_input: dict[str, Any]) -> ProgressCallback:
+        def proposal_progress(branch_input: dict[str, Any], proposal_index: int) -> ProgressCallback:
             def emit_retry(event: dict[str, Any]) -> None:
                 _emit(
                     progress_callback,
@@ -483,58 +482,75 @@ def run_codegen_task(
                     accepted_to_frontier=False,
                     improved_global_best=False,
                     memory_delta=0,
+                    proposal_index=proposal_index,
                     **event,
                 )
 
             return emit_retry
 
-        if len(branch_inputs) == 1:
+        proposal_budget = max(1, int(task["candidate_budget"]))
+        proposal_jobs: list[tuple[dict[str, Any], int]] = []
+        for branch_input in branch_inputs:
+            branch_input["candidate_specs"] = []
+            branch_input["proposal_traces"] = []
+            branch_input["proposal_failures"] = []
+            branch_input["proposal_error"] = None
+            for proposal_index in range(1, proposal_budget + 1):
+                proposal_jobs.append((branch_input, proposal_index))
+
+        def run_branch_proposal(branch_input: dict[str, Any], proposal_index: int) -> tuple[int, dict[str, Any], dict[str, Any]]:
+            candidate_spec, proposal_trace = propose_code_candidate(
+                proposal_runtime,
+                task=task,
+                generation=generation,
+                parent_candidate=branch_input["parent_candidate"],
+                current_best=generation_best_before,
+                candidate_history=candidate_history,
+                memories=branch_input["retrieved_memories"],
+                progress_callback=proposal_progress(branch_input, proposal_index),
+            )
+            return proposal_index, candidate_spec, proposal_trace
+
+        if len(proposal_jobs) == 1:
+            branch_input, proposal_index = proposal_jobs[0]
             try:
-                candidate_specs, proposal_trace = propose_code_candidates(
-                    proposal_runtime,
-                    task=task,
-                    generation=generation,
-                    parent_candidate=branch_inputs[0]["parent_candidate"],
-                    current_best=generation_best_before,
-                    candidate_history=candidate_history,
-                    memories=branch_inputs[0]["retrieved_memories"],
-                    progress_callback=proposal_progress(branch_inputs[0]),
-                )
+                result = run_branch_proposal(branch_input, proposal_index)
             except Exception as exc:
-                branch_inputs[0]["proposal_error"] = exc
+                branch_input["proposal_failures"].append((proposal_index, exc))
             else:
-                branch_inputs[0]["candidate_specs"] = candidate_specs
-                branch_inputs[0]["proposal_trace"] = proposal_trace
+                branch_input["candidate_specs"].append((result[0], result[1]))
+                branch_input["proposal_traces"].append((result[0], result[2]))
         else:
-            with ThreadPoolExecutor(max_workers=len(branch_inputs)) as executor:
+            max_workers = max(1, min(len(proposal_jobs), proposal_runtime.config.llm_concurrency))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(
-                        propose_code_candidates,
-                        proposal_runtime,
-                        task=task,
-                        generation=generation,
-                        parent_candidate=branch_input["parent_candidate"],
-                        current_best=generation_best_before,
-                        candidate_history=candidate_history,
-                        memories=branch_input["retrieved_memories"],
-                        progress_callback=proposal_progress(branch_input),
-                    ): branch_input
-                    for branch_input in branch_inputs
+                    executor.submit(run_branch_proposal, branch_input, proposal_index): (branch_input, proposal_index)
+                    for branch_input, proposal_index in proposal_jobs
                 }
                 for future in as_completed(futures):
-                    branch_input = futures[future]
+                    branch_input, proposal_index = futures[future]
                     try:
-                        candidate_specs, proposal_trace = future.result()
+                        result = future.result()
                     except Exception as exc:
-                        branch_input["proposal_error"] = exc
+                        branch_input["proposal_failures"].append((proposal_index, exc))
                     else:
-                        branch_input["candidate_specs"] = candidate_specs
-                        branch_input["proposal_trace"] = proposal_trace
+                        branch_input["candidate_specs"].append((result[0], result[1]))
+                        branch_input["proposal_traces"].append((result[0], result[2]))
 
-        proposal_errors = [branch_input for branch_input in branch_inputs if branch_input.get("proposal_error") is not None]
-        successful_proposals = [branch_input for branch_input in branch_inputs if branch_input.get("proposal_trace") is not None]
-        for branch_input in proposal_errors:
-            exc = branch_input["proposal_error"]
+        proposal_errors: list[tuple[dict[str, Any], int, Exception]] = []
+        successful_proposals: list[dict[str, Any]] = []
+        for branch_input in branch_inputs:
+            branch_input["candidate_specs"] = sorted(branch_input["candidate_specs"], key=lambda item: item[0])
+            branch_input["proposal_traces"] = sorted(branch_input["proposal_traces"], key=lambda item: item[0])
+            branch_input["proposal_failures"] = sorted(branch_input["proposal_failures"], key=lambda item: item[0])
+            if branch_input["proposal_traces"]:
+                successful_proposals.append(branch_input)
+            elif branch_input["proposal_failures"]:
+                branch_input["proposal_error"] = branch_input["proposal_failures"][0][1]
+            for proposal_index, exc in branch_input["proposal_failures"]:
+                proposal_errors.append((branch_input, proposal_index, exc))
+
+        for branch_input, proposal_index, exc in proposal_errors:
             payload = _error_payload(exc)
             details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
             llm_traces.append(
@@ -543,6 +559,7 @@ def run_codegen_task(
                     "generation": generation,
                     "branch_id": branch_input["branch_id"],
                     "branch_index": branch_input["branch_index"],
+                    "proposal_index": proposal_index,
                     "phase": "proposal_generation_failed",
                     "selected_model": payload.get("model") or proposal_runtime.active_model,
                     "error_type": payload.get("error_type"),
@@ -558,15 +575,19 @@ def run_codegen_task(
                 generation=generation,
                 branch_id=branch_input["branch_id"],
                 branch_index=branch_input["branch_index"],
+                proposal_index=proposal_index,
                 parent_candidate=branch_input["parent_candidate"]["agent"],
                 candidate=payload.get("model") or proposal_runtime.active_model,
                 accepted_to_frontier=False,
                 improved_global_best=False,
                 memory_delta=0,
-                message=f"{branch_input['branch_id']} failed during proposal generation: {payload.get('error') or exc}",
+                message=(
+                    f"{branch_input['branch_id']} proposal {proposal_index}/{proposal_budget} failed during "
+                    f"proposal generation: {payload.get('error') or exc}"
+                ),
             )
         if not successful_proposals and proposal_errors:
-            raise proposal_errors[0]["proposal_error"]
+            raise proposal_errors[0][2]
 
         branch_results: list[dict[str, Any]] = []
         for branch_input in branch_inputs:
@@ -574,32 +595,38 @@ def run_codegen_task(
             if branch_input.get("proposal_error") is not None:
                 continue
 
-            proposal_trace = dict(branch_input["proposal_trace"])
-            llm_traces.append(
-                {
-                    "task_id": task["id"],
-                    "generation": generation,
-                    "branch_id": branch_id,
-                    "branch_index": branch_input["branch_index"],
-                    "phase": "proposal_generation",
-                    **proposal_trace,
-                }
-            )
-            _emit(
-                progress_callback,
-                pace_ms,
-                phase="proposal_generated",
-                task_id=task["id"],
-                generation=generation,
-                branch_id=branch_id,
-                branch_index=branch_input["branch_index"],
-                parent_candidate=branch_input["parent_candidate"]["agent"],
-                candidate=proposal_trace["selected_model"],
-                accepted_to_frontier=False,
-                improved_global_best=False,
-                memory_delta=0,
-                message=f"{branch_id} generated {len(branch_input['candidate_specs'])} candidates with {proposal_trace['selected_model']}",
-            )
+            for proposal_index, proposal_trace in branch_input["proposal_traces"]:
+                proposal_trace_payload = dict(proposal_trace)
+                llm_traces.append(
+                    {
+                        "task_id": task["id"],
+                        "generation": generation,
+                        "branch_id": branch_id,
+                        "branch_index": branch_input["branch_index"],
+                        "proposal_index": proposal_index,
+                        "phase": "proposal_generation",
+                        **proposal_trace_payload,
+                    }
+                )
+                _emit(
+                    progress_callback,
+                    pace_ms,
+                    phase="proposal_generated",
+                    task_id=task["id"],
+                    generation=generation,
+                    branch_id=branch_id,
+                    branch_index=branch_input["branch_index"],
+                    proposal_index=proposal_index,
+                    parent_candidate=branch_input["parent_candidate"]["agent"],
+                    candidate=proposal_trace_payload["selected_model"],
+                    accepted_to_frontier=False,
+                    improved_global_best=False,
+                    memory_delta=0,
+                    message=(
+                        f"{branch_id} proposal {proposal_index}/{proposal_budget} generated 1 candidate "
+                        f"with {proposal_trace_payload['selected_model']}"
+                    ),
+                )
 
         for branch_input in branch_inputs:
             parent_candidate = branch_input["parent_candidate"]
@@ -641,8 +668,9 @@ def run_codegen_task(
 
             evaluated_candidates: list[dict[str, Any]] = []
 
-            for index, spec in enumerate(branch_input["candidate_specs"], start=1):
-                candidate_id = f"{task['id']}-g{generation}-b{branch_index}-c{index}"
+            for proposal_index, spec in branch_input["candidate_specs"]:
+                candidate_id = f"{task['id']}-g{generation}-b{branch_index}-c{proposal_index}"
+                agent_name = f"candidate-{proposal_index}"
                 source_path, source_code = materialize_candidate(
                     task=task,
                     workspace_root=workspace_root / task["id"] / f"generation-{generation}" / branch_id,
@@ -658,10 +686,12 @@ def run_codegen_task(
                 )
                 candidate = {
                     **spec,
+                    "agent": agent_name,
                     "candidate_id": candidate_id,
                     "generation": generation,
                     "branch_id": branch_id,
                     "branch_index": branch_index,
+                    "proposal_index": proposal_index,
                     "active_model": proposal_runtime.active_model,
                     "workspace_path": str(source_path),
                     "source_code": source_code,
@@ -849,7 +879,10 @@ def run_codegen_task(
         for accepted_candidate in sorted(accepted_candidates, key=_candidate_rank, reverse=True):
             frontier = _extend_frontier(frontier, accepted_candidate)
             accepted_history.append(accepted_candidate)
-        current_best = max([generation_best_before, *accepted_candidates], key=_candidate_rank)
+        current_best = max(
+            [*([current_best] if current_best is not None else []), *(branch["winner"] for branch in branch_results)],
+            key=_candidate_rank,
+        )
         generation_winner = _select_generation_winner([branch["winner"] for branch in branch_results])
         winner_branch = next(branch for branch in branch_results if branch["winner"]["candidate_id"] == generation_winner["candidate_id"])
         positive_writebacks = sum(1 for branch in branch_results if branch["memory_delta"] > 0)
@@ -927,8 +960,9 @@ def run_codegen_task(
             ),
         )
 
-    run_delta_primary_score = round(_primary_score(current_best) - _primary_score(baseline), 4)
-    run_delta_objective = round(_objective_value(current_best) - _objective_value(baseline), 4)
+    final_winner = current_best or baseline
+    run_delta_primary_score = round(_primary_score(final_winner) - _primary_score(baseline), 4)
+    run_delta_objective = round(_objective_value(final_winner) - _objective_value(baseline), 4)
     added_experiences = [
         branch["new_experience"]
         for generation in generations
@@ -963,17 +997,27 @@ def run_codegen_task(
             "branching_factor": branching_factor,
             "runtime_backend": infer_runtime_backend(task),
             "task_mode": infer_task_mode(task),
+            "interaction_mode": infer_interaction_mode(task),
             "optimization_scope": infer_optimization_scope(task),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
             "dataset_id": task["dataset_id"],
+            "research_line": task.get("research_line"),
+            "personalization_category": task.get("personalization_category"),
+            "personalization_focus": task.get("personalization_focus"),
+            "safety_category": task.get("safety_category"),
+            "safety_focus": task.get("safety_focus"),
             "included_in_main_comparison": task["included_in_main_comparison"],
-            "run_baseline_verifier": bool(task.get("run_baseline_verifier", True)),
+            "run_baseline_verifier": _run_baseline_verifier(task),
+            "supports_max_items": False,
+            "default_max_items": None,
+            "supports_max_episodes": bool(task.get("interaction_mode") == "multi_turn"),
+            "default_max_episodes": task.get("runtime_max_episodes"),
         },
         "baseline": baseline,
         "initial_retrieved_memories": initial_retrieved,
         "generations": generations,
-        "winner": current_best,
+        "winner": final_winner,
         "delta_primary_score": run_delta_primary_score,
         "run_delta_primary_score": run_delta_primary_score,
         "run_delta_objective": run_delta_objective,
@@ -989,7 +1033,7 @@ def run_codegen_task(
         "dataset_id": task["dataset_id"],
         "included_in_main_comparison": task["included_in_main_comparison"],
         "selection_reason": (
-            f"{current_best['label']} reached { _objective_label(task) }={current_best['metrics']['objective']} "
-            f"with primary_score={current_best['metrics']['primary_score']} after {len(generations)} generations."
+            f"{final_winner['label']} reached { _objective_label(task) }={final_winner['metrics']['objective']} "
+            f"with primary_score={final_winner['metrics']['primary_score']} after {len(generations)} generations."
         ),
     }

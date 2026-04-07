@@ -20,6 +20,10 @@ Every benchmark task should declare three orthogonal dimensions in `task.json`:
   where the task is executed:
   - `dataset`: local runtime; `local_dataset_only=true` means dataset fan-out with per-item runs
   - `external`: legacy custom benchmark harness execution, currently disabled in `benchmark/registry.json`
+- `interaction_mode`
+  how interaction unfolds at evaluation time:
+  - `single_turn`: one candidate invocation returns the final result for each item
+  - `multi_turn`: candidate code interacts over repeated observations, actions, and state updates inside an episode
 
 These fields say what is being optimized. They do not define the headline metric by themselves.
 
@@ -90,8 +94,6 @@ Typical repo examples:
 
 - `livecodebench`
   editable Python program artifact
-- `nl4opt` and `industryor`
-  generated `coptpy` artifact
 - `co-bench`
   generated `solve(**kwargs)` artifact scored by the checked-in official evaluator
 
@@ -115,41 +117,21 @@ Expected metric pattern:
 - primary: task success rate or reward-like benchmark metric
 - tie-break: only secondary operational preferences, and only when they do not distort the benchmark's purpose
 
-## 5. Comparable vs Experiment Tasks
+## 5. Active Benchmark Task Set
 
-This repo uses two benchmark tiers:
+Enabled registry entries now form one active benchmark task set.
 
-- `comparable`
-  local, relatively stable tasks included in the main comparison set
-- `experiment`
-  heavier or not-yet-normalized tasks that are useful, but not yet part of the main headline comparison
+- dataset-backed tasks span math, reasoning, text-to-SQL, long-context, personalization, safety, science QA, coding, and OR
+- benchmark-adapter tasks currently cover the agent benchmarks
 
-Current mapping:
-
-- `comparable`
-  math, science QA, reasoning, long-context, and `livecodebench`
-- `experiment`
-  `co-bench`
-
-Checked-in but currently disabled external-harness tasks:
-
-- `nl4opt`
-- `industryor`
-
-This separation is deliberate: some tasks are scientifically interesting before they are cheap, stable, or normalized enough for headline comparison.
+`benchmark_tier` is retained as compatibility metadata, but the active catalog is no longer split into separate comparable and experiment lanes. If a task should stay out of the active benchmark set, mark it explicitly with `included_in_main_comparison: false`.
 
 ## 6. Dependency Burden
 
-Not every checked-in non-comparable benchmark has the same operational cost.
+Some benchmark families still carry heavier setup requirements:
 
-- `nl4opt` and `industryor`
-  require local `coptpy` execution
 - `co-bench`
   uses dataset fan-out plus the checked-in official evaluation framework and local dataset assets
-
-`external` in this repo is about execution shape, not about whether the task is local, cloned, or missing dependencies. `co-bench` is a useful counterexample: it is still an experiment benchmark, but it now uses the generic dataset runner with a benchmark-specific checked-in evaluator and remains enabled while the harness-backed tasks stay disabled.
-
-Do not describe these as if they all have the same setup burden.
 
 ## 7. Checklist For New Tasks
 
@@ -161,6 +143,6 @@ When adding a benchmark task, write down:
 4. what the single headline metric is
 5. how that metric is encoded in `objective_spec`
 6. whether any tie-break is truly needed
-7. whether the task belongs in `comparable` or `experiment`
+7. whether the task should stay in the active benchmark set or opt out with `included_in_main_comparison: false`
 
 If these seven items are not explicit, the benchmark contract is still underspecified.

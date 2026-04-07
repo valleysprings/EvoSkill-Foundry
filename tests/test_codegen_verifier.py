@@ -320,10 +320,22 @@ class CodegenVerifierTest(unittest.TestCase):
             self.assertEqual(metrics["status"], "pass")
             self.assertGreater(metrics["speedup_vs_baseline"], 1.0)
 
-    def test_no_standalone_non_dataset_comparable_tracks_remain_in_active_research_lane(self) -> None:
+    def test_active_benchmark_lane_includes_registered_benchmark_adapter_tasks(self) -> None:
         comparable_tasks = load_codegen_tasks(included_in_main_comparison=True)
         comparable_tasks = [task for task in comparable_tasks if not task.get("local_dataset_only")]
-        self.assertEqual(comparable_tasks, [])
+        self.assertEqual(
+            {task["id"] for task in comparable_tasks},
+            {
+                "harmbench-text-harmful",
+                "jailbreakbench-harmful",
+                "or-bench-hard-1k",
+                "or-bench-toxic",
+                "hallulens-precisewikiqa",
+                "hallulens-mixedentities",
+                "hallulens-longwiki",
+                "longsafety",
+            },
+        )
 
     def test_dataset_question_microtasks_generate_item_level_records(self) -> None:
         dataset_tasks = [task for task in load_codegen_tasks(included_in_main_comparison=True) if task.get("local_dataset_only")]
@@ -337,12 +349,28 @@ class CodegenVerifierTest(unittest.TestCase):
                 "aime-2026",
                 "planbench",
                 "arc-challenge",
+                "bbh",
+                "mmlu-pro",
+                "spider",
+                "bird",
+                "chase",
                 "longbench-v2",
+                "incharacter",
+                "characterbench",
+                "socialbench",
+                "timechara",
+                "personamem-32k",
+                "personafeedback",
+                "alpsbench",
+                "alpbench",
+                "xstest-refusal-calibration",
                 "sciq",
                 "qasc",
                 "scienceqa",
                 "openbookqa",
+                "gpqa-diamond",
                 "livecodebench",
+                "co-bench",
             },
         )
         eager_dataset_tasks = [task for task in dataset_tasks if not task.get("lazy_item_manifest")]

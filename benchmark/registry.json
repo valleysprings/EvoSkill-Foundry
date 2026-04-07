@@ -36,6 +36,16 @@
       "enabled": true
     },
     {
+      "id": "bbh",
+      "path": "reasoning_verified/bbh",
+      "enabled": true
+    },
+    {
+      "id": "mmlu-pro",
+      "path": "reasoning_verified/mmlu-pro",
+      "enabled": true
+    },
+    {
       "id": "spider",
       "path": "text2sql_verified/spider",
       "enabled": true
@@ -53,6 +63,106 @@
     {
       "id": "longbench-v2",
       "path": "longcontext_verified/longbench-v2",
+      "enabled": true
+    },
+    {
+      "id": "incharacter",
+      "path": "personalization_verified/incharacter",
+      "enabled": true
+    },
+    {
+      "id": "characterbench",
+      "path": "personalization_verified/characterbench",
+      "enabled": true
+    },
+    {
+      "id": "personamem-32k",
+      "path": "personalization_verified/personamem-32k",
+      "enabled": true
+    },
+    {
+      "id": "personafeedback",
+      "path": "personalization_verified/personafeedback",
+      "enabled": true
+    },
+    {
+      "id": "alpsbench",
+      "path": "personalization_verified/alpsbench",
+      "enabled": true
+    },
+    {
+      "id": "alpbench",
+      "path": "personalization_verified/alpbench",
+      "enabled": true
+    },
+    {
+      "id": "socialbench",
+      "path": "personalization_verified/socialbench",
+      "enabled": true
+    },
+    {
+      "id": "timechara",
+      "path": "personalization_verified/timechara",
+      "enabled": true
+    },
+    {
+      "id": "rmtbench",
+      "path": "personalization_verified/rmtbench",
+      "enabled": false
+    },
+    {
+      "id": "charactereval",
+      "path": "personalization_verified/charactereval",
+      "enabled": false
+    },
+    {
+      "id": "coser",
+      "path": "personalization_verified/coser",
+      "enabled": false
+    },
+    {
+      "id": "xstest-refusal-calibration",
+      "path": "safety_verified/xstest-refusal-calibration",
+      "enabled": true
+    },
+    {
+      "id": "harmbench-text-harmful",
+      "path": "safety_verified/harmbench-text-harmful",
+      "enabled": true
+    },
+    {
+      "id": "jailbreakbench-harmful",
+      "path": "safety_verified/jailbreakbench-harmful",
+      "enabled": true
+    },
+    {
+      "id": "or-bench-hard-1k",
+      "path": "safety_verified/or-bench-hard-1k",
+      "enabled": true
+    },
+    {
+      "id": "or-bench-toxic",
+      "path": "safety_verified/or-bench-toxic",
+      "enabled": true
+    },
+    {
+      "id": "hallulens-precisewikiqa",
+      "path": "safety_verified/hallulens-precisewikiqa",
+      "enabled": true
+    },
+    {
+      "id": "hallulens-mixedentities",
+      "path": "safety_verified/hallulens-mixedentities",
+      "enabled": true
+    },
+    {
+      "id": "hallulens-longwiki",
+      "path": "safety_verified/hallulens-longwiki",
+      "enabled": true
+    },
+    {
+      "id": "longsafety",
+      "path": "safety_verified/longsafety",
       "enabled": true
     },
     {
@@ -76,19 +186,14 @@
       "enabled": true
     },
     {
-      "id": "livecodebench",
-      "path": "coding_verified/livecodebench",
+      "id": "gpqa-diamond",
+      "path": "science_verified/gpqa-diamond",
       "enabled": true
     },
     {
-      "id": "nl4opt",
-      "path": "or_verified/nl4opt",
-      "enabled": false
-    },
-    {
-      "id": "industryor",
-      "path": "or_verified/industryor",
-      "enabled": false
+      "id": "livecodebench",
+      "path": "coding_verified/livecodebench",
+      "enabled": true
     },
     {
       "id": "co-bench",

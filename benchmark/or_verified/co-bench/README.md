@@ -8,7 +8,7 @@ You can also run `python prepare.py` directly to download the dataset snapshot i
 
 Evaluation contract:
 
-- the wrapper prompt generates Python that must define `def solve(**kwargs)`
+- `editable.py` directly defines `def solve(**kwargs)` for the active CO-Bench problem
 - the official evaluator executes `solve(**instance)` for each benchmark instance
 - the returned dict is scored by the task's `eval_func(**instance, **solution)`
 - this repo uses the official `test_score` and reports the mean normalized test score across fan-out item runs
@@ -21,5 +21,5 @@ Operational notes:
 - `prepare.py` writes a manifest where each item is one official problem; use `--max-items` or item selection at runtime to limit fan-out
 - Docker is not required for the current official evaluator path; the upstream README explicitly says Docker support is still "coming soon"
 - the upstream controller uses `TSP` and `MIS` aliases, but the dataset folders use the full names; this integration normalizes them automatically
-- `editable.py` still owns prompt construction and timeout settings, but dataset selection now comes from the manifest rather than `RUN_CONFIG.problem_names`
+- `editable.py` is a direct problem solver, not a nested prompt wrapper
 - the default search budget is intentionally conservative: `generation_budget=1`, `candidate_budget=1`, `branching_factor=2`, `item_workers=10`

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from app.bench.benchmark_support import choice_answer_matches, public_question_payload
+from app.bench.benchmark_support import choice_answer_matches, choice_response_display, public_question_payload
 from app.codegen.verifier import load_callable_from_path
 
 
@@ -26,6 +26,12 @@ def evaluate_candidate(*, task, candidate_path, source_code, baseline_metrics, m
         "name": item.get("name") or item["item_id"],
         "expected": item["expected_answer"],
         "actual": actual,
+        "actual_display": choice_response_display(
+            actual,
+            raw_actual=raw_actual,
+            choices=item.get("choices") or [],
+            preferred_choice_index=item.get("metadata", {}).get("correct_choice_index") if passed else None,
+        ),
         "actual_raw": str(raw_actual or ""),
         "passed": passed,
     }

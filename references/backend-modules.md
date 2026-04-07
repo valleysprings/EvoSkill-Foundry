@@ -56,7 +56,7 @@ Main dependency chain:
 What it does:
 
 - loads task catalog entries
-- runs one task or the full comparable sequence
+- runs one task or the full active benchmark sequence
 - chooses dataset vs non-dataset execution path
 - assembles the final payload JSON written under `runs/`
 
@@ -132,11 +132,11 @@ Why it matters:
 What it owns:
 
 - `.env` parsing
-- environment validation
+- `llm_profiles.toml` parsing and profile validation
 - runtime config normalization
 - model selection overrides
 
-This module turns shell state into a strict `RuntimeConfig`.
+This module turns local profile config plus shell-backed secrets into a strict `RuntimeConfig`.
 
 ### `app/codegen/llm.py`
 

@@ -1,13 +1,18 @@
 export type RuntimeInfo = {
   mode: string;
-  primary_model: string;
+  profile: string;
+  provider: string;
+  transport: string;
+  default_model: string;
   active_model: string;
   available_models: string[];
-  api_base: string;
+  base_url: string;
   temperature: number | string;
   max_tokens: number | string;
   timeout_s: number | string;
   llm_concurrency: number | string;
+  supports_tools: boolean | string;
+  supports_json_mode: boolean | string;
 };
 
 export type ObjectiveSpec = {
@@ -30,6 +35,18 @@ export type SelectionSpec = {
   tie_break_formula: string;
   delta_template: string;
   archive_summary: string;
+};
+
+export type TaskSkill = {
+  id: string;
+  filename: string;
+  title: string;
+  path?: string;
+  task_id?: string;
+  dataset_id?: string;
+  source_model?: string | null;
+  source_items?: number | null;
+  generated_at?: string | null;
 };
 
 export type TaskSummary = {
@@ -57,12 +74,26 @@ export type TaskSummary = {
   split?: string | null;
   runtime_backend: string;
   task_mode: string;
+  interaction_mode: string;
   optimization_scope: string;
+  task_shape?: string | null;
+  scoring_mode?: string | null;
+  research_line?: string;
+  personalization_category?: string | null;
+  personalization_focus?: string | null;
+  safety_category?: string | null;
+  safety_focus?: string | null;
+  supports_eval_model?: boolean;
+  requires_eval_model?: boolean;
+  default_eval_model?: string | null;
   included_in_main_comparison: boolean;
   supports_runtime_config: boolean;
   suite_run_config?: Record<string, unknown> | null;
   supports_max_items: boolean;
   default_max_items?: number | null;
+  supports_max_episodes: boolean;
+  default_max_episodes?: number | null;
+  available_skills?: TaskSkill[];
 };
 
 export type DatasetWarning = {
@@ -74,9 +105,44 @@ export type DatasetWarning = {
   message: string;
 };
 
+export type PersonalizationReferenceBenchmark = {
+  id: string;
+  title: string;
+  status: "local_task" | "external_reference" | string;
+  task_id?: string | null;
+  task_ids?: string[] | null;
+  interaction_mode: "single_turn" | "multi_turn" | string;
+  benchmark_category: string;
+  primary_category: string;
+  secondary_categories?: string[] | null;
+  subject_domains?: string[] | null;
+  implementation_status: "running" | "phase1" | "phase2" | "blocked" | string;
+  task_shape: string;
+  scoring_mode: string;
+  supports_eval_model?: boolean;
+  requires_eval_model?: boolean;
+  default_eval_model?: string | null;
+  official_metric_name: string;
+  official_metric_backend: string;
+  official_metric_granularity: string;
+  metric_fidelity: string;
+  official_dimensions: string[];
+  protocol_summary: string;
+  implementation_note: string;
+  required_runtime_roles: string[];
+  blocking_reason?: string | null;
+  focus: string;
+  summary: string;
+  source_label: string;
+  source_url: string;
+  mirror_slug?: string | null;
+  mirror_url?: string | null;
+};
+
 export type TaskCatalogPayload = {
   tasks: TaskSummary[];
   dataset_warnings?: DatasetWarning[];
+  personalization_reference_benchmarks?: PersonalizationReferenceBenchmark[];
 };
 
 export type CandidateMetrics = {
@@ -91,12 +157,15 @@ export type CandidateMetrics = {
   total_tests?: number | string;
   verifier_status?: string;
   status?: string;
+  error?: string | null;
   test_results?: CandidateTestResult[];
+  item_runs?: ItemRun[];
 };
 
 export type CandidateTestResult = {
   name?: string;
   expected?: unknown;
+  actual_display?: unknown;
   actual?: unknown;
   actual_raw?: unknown;
   answer_format?: string;
@@ -211,11 +280,25 @@ export type RunTask = {
   included_in_main_comparison: boolean;
   runtime_backend?: string;
   task_mode?: string;
+  interaction_mode?: string;
   optimization_scope?: string;
+  task_shape?: string | null;
+  scoring_mode?: string | null;
+  research_line?: string;
+  personalization_category?: string | null;
+  personalization_focus?: string | null;
+  safety_category?: string | null;
+  safety_focus?: string | null;
+  supports_eval_model?: boolean;
+  requires_eval_model?: boolean;
+  default_eval_model?: string | null;
   supports_runtime_config?: boolean;
   suite_run_config?: Record<string, unknown> | null;
   supports_max_items?: boolean;
   default_max_items?: number | null;
+  supports_max_episodes?: boolean;
+  default_max_episodes?: number | null;
+  available_skills?: TaskSkill[];
 };
 
 export type DatasetSummary = {
@@ -275,6 +358,8 @@ export type ItemRun = {
 export type Run = {
   run_mode: string;
   active_model: string;
+  policy_model?: string;
+  eval_model?: string | null;
   benchmark_tier: string;
   track: string;
   dataset_id: string;
@@ -307,6 +392,8 @@ export type PayloadSummary = {
   generated_at: string;
   run_mode: string;
   active_model: string;
+  policy_model?: string;
+  eval_model?: string | null;
   num_tasks: number;
   total_runs: number;
   experiment_runs: number;
@@ -333,6 +420,10 @@ export type Payload = {
   audit: {
     workspace_root: string;
     session_id?: string | null;
+    policy_model?: string | null;
+    eval_model?: string | null;
+    max_items?: number | null;
+    max_episodes?: number | null;
   };
   task_catalog: TaskSummary[];
   runs: Run[];
@@ -378,13 +469,17 @@ export type JobState = {
   branching_factor?: number | null;
   generation_budget?: number | null;
   candidate_budget?: number | null;
+  llm_concurrency?: number | null;
   item_workers?: number | null;
   max_items?: number | null;
+  max_episodes?: number | null;
   item_ids?: string[] | null;
   terminal?: boolean;
   error_type?: string | null;
   error?: string | null;
   model?: string | null;
+  policy_model?: string | null;
+  eval_model?: string | null;
   details?: unknown;
   suite_config?: Record<string, unknown> | null;
   events: LiveEvent[];

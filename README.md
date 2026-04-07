@@ -1,12 +1,12 @@
-# autoresearch-foundry
+# EvoSkill Foundry 😎
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.13-blue)
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
 ![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61dafb)
 
 ### Overview Panel
 
-![Autoresearch panel](assets/panel.png)
+![EvoSkill Foundry panel](assets/panel.png)
 
 ## Intro
 
@@ -22,6 +22,27 @@ The core idea is simple:
 
 The web UI is a workbench, not the platform boundary. The platform boundary is the task contract plus the CLI/API surfaces that execute it.
 
+## Setup
+
+This repo now includes both `pyproject.toml` and `uv.lock`.
+
+- `pyproject.toml` is the source of truth for project metadata and dependency ranges
+- `uv.lock` pins the exact resolved environment for reproducible `uv sync`
+- if you want to configure `uv`, add `tool.uv` settings to `pyproject.toml`; do not merge the lockfile into it
+
+Bootstrap the environment with the team-default Conda env:
+
+```bash
+conda activate autoresearch
+uv sync --active
+cp llm_profiles.example.toml llm_profiles.toml
+cp .env.example .env
+```
+
+The default workflow is to keep Python dependencies in the active `autoresearch` Conda environment and let `uv.lock` pin the exact resolved set. If dependency ranges change, run `uv lock`, then refresh the env with `uv sync --active`.
+
+After `uv sync --active`, you can run commands directly from the active Conda env or prefix them with `uv run`.
+
 ## Task Contract
 
 Each task declares three orthogonal dimensions in `task.json`:
@@ -30,7 +51,6 @@ Each task declares three orthogonal dimensions in `task.json`:
   what the editable file represents:
   - `answer`
   - `artifact`
-  - `agent`
 - `optimization_scope`
   what is allowed to change:
   - `prompt`
@@ -53,32 +73,26 @@ Read [references/evaluation-contract.md](references/evaluation-contract.md) befo
 
 The benchmark source of truth lives under [benchmark/](benchmark/), with active registration in [benchmark/registry.json](benchmark/registry.json).
 
-Two tiers are supported:
-
-- `comparable`
-  main comparison tasks with local or relatively stable evaluation paths
-- `experiment`
-  useful heavier tasks that are not yet part of the main headline comparison
-
-Current `comparable` tasks:
+Enabled registry entries now form one active benchmark task set:
 
 - math: `olymmath`, `math-500`, `aime-2024`, `aime-2025`, `aime-2026`
-- science QA: `sciq`, `qasc`, `scienceqa`, `openbookqa`
-- reasoning: `planbench`, `arc-challenge`
+- reasoning: `planbench`, `arc-challenge`, `bbh`, `mmlu-pro`
+- text-to-SQL: `spider`, `bird`, `chase`
 - long-context: `longbench-v2`
+- personalization: `incharacter`, `characterbench`, `socialbench`, `timechara`, `personafeedback`, `personamem-32k`, `alpsbench`, `alpbench`
+- safety: `xstest-refusal-calibration`, `harmbench-text-harmful`, `jailbreakbench-harmful`, `or-bench-hard-1k`, `or-bench-toxic`, `hallulens-precisewikiqa`, `hallulens-mixedentities`, `hallulens-longwiki`, `longsafety`
+- science QA: `sciq`, `qasc`, `scienceqa`, `openbookqa`, `gpqa-diamond`
 - coding: `livecodebench`
+- OR and optimization: `co-bench`
 
-Current `experiment` tasks:
+`benchmark_tier` is still present in task specs for compatibility, but active benchmark tasks are no longer split into a separate experiment lane. Local fixtures or intentionally excluded tasks should opt out explicitly with `included_in_main_comparison: false`.
 
-- OR and optimization tasks: `co-bench`
-
-Current enabled experiment-task setup note:
+Current setup notes:
 
 - `co-bench` uses dataset fan-out with the checked-in official evaluator plus local dataset assets
-
-Current disabled experiment-task setup note:
-
-- `nl4opt` and `industryor` require local `coptpy` execution
+- the personalization tasks use local manifests prepared from mirrored or public benchmark assets
+- the safety track uses `interaction_mode` for turn shape and `safety_category` for the safety sub-direction taxonomy
+- HalluLens safety tasks intentionally use deterministic local GoodWiki/public-data slices so they stay runnable without extra search APIs or gated services
 
 ## Dataset Preparation
 
@@ -87,7 +101,7 @@ Preparing benchmark-local datasets is a prerequisite after clone.
 Run:
 
 ```bash
-python benchmark/prepare_datasets.py
+uv run python benchmark/prepare_datasets.py
 ```
 
 If a benchmark is missing local assets, the runtime should now point you at the matching `python benchmark/prepare_datasets.py --task-id ...` command, and OR benchmark setup is materialized under each task's own `benchmark/.../data/` directory.
@@ -110,6 +124,7 @@ The CLI is JSON-first and mirrors the workbench API surfaces.
 Useful flags:
 
 - `--model`
+- `--llm-concurrency`
 - `--generation-budget`
 - `--candidate-budget`
 - `--branching-factor`
@@ -123,11 +138,11 @@ Useful flags:
 Examples:
 
 ```bash
-python -m app tasks --pretty
-python -m app tasks --task-id livecodebench --pretty
-python -m app runtime
-python -m app run-task --task-id livecodebench --max-items 3 --pretty
-python -m app latest-run --task-id livecodebench --pretty
+uv run python -m app tasks --pretty
+uv run python -m app tasks --task-id livecodebench --pretty
+uv run python -m app runtime
+uv run python -m app run-task --task-id livecodebench --max-items 3 --pretty
+uv run python -m app latest-run --task-id livecodebench --pretty
 ```
 
 ## Web Workbench
@@ -142,7 +157,7 @@ Build and serve the UI:
 
 ```bash
 cd ui && npm install && npm run build
-python -m app serve
+uv run python -m app serve
 ```
 
 If port `8000` is occupied, `serve` defaults to:
@@ -153,9 +168,9 @@ If port `8000` is occupied, `serve` defaults to:
 Explicit overrides:
 
 ```bash
-python -m app serve --port 8001
-python -m app serve --port-conflict next
-python -m app serve --port-conflict kill
+uv run python -m app serve --port 8001
+uv run python -m app serve --port-conflict next
+uv run python -m app serve --port-conflict kill
 ```
 
 ## Artifacts
@@ -180,7 +195,7 @@ The shared task runner lives in [app/entries/runner.py](app/entries/runner.py).
 4. **Memory / reporting / artifacts**
    [app/memory/](app/memory/) persists strategy experiences; `runs/` stores traces, reports, payloads, and materialized workspaces.
 5. **Config / runtime**
-   repo-root `.env` carries secrets and model identity; versioned Python config carries the default runtime knobs.
+   repo-root `.env` carries secrets; repo-root `llm_profiles.toml` selects the active endpoint profile and transport knobs.
 
 Detailed implementation notes:
 
@@ -195,14 +210,22 @@ Detailed implementation notes:
 
 ## Configuration
 
-Local configuration is loaded from repo-root `.env`. Shell environment variables override `.env`.
+Runtime configuration is loaded from repo-root `llm_profiles.toml`.
 
-Required keys:
+Secrets are loaded from repo-root `.env`, and shell environment variables override `.env`.
 
-- `AUTORESEARCH_API_KEY`
-- `AUTORESEARCH_API_BASE`
+Required files:
 
-See `.env.example`.
+- `llm_profiles.toml`
+- `.env` when a profile uses `api_key_env`
+
+Optional environment override:
+
+- `AUTORESEARCH_LLM_PROFILE` to force a different profile than `active_profile`
+
+When dependency ranges change, regenerate the lockfile with `uv lock`.
+
+See `.env.example` and `llm_profiles.example.toml`.
 
 ## Adding Benchmarks
 

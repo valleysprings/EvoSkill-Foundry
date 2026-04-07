@@ -46,12 +46,15 @@ SAMPLE_TASK = {
     "split": "release_v6:test",
     "runtime_backend": "dataset",
     "task_mode": "artifact",
+    "interaction_mode": "single_turn",
     "optimization_scope": "implementation",
     "included_in_main_comparison": True,
     "supports_runtime_config": False,
     "suite_run_config": None,
     "supports_max_items": True,
     "default_max_items": 1055,
+    "supports_max_episodes": False,
+    "default_max_episodes": None,
 }
 
 
@@ -93,6 +96,7 @@ class RunnerCliTest(unittest.TestCase):
                 "session_id": "20260325_120000",
                 "workspace_root": "runs/workspace/20260325_120000",
                 "max_items": 5,
+                "max_episodes": None,
             },
             "runs": [
                 {
@@ -119,8 +123,8 @@ class RunnerCliTest(unittest.TestCase):
                 patch.object(runner, "_runtime_for_cli", return_value=runtime) as runtime_for_cli,
                 patch.object(runner, "write_discrete_artifacts", return_value=artifact_path) as write_discrete_artifacts,
             ):
-                output = self._run_cli(["run-task", "--task-id", "livecodebench", "--max-items", "3"])
-        runtime_for_cli.assert_called_once_with(None)
+                output = self._run_cli(["run-task", "--task-id", "livecodebench", "--max-items", "3", "--llm-concurrency", "7"])
+        runtime_for_cli.assert_called_once_with(None, 7)
         write_discrete_artifacts.assert_called_once_with(
             task_id="livecodebench",
             proposal_runtime=runtime,
@@ -129,6 +133,7 @@ class RunnerCliTest(unittest.TestCase):
             branching_factor=None,
             item_workers=None,
             max_items=3,
+            max_episodes=None,
             suite_config=None,
         )
         payload = json.loads(output)

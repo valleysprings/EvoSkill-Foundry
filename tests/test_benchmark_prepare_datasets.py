@@ -5,7 +5,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -80,6 +80,63 @@ class BenchmarkPrepareDatasetsTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(marker_path.read_text(), "done")
 
+    def test_debug_reports_ready_and_not_ready_statuses(self) -> None:
+        module = _load_prepare_module()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            benchmark_root = Path(tmp_dir) / "benchmark"
+            registry_path = benchmark_root / "registry.json"
+
+            ready_task_dir = benchmark_root / "track" / "ready-data"
+            ready_manifest_path = ready_task_dir / "data" / "questions.json"
+            ready_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            ready_manifest_path.write_text(json.dumps({"items": []}))
+            (ready_task_dir / "task.json").write_text(
+                json.dumps(
+                    {
+                        "id": "ready-data",
+                        "local_dataset_only": True,
+                        "item_manifest": "data/questions.json",
+                    }
+                )
+            )
+
+            missing_task_dir = benchmark_root / "track" / "missing-data"
+            missing_task_dir.mkdir(parents=True, exist_ok=True)
+            (missing_task_dir / "prepare.py").write_text("print('prepare me')\n")
+            (missing_task_dir / "task.json").write_text(
+                json.dumps(
+                    {
+                        "id": "missing-data",
+                        "local_dataset_only": True,
+                        "item_manifest": "data/questions.json",
+                    }
+                )
+            )
+
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {"id": "ready-data", "path": "track/ready-data", "enabled": True},
+                            {"id": "missing-data", "path": "track/missing-data", "enabled": True},
+                        ]
+                    }
+                )
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = module.main(["--benchmark-root", str(benchmark_root), "--debug"])
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("ready=1 not_ready=1 unknown=0", output)
+            self.assertIn("ready-data\tstatus=ready", output)
+            self.assertIn("ready_path=", output)
+            self.assertIn("missing-data\tstatus=not-ready", output)
+            self.assertIn("local_dataset_ready=no", output)
+            self.assertIn("prepare_command=python benchmark/prepare_datasets.py --task-id missing-data", output)
+
     def test_missing_enabled_local_dataset_without_prepare_fails(self) -> None:
         module = _load_prepare_module()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -106,9 +163,12 @@ class BenchmarkPrepareDatasetsTest(unittest.TestCase):
                 )
             )
 
-            exit_code = module.main(["--benchmark-root", str(benchmark_root)])
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = module.main(["--benchmark-root", str(benchmark_root)])
 
             self.assertEqual(exit_code, 1)
+            self.assertIn("README.md", stderr.getvalue())
 
     def test_prepared_local_dataset_without_prepare_is_skipped(self) -> None:
         module = _load_prepare_module()
@@ -141,6 +201,20 @@ class BenchmarkPrepareDatasetsTest(unittest.TestCase):
             exit_code = module.main(["--benchmark-root", str(benchmark_root)])
 
             self.assertEqual(exit_code, 0)
+
+    def test_real_registry_list_includes_new_single_turn_tasks(self) -> None:
+        module = _load_prepare_module()
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = module.main(["--task-id", "mmlu-pro", "--task-id", "gpqa-diamond", "--list"])
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("mmlu-pro\tprepare=yes", output)
+        self.assertIn("path=reasoning_verified/mmlu-pro", output)
+        self.assertIn("gpqa-diamond\tprepare=yes", output)
+        self.assertIn("path=science_verified/gpqa-diamond", output)
 
 
 if __name__ == "__main__":

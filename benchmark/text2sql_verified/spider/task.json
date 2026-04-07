@@ -15,9 +15,11 @@
   "family": "text2sql",
   "runtime_backend": "dataset",
   "task_mode": "answer",
+  "interaction_mode": "single_turn",
   "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
+    "single-turn",
     "dataset-task",
     "text2sql",
     "spider"

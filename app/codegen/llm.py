@@ -27,6 +27,7 @@ from app.configs.prompts import (
     RAW_PREVIEW_LIMIT,
     REFLECTION_FIELD_LIMIT,
     REFLECTION_FRAGMENT_INSTRUCTION,
+    REFLECTION_OPTIONAL_FIELDS,
     REFLECTION_REQUIRED_FIELDS,
     REQUEST_PREVIEW_LIMIT,
     SUCCESS_REFLECTION_OUTCOME_INSTRUCTIONS,
@@ -35,8 +36,10 @@ from app.configs.prompts import (
 )
 from app.codegen.selection import prompt_summary
 from app.codegen.task_contracts import (
+    infer_interaction_mode,
     infer_optimization_scope,
     infer_task_mode,
+    interaction_mode_summary,
     optimization_scope_summary,
     task_mode_summary,
 )
@@ -48,7 +51,7 @@ from app.codegen.errors import LlmResponseError, LlmTransportError
 Transport = Callable[[dict[str, Any], RuntimeConfig], str]
 RetryProgressCallback = Callable[[dict[str, Any]], None]
 _TRANSPORT_GATE_LOCK = threading.Lock()
-_TRANSPORT_DISPATCHERS: dict[str, tuple[int, "_TransportDispatcher"]] = {}
+_TRANSPORT_DISPATCHERS: dict[tuple[str, int], "_TransportDispatcher"] = {}
 
 
 class _TransportDispatcher:
@@ -161,15 +164,13 @@ def _normalize_tool_call_payloads(raw_tool_calls: Any) -> list[dict[str, Any]]:
 
 
 def _transport_dispatcher(config: RuntimeConfig) -> _TransportDispatcher:
+    key = (config.base_url, config.llm_concurrency)
     with _TRANSPORT_GATE_LOCK:
-        dispatcher_entry = _TRANSPORT_DISPATCHERS.get(config.api_base)
-        if dispatcher_entry is None or dispatcher_entry[0] != config.llm_concurrency:
-            dispatcher_entry = (
-                config.llm_concurrency,
-                _TransportDispatcher(max_workers=config.llm_concurrency),
-            )
-            _TRANSPORT_DISPATCHERS[config.api_base] = dispatcher_entry
-        return dispatcher_entry[1]
+        dispatcher = _TRANSPORT_DISPATCHERS.get(key)
+        if dispatcher is None:
+            dispatcher = _TransportDispatcher(max_workers=config.llm_concurrency)
+            _TRANSPORT_DISPATCHERS[key] = dispatcher
+        return dispatcher
 
 
 def _proposal_queue_priority(generation: int) -> int:
@@ -256,31 +257,35 @@ def _trim(value: Any, *, limit: int = TRIM_DEFAULT_LIMIT) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
-def _proposal_candidate_noun(count: int) -> str:
-    return "candidate" if count == 1 else "candidates"
-
-
-def _proposal_system_prompt(candidate_budget: int) -> str:
+def _proposal_system_prompt() -> str:
     return " ".join(
         (
             PROPOSAL_SYSTEM_PROMPT,
             PROPOSAL_JSON_ONLY_INSTRUCTION,
-            PROPOSAL_CANDIDATE_COUNT_TEMPLATE.format(
-                count=candidate_budget,
-                noun=_proposal_candidate_noun(candidate_budget),
-            ),
+            PROPOSAL_CANDIDATE_COUNT_TEMPLATE,
             PROPOSAL_CONCISE_FIELDS_INSTRUCTION,
             "file_body must contain the full contents of the editable file and must preserve the declared entry symbol and task contract.",
         )
     )
 
 
-def _proposal_contract_lines(task: dict[str, Any]) -> tuple[str, str]:
+def _proposal_contract_lines(task: dict[str, Any]) -> tuple[str, str, str]:
     task_mode = infer_task_mode(task)
+    interaction_mode = infer_interaction_mode(task)
     optimization_scope = infer_optimization_scope(task)
     return (
         f"Task mode: {task_mode} ({task_mode_summary(task_mode)})",
+        f"Interaction mode: {interaction_mode} ({interaction_mode_summary(interaction_mode)})",
         f"Optimization scope: {optimization_scope} ({optimization_scope_summary(optimization_scope)})",
+    )
+
+
+def _reflection_interaction_guidance(task: dict[str, Any]) -> str:
+    if infer_interaction_mode(task) != "multi_turn":
+        return ""
+    return (
+        "For this multi-turn agent task, focus the reflection on reusable interaction failures or wins such as repeated loops, "
+        "invalid actions, lost state updates, premature completion, weak search/navigation choices, or poor use of observations."
     )
 
 
@@ -315,7 +320,7 @@ def _parse_failure_error(
         "purpose": purpose,
         "selected_model": runtime.active_model,
         "parse_status": "truncated" if response_truncated else "invalid_json",
-        "api_base": runtime.config.api_base,
+        "base_url": runtime.config.base_url,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": completion_tokens,
         "max_tokens": runtime.config.max_tokens,
@@ -346,7 +351,7 @@ def _transport_failure_error(
         "purpose": purpose,
         "selected_model": runtime.active_model,
         "parse_status": "transport_error",
-        "api_base": runtime.config.api_base,
+        "base_url": runtime.config.base_url,
         "request_preview": _request_preview(messages),
         "attempt": attempt,
         "max_attempts": MODEL_COMPLETION_MAX_ATTEMPTS,
@@ -372,7 +377,7 @@ def _response_envelope_error(
             "purpose": purpose,
             "selected_model": runtime.active_model,
             "parse_status": "invalid_http_json",
-            "api_base": runtime.config.api_base,
+            "base_url": runtime.config.base_url,
             "request_preview": _request_preview(messages),
             "raw_preview": _trim(raw_response, limit=RAW_PREVIEW_LIMIT),
             "attempt": attempt,
@@ -422,43 +427,29 @@ def _normalize_imports(raw_imports: Any) -> list[str]:
     return list(dict.fromkeys(imports))
 
 
-def _normalize_candidate_payload(payload: dict[str, Any], task: dict[str, Any], trace: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise LlmResponseError("Model response must contain a non-empty candidates list.", model=trace.get("selected_model"))
-
-    normalized: list[dict[str, Any]] = []
-    max_candidates = int(task["candidate_budget"])
-    for index, item in enumerate(candidates[:max_candidates], start=1):
-        if not isinstance(item, dict):
-            raise LlmResponseError("Each candidate must be an object.", model=trace.get("selected_model"))
-        missing = [
-            key for key in CANDIDATE_RESPONSE_REQUIRED_FIELDS if not isinstance(item.get(key), str) or not item.get(key).strip()
-        ]
-        if missing:
-            raise LlmResponseError(
-                f"Candidate {index} is missing required string fields: {', '.join(missing)}.",
-                model=trace.get("selected_model"),
-            )
-        file_body = item["file_body"].strip("\n")
-        if not file_body.strip():
-            raise LlmResponseError("Candidates must return a non-empty editable file.", model=trace.get("selected_model"))
-        normalized.append(
-            {
-                "agent": f"candidate-{index}",
-                "label": _trim(item["name"], limit=CANDIDATE_LABEL_LIMIT),
-                "strategy": _trim(item["strategy"]),
-                "rationale": _trim(item["rationale"]),
-                "imports": _normalize_imports(item.get("imports")),
-                "file_body": file_body,
-                "candidate_summary": _trim(item["candidate_summary"]),
-                "run_mode": "llm-required",
-                "proposal_model": trace.get("selected_model"),
-            }
+def _normalize_candidate_payload(payload: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        key for key in CANDIDATE_RESPONSE_REQUIRED_FIELDS if not isinstance(payload.get(key), str) or not payload.get(key).strip()
+    ]
+    if missing:
+        raise LlmResponseError(
+            f"Candidate response is missing required string fields: {', '.join(missing)}.",
+            model=trace.get("selected_model"),
         )
-    if not normalized:
-        raise LlmResponseError("Model response did not yield any valid candidates.", model=trace.get("selected_model"))
-    return normalized
+    file_body = str(payload["file_body"]).strip("\n")
+    if not file_body.strip():
+        raise LlmResponseError("Candidate must return a non-empty editable file.", model=trace.get("selected_model"))
+    return {
+        "agent": "candidate",
+        "label": _trim(payload["name"], limit=CANDIDATE_LABEL_LIMIT),
+        "strategy": _trim(payload["strategy"]),
+        "rationale": _trim(payload["rationale"]),
+        "imports": _normalize_imports(payload.get("imports")),
+        "file_body": file_body,
+        "candidate_summary": _trim(payload["candidate_summary"]),
+        "run_mode": "llm-required",
+        "proposal_model": trace.get("selected_model"),
+    }
 
 
 def _normalize_reflection_payload(payload: dict[str, Any], trace: dict[str, Any]) -> dict[str, str]:
@@ -468,7 +459,47 @@ def _normalize_reflection_payload(payload: dict[str, Any], trace: dict[str, Any]
         if not isinstance(value, str) or not value.strip():
             raise LlmResponseError(f"Reflection response is missing required field {field}.", model=trace.get("selected_model"))
         normalized[field] = _trim(value, limit=REFLECTION_FIELD_LIMIT)
+    for field in REFLECTION_OPTIONAL_FIELDS:
+        value = payload.get(field)
+        normalized[field] = _trim(value, limit=REFLECTION_FIELD_LIMIT) if isinstance(value, str) and value.strip() else ""
     return normalized
+
+
+def _tool_call_digest(tool_call: dict[str, Any]) -> str:
+    name = str(tool_call.get("name") or "").strip() or "unknown"
+    arguments = dict(tool_call.get("arguments") or {})
+    command = str(arguments.get("command") or arguments.get("message") or "").strip()
+    return f"{name}({command})" if command else name
+
+
+def _multi_turn_process_feedback(metrics: dict[str, Any]) -> str:
+    item_runs = list(metrics.get("item_runs") or [])
+    if not item_runs:
+        return ""
+    item_lines: list[str] = []
+    for item_run in item_runs[:2]:
+        turns = list(item_run.get("turns") or [])
+        turn_lines: list[str] = []
+        for turn in turns[:4]:
+            action = dict(turn.get("action") or {})
+            tool_calls = list(action.get("tool_calls") or [])
+            tool_desc = ", ".join(_tool_call_digest(call) for call in tool_calls[:2]) or "no-tool-call"
+            tool_errors = sum(1 for result in list(turn.get("tool_results") or []) if bool(result.get("error")))
+            turn_lines.append(
+                f"t{int(turn.get('turn_index') or 0)}:{tool_desc};done={bool(action.get('done'))};tool_errors={tool_errors}"
+            )
+        item_lines.append(
+            " | ".join(
+                [
+                    f"item={str(item_run.get('item_id') or 'unknown')}",
+                    f"success={bool(item_run.get('success'))}",
+                    f"reward={item_run.get('reward')}",
+                    f"turns={len(turns)}",
+                    *turn_lines,
+                ]
+            )
+        )
+    return _trim(" || ".join(item_lines), limit=1200)
 
 
 def _request_preview(messages: list[dict[str, str]]) -> str:
@@ -480,13 +511,15 @@ def _request_preview(messages: list[dict[str, str]]) -> str:
 
 def _default_transport(request_body: dict[str, Any], config: RuntimeConfig) -> str:
     payload = json.dumps(request_body).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
     request = urllib.request.Request(
-        url=f"{config.api_base}/chat/completions",
+        url=f"{config.base_url}/chat/completions",
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.api_key}",
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -516,6 +549,9 @@ class ProposalRuntime:
 
     def with_model(self, model: str | None) -> "ProposalRuntime":
         return ProposalRuntime(config=self.config.with_model(model), transport=self.transport)
+
+    def with_llm_concurrency(self, llm_concurrency: int | None) -> "ProposalRuntime":
+        return ProposalRuntime(config=self.config.with_llm_concurrency(llm_concurrency), transport=self.transport)
 
     def describe(self) -> dict[str, object]:
         return self.config.describe()
@@ -661,7 +697,7 @@ class ProposalRuntime:
                 "purpose": purpose,
                 "selected_model": self.active_model,
                 "parse_status": "ok",
-                "api_base": self.config.api_base,
+                "base_url": self.config.base_url,
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
                 "max_tokens": max_response_tokens,
@@ -771,6 +807,13 @@ def _proposal_prompt(
                 "prompt_fragment": memory.get("prompt_fragment"),
                 "candidate_summary": memory.get("candidate_summary"),
                 "delta_primary_score": memory.get("delta_primary_score"),
+                "knowledge_scope": memory.get("knowledge_scope", "episode_strategy"),
+                "distilled_skill": memory.get("distilled_skill", ""),
+                "applicability_notes": memory.get("applicability_notes", ""),
+                "source_dataset_ids": memory.get("source_dataset_ids", []),
+                "process_failure_mode": memory.get("process_failure_mode", ""),
+                "process_repair_hint": memory.get("process_repair_hint", ""),
+                "process_trace_summary": memory.get("process_trace_summary", ""),
             }
         )
         for memory in memories
@@ -792,8 +835,8 @@ def _proposal_prompt(
         )
         for item in candidate_history[-6:]
     ]
-    task_mode_line, optimization_scope_line = _proposal_contract_lines(task)
-    system_prompt = _proposal_system_prompt(max(1, int(task["candidate_budget"])))
+    task_mode_line, interaction_mode_line, optimization_scope_line = _proposal_contract_lines(task)
+    system_prompt = _proposal_system_prompt()
     user_prompt = (
         f"Task id: {task['id']}\n"
         f"Title: {task['title']}\n"
@@ -804,6 +847,7 @@ def _proposal_prompt(
         f"Editable file: {task['editable_file']}\n"
         f"Entry symbol: {task['entry_symbol']}\n"
         f"{task_mode_line}\n"
+        f"{interaction_mode_line}\n"
         f"{optimization_scope_line}\n"
         f"Objective: {objective_name}\n"
         f"Objective direction: {objective_direction}\n"
@@ -840,7 +884,7 @@ def _proposal_prompt(
     return system_prompt, user_prompt
 
 
-def propose_code_candidates(
+def propose_code_candidate(
     runtime: ProposalRuntime,
     *,
     task: dict[str, Any],
@@ -850,7 +894,7 @@ def propose_code_candidates(
     candidate_history: list[dict[str, Any]],
     memories: list[dict[str, Any]],
     progress_callback: RetryProgressCallback | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     system_prompt, user_prompt = _proposal_prompt(
         task=task,
         generation=generation,
@@ -866,9 +910,9 @@ def propose_code_candidates(
         queue_priority=_proposal_queue_priority(generation),
         progress_callback=progress_callback,
     )
-    candidates = _normalize_candidate_payload(payload, task, trace)
-    trace["candidate_count"] = len(candidates)
-    return candidates, trace
+    candidate = _normalize_candidate_payload(payload, trace)
+    trace["candidate_count"] = 1
+    return candidate, trace
 
 
 def reflect_strategy_experience(
@@ -889,10 +933,12 @@ def reflect_strategy_experience(
         system_prompt = FAILURE_REFLECTION_SYSTEM_PROMPT
         outcome_instructions = FAILURE_REFLECTION_OUTCOME_INSTRUCTIONS
     failed_tests = [result["name"] for result in winner["metrics"].get("test_results", []) if not result.get("passed")]
+    process_trace_summary = _multi_turn_process_feedback(winner["metrics"])
     user_prompt = (
         f"Task id: {task['id']}\n"
         f"Generation: {generation}\n"
         f"Outcome: {outcome}\n"
+        f"Interaction mode: {infer_interaction_mode(task)}\n"
         f"Previous best summary: {previous_best['candidate_summary']}\n"
         f"Previous best objective: {previous_best['metrics']['objective']}\n"
         f"Winner summary: {winner['candidate_summary']}\n"
@@ -906,6 +952,8 @@ def reflect_strategy_experience(
         f"Failed tests: {json.dumps(failed_tests)}\n"
         f"Rejection reason: {rejection_reason or 'n/a'}\n"
         f"delta_primary_score: {delta_primary_score}\n"
+        f"Winner process trace summary: {process_trace_summary or 'n/a'}\n"
+        f"{_reflection_interaction_guidance(task)}\n"
         f"{outcome_instructions}\n"
         f"{REFLECTION_FRAGMENT_INSTRUCTION}"
     )

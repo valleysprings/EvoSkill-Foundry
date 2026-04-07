@@ -3,6 +3,7 @@
   "title": "PlanBench Example",
   "description": "A 4-item local delivery-planning fixture used only by tests.",
   "benchmark_tier": "experiment",
+  "included_in_main_comparison": false,
   "track": "test_fixtures",
   "dataset_id": "planbench_lite_v1",
   "dataset_size": 4,
@@ -13,9 +14,11 @@
   "family": "planning",
   "runtime_backend": "dataset",
   "task_mode": "answer",
+  "interaction_mode": "single_turn",
   "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
+    "single-turn",
     "dataset-task",
     "planning",
     "test-fixture"
@@ -24,7 +27,7 @@
   "verifier": "verifier.py",
   "entry_symbol": "solve",
   "generation_budget": 4,
-  "candidate_budget": 3,
+  "candidate_budget": 1,
   "branching_factor": 4,
   "epsilon": 0.02,
   "baseline_summary": "A placeholder planner that returns an empty plan for the active example delivery problem.",

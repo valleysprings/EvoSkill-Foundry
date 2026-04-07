@@ -14,9 +14,11 @@
   "family": "science",
   "runtime_backend": "dataset",
   "task_mode": "answer",
+  "interaction_mode": "single_turn",
   "optimization_scope": "implementation",
   "task_signature": [
     "single-file-optimization",
+    "single-turn",
     "dataset-task",
     "science-question-solving",
     "reasoning"

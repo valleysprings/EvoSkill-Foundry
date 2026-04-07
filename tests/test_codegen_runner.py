@@ -9,13 +9,14 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from app.codegen.errors import ConfigError, LlmResponseError, LlmTransportError
-from app.codegen.catalog import load_codegen_tasks, seed_strategy_experiences
+from app.codegen.catalog import load_codegen_tasks, seed_strategy_experiences, task_summary
 from app.codegen.dataset_runner import _question_payload_for_result, run_dataset_task
 from app.codegen.dataset_support import build_micro_task, load_question_manifest
-from app.codegen.llm import _proposal_prompt
+from app.codegen.llm import _proposal_prompt, reflect_strategy_experience
 from app.codegen.config import RuntimeConfig
 from app.codegen.llm import ProposalRuntime
 from app.codegen.trainer import run_codegen_task
@@ -65,86 +66,34 @@ def raw_content_response(
 
 
 PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Set cardinality",
-            "strategy": "Use a set cardinality check.",
-            "rationale": "The runtime can detect duplicates by comparing lengths.",
-            "imports": [],
-            "file_body": _file_with_entry("contains_duplicates", "values", "return len(values) != len(set(values))"),
-            "candidate_summary": "Single-pass set cardinality duplicate detection.",
-        },
-        {
-            "name": "Seen set",
-            "strategy": "Stream through the list with a seen set.",
-            "rationale": "Early exit preserves correctness and still removes quadratic scans.",
-            "imports": [],
-            "file_body": _file_with_entry(
-                "contains_duplicates",
-                "values",
-                "seen = set()\nfor value in values:\n    if value in seen:\n        return True\n    seen.add(value)\nreturn False",
-            ),
-            "candidate_summary": "Streaming duplicate detection with early exit.",
-        },
-        {
-            "name": "Sorted scan",
-            "strategy": "Sort then scan neighbors.",
-            "rationale": "Sorting avoids quadratic pair comparisons.",
-            "imports": [],
-            "file_body": _file_with_entry(
-                "contains_duplicates",
-                "values",
-                "ordered = sorted(values)\nfor index in range(1, len(ordered)):\n    if ordered[index] == ordered[index - 1]:\n        return True\nreturn False",
-            ),
-            "candidate_summary": "Sort-based duplicate detection.",
-        },
-    ]
+    "name": "Set cardinality",
+    "strategy": "Use a set cardinality check.",
+    "rationale": "The runtime can detect duplicates by comparing lengths.",
+    "imports": [],
+    "file_body": _file_with_entry("contains_duplicates", "values", "return len(values) != len(set(values))"),
+    "candidate_summary": "Single-pass set cardinality duplicate detection.",
 }
 
 PARALLEL_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Seen set",
-            "strategy": "Stream through the list with a seen set.",
-            "rationale": "Early exit preserves correctness and removes quadratic scans.",
-            "imports": [],
-            "file_body": _file_with_entry(
-                "contains_duplicates",
-                "values",
-                "seen = set()\nfor value in values:\n    if value in seen:\n        return True\n    seen.add(value)\nreturn False",
-            ),
-            "candidate_summary": "Streaming duplicate detection with early exit.",
-        }
-    ]
+    "name": "Seen set",
+    "strategy": "Stream through the list with a seen set.",
+    "rationale": "Early exit preserves correctness and removes quadratic scans.",
+    "imports": [],
+    "file_body": _file_with_entry(
+        "contains_duplicates",
+        "values",
+        "seen = set()\nfor value in values:\n    if value in seen:\n        return True\n    seen.add(value)\nreturn False",
+    ),
+    "candidate_summary": "Streaming duplicate detection with early exit.",
 }
 
 FAILURE_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Always false",
-            "strategy": "Return a constant false value.",
-            "rationale": "This is intentionally incorrect and should fail deterministic tests.",
-            "imports": [],
-            "file_body": _file_with_entry("contains_duplicates", "values", "return False"),
-            "candidate_summary": "Incorrect constant-false duplicate detector.",
-        },
-        {
-            "name": "Always true",
-            "strategy": "Return a constant true value.",
-            "rationale": "This is intentionally incorrect and should fail deterministic tests.",
-            "imports": [],
-            "file_body": _file_with_entry("contains_duplicates", "values", "return True"),
-            "candidate_summary": "Incorrect constant-true duplicate detector.",
-        },
-        {
-            "name": "Length gate",
-            "strategy": "Use an obviously wrong shortcut.",
-            "rationale": "This is intentionally incorrect and should fail deterministic tests.",
-            "imports": [],
-            "file_body": _file_with_entry("contains_duplicates", "values", "return len(values) > 3"),
-            "candidate_summary": "Incorrect heuristic duplicate detector.",
-        },
-    ]
+    "name": "Always false",
+    "strategy": "Return a constant false value.",
+    "rationale": "This is intentionally incorrect and should fail deterministic tests.",
+    "imports": [],
+    "file_body": _file_with_entry("contains_duplicates", "values", "return False"),
+    "candidate_summary": "Incorrect constant-false duplicate detector.",
 }
 
 REFLECTION_PAYLOAD = {
@@ -164,75 +113,61 @@ FAILURE_REFLECTION_PAYLOAD = {
 }
 
 NON_IMPROVING_PASS_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Sorted scan",
-            "strategy": "Sort then scan neighbors.",
-            "rationale": "This stays correct but should trail the already accepted set-based winner.",
-            "imports": [],
-            "file_body": _file_with_entry(
-                "contains_duplicates",
-                "values",
-                "ordered = sorted(values)\nfor index in range(1, len(ordered)):\n    if ordered[index] == ordered[index - 1]:\n        return True\nreturn False",
-            ),
-            "candidate_summary": "Correct but weaker sorted duplicate detection.",
-        }
-    ]
+    "name": "Sorted scan",
+    "strategy": "Sort then scan neighbors.",
+    "rationale": "This stays correct but should trail the already accepted set-based winner.",
+    "imports": [],
+    "file_body": _file_with_entry(
+        "contains_duplicates",
+        "values",
+        "ordered = sorted(values)\nfor index in range(1, len(ordered)):\n    if ordered[index] == ordered[index - 1]:\n        return True\nreturn False",
+    ),
+    "candidate_summary": "Correct but weaker sorted duplicate detection.",
 }
 
 FULL_FILE_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Full editable file",
-            "strategy": "Return the entire editable file as required by the editable-file benchmark contract.",
-            "rationale": "The runtime should accept a full file_body payload without any extra wrapping logic.",
-            "imports": [],
-            "file_body": _file_with_entry("contains_duplicates", "values", "return len(values) != len(set(values))"),
-            "candidate_summary": "Set-cardinality duplicate detector returned as a full editable file.",
-        }
-    ]
+    "name": "Full editable file",
+    "strategy": "Return the entire editable file as required by the editable-file benchmark contract.",
+    "rationale": "The runtime should accept a full file_body payload without any extra wrapping logic.",
+    "imports": [],
+    "file_body": _file_with_entry("contains_duplicates", "values", "return len(values) != len(set(values))"),
+    "candidate_summary": "Set-cardinality duplicate detector returned as a full editable file.",
 }
 
 QUESTION_SOLVER_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "Prompt matcher",
-            "strategy": "Use prompt keywords from the normalized question schema.",
-            "rationale": "Each dataset question run is independent, so a prompt-targeted full-file rewrite can solve the active question.",
-            "imports": [],
-            "file_body": (
-                "def solve(question: dict) -> str:\n"
-                "    prompt = str(question.get('prompt') or '').lower()\n"
-                "    if 'remainder 1 when divided by 2, 3, 4, 5, and 6' in prompt:\n"
-                "        return '301'\n"
-                "    if '13, 14, and 15' in prompt:\n"
-                "        return '84'\n"
-                "    if 'positive divisors does 360 have' in prompt:\n"
-                "        return '24'\n"
-                "    if 'x + 1/x = 3' in prompt:\n"
-                "        return '7'\n"
-                "    if 'natural selection' in prompt:\n"
-                "        return 'darwin'\n"
-                "    if 'linear sequence' in prompt and 'acids' in prompt:\n"
-                "        return 'amino'\n"
-                "    if 'frameshift mutation' in prompt:\n"
-                "        return 'nucleotides'\n"
-                "    choices = question.get('choices') or []\n"
-                "    return str(choices[0]) if choices else ''\n"
-            ),
-            "candidate_summary": "Keyword-based solver over the normalized question dict.",
-        }
-    ]
+    "name": "Prompt matcher",
+    "strategy": "Use prompt keywords from the normalized question schema.",
+    "rationale": "Each dataset question run is independent, so a prompt-targeted full-file rewrite can solve the active question.",
+    "imports": [],
+    "file_body": (
+        "def solve(question: dict) -> str:\n"
+        "    prompt = str(question.get('prompt') or '').lower()\n"
+        "    if 'remainder 1 when divided by 2, 3, 4, 5, and 6' in prompt:\n"
+        "        return '301'\n"
+        "    if '13, 14, and 15' in prompt:\n"
+        "        return '84'\n"
+        "    if 'positive divisors does 360 have' in prompt:\n"
+        "        return '24'\n"
+        "    if 'x + 1/x = 3' in prompt:\n"
+        "        return '7'\n"
+        "    if 'natural selection' in prompt:\n"
+        "        return 'darwin'\n"
+        "    if 'linear sequence' in prompt and 'acids' in prompt:\n"
+        "        return 'amino'\n"
+        "    if 'frameshift mutation' in prompt:\n"
+        "        return 'nucleotides'\n"
+        "    choices = question.get('choices') or []\n"
+        "    return str(choices[0]) if choices else ''\n"
+    ),
+    "candidate_summary": "Keyword-based solver over the normalized question dict.",
 }
 
 PLANBENCH_PROPOSAL_PAYLOAD = {
-    "candidates": [
-        {
-            "name": "BFS planner",
-            "strategy": "Search over robot, package, and carrying state with breadth-first search.",
-            "rationale": "The planning benchmark is small and deterministic, so BFS can return a shortest valid action list.",
-            "imports": [],
-            "file_body": (
+    "name": "BFS planner",
+    "strategy": "Search over robot, package, and carrying state with breadth-first search.",
+    "rationale": "The planning benchmark is small and deterministic, so BFS can return a shortest valid action list.",
+    "imports": [],
+    "file_body": (
                 "from collections import deque\n\n"
                 "def solve(problem: dict) -> list[str]:\n"
                 "    graph: dict[str, set[str]] = {}\n"
@@ -263,14 +198,61 @@ PLANBENCH_PROPOSAL_PAYLOAD = {
                 "                seen.add(next_state)\n"
                 "                queue.append((next_state, path + [f'drop pkg {robot}']))\n"
                 "    return []\n"
-            ),
-            "candidate_summary": "Breadth-first delivery planner that emits valid drive/pickup/drop actions.",
-        }
-    ]
+    ),
+    "candidate_summary": "Breadth-first delivery planner that emits valid drive/pickup/drop actions.",
 }
 
 
 class CodegenRunnerTest(unittest.TestCase):
+    def _stub_dataset_run_result(self, task: dict[str, object], *, item_runs: list[dict[str, object]] | None = None) -> dict[str, object]:
+        summary = task_summary(task)
+        return {
+            "run_mode": "llm-required",
+            "active_model": "deepseek-chat",
+            "selection_spec": dict(task["selection_spec"]),
+            "benchmark_tier": task["benchmark_tier"],
+            "track": task["track"],
+            "dataset_id": task["dataset_id"],
+            "included_in_main_comparison": task["included_in_main_comparison"],
+            "task": summary,
+            "baseline": {
+                "agent": "baseline",
+                "label": "baseline",
+                "strategy": "baseline",
+                "rationale": "baseline",
+                "candidate_summary": "baseline",
+                "proposal_model": None,
+                "source_code": "",
+                "metrics": {"objective": 0.0, "verifier_status": "not-run"},
+            },
+            "winner": {
+                "agent": "winner",
+                "label": "winner",
+                "strategy": "winner",
+                "rationale": "winner",
+                "candidate_summary": "winner",
+                "proposal_model": "deepseek-chat",
+                "source_code": "",
+                "metrics": {"objective": 1.0, "verifier_status": "pass"},
+            },
+            "dataset_summary": {"total_items": len(item_runs or []), "winner_passed": len(item_runs or []), "failure_count": 0},
+            "item_runs": list(item_runs or []),
+            "generations": [],
+            "objective_curve": [],
+            "llm_traces": [],
+            "memory_markdown": "",
+            "memory_before_count": 0,
+            "memory_after_count": 0,
+            "positive_experiences_added": 0,
+            "negative_experiences_added": 0,
+            "added_experiences": [],
+            "delta_primary_score": 0.0,
+            "run_delta_primary_score": 0.0,
+            "run_delta_objective": 0.0,
+            "selection_reason": "stubbed dataset run",
+            "total_generations": 0,
+        }
+
     def test_missing_runtime_config_fails_before_run(self) -> None:
         with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ConfigError):
@@ -300,8 +282,9 @@ class CodegenRunnerTest(unittest.TestCase):
         task_summary = next(task for task in payload["task_catalog"] if task["id"] == "shared-agent-contract")
         self.assertTrue(task_summary["supports_runtime_config"])
         self.assertEqual(task_summary["suite_run_config"]["inline_episodes"][0]["episode_id"], "fixture-episode-1")
-        self.assertTrue(task_summary["supports_max_items"])
-        self.assertEqual(task_summary["default_max_items"], 1)
+        self.assertFalse(task_summary["supports_max_items"])
+        self.assertTrue(task_summary["supports_max_episodes"])
+        self.assertEqual(task_summary["default_max_episodes"], 1)
 
     def test_suite_config_override_updates_benchmark_adapter_task_without_editing_file(self) -> None:
         runtime = make_runtime([])
@@ -325,34 +308,30 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertEqual(run["item_runs"][0]["item_id"], "override-episode")
         task_summary = next(task for task in payload["task_catalog"] if task["id"] == "shared-agent-contract")
         self.assertEqual(task_summary["suite_run_config"]["inline_episodes"][0]["episode_id"], "override-episode")
-        self.assertEqual(task_summary["default_max_items"], 1)
+        self.assertEqual(task_summary["default_max_episodes"], 1)
 
     def test_benchmark_adapter_task_can_enter_codegen_search_loop_when_budgets_are_positive(self) -> None:
         runtime = make_runtime(
             [
                 chat_response(
                     {
-                        "candidates": [
-                            {
-                                "name": "complete immediately",
-                                "strategy": "Emit the expected completion tool call on the first turn.",
-                                "rationale": "The fixture succeeds when step(...) calls the complete tool in response to the hint.",
-                                "candidate_summary": "Multi-turn adapter that completes as soon as the task is solved.",
-                                "file_body": (
-                                    "def init_episode(episode: dict) -> dict:\n"
-                                    "    return {'episode_id': episode['episode_id']}\n\n"
-                                    "def step(turn: dict, runtime) -> dict:\n"
-                                    "    del runtime\n"
-                                    "    return {\n"
-                                    "        'message': 'done',\n"
-                                    "        'tool_calls': [{'name': 'complete', 'arguments': {'message': 'done'}}],\n"
-                                    "        'done': True,\n"
-                                    "        'state': dict(turn.get('state') or {}),\n"
-                                    "        'annotations': {},\n"
-                                    "    }\n"
-                                ),
-                            }
-                        ]
+                        "name": "complete immediately",
+                        "strategy": "Emit the expected completion tool call on the first turn.",
+                        "rationale": "The fixture succeeds when step(...) calls the complete tool in response to the hint.",
+                        "candidate_summary": "Multi-turn adapter that completes as soon as the task is solved.",
+                        "file_body": (
+                            "def init_episode(episode: dict) -> dict:\n"
+                            "    return {'episode_id': episode['episode_id']}\n\n"
+                            "def step(turn: dict, runtime) -> dict:\n"
+                            "    del runtime\n"
+                            "    return {\n"
+                            "        'message': 'done',\n"
+                            "        'tool_calls': [{'name': 'complete', 'arguments': {'message': 'done'}}],\n"
+                            "        'done': True,\n"
+                            "        'state': dict(turn.get('state') or {}),\n"
+                            "        'annotations': {},\n"
+                            "    }\n"
+                        ),
                     }
                 ),
                 chat_response(
@@ -399,7 +378,7 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertIn("aime-2026", str(raised.exception))
 
     def test_invalid_llm_output_fails_immediately(self) -> None:
-        runtime = make_runtime([chat_response({"candidates": [{"name": "bad"}]})])
+        runtime = make_runtime([chat_response({"name": "bad"})])
         with patch_runner_fixture_catalog(), tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(LlmResponseError):
                 generate_discrete_payload(
@@ -426,7 +405,7 @@ class CodegenRunnerTest(unittest.TestCase):
             candidate_history=[],
             memories=[],
         )
-        self.assertIn("Return exactly 1 candidate.", system_prompt)
+        self.assertIn("Return exactly one candidate.", system_prompt)
         self.assertIn("Return only a JSON object.", system_prompt)
         self.assertIn("Do not include Markdown code fences", system_prompt)
         self.assertIn("file_body is the only field that may be long.", system_prompt)
@@ -434,9 +413,111 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertIn("Task mode: answer", user_prompt)
         self.assertIn("Optimization scope: implementation", user_prompt)
 
+    def test_proposal_prompt_includes_dataset_prior_memory_fields(self) -> None:
+        task = _fixture_task("shared-agent-contract")
+        task["candidate_budget"] = 1
+        candidate = {
+            "candidate_summary": "Checked-in baseline.",
+            "metrics": {"objective": 0.0, "objective_score": 0.0, "primary_score": 0.0, "tie_break_score": 0.0, "gate_passed": True},
+            "baseline_source": "def step(turn, runtime):\n    return {}\n",
+            "source_code": "def step(turn, runtime):\n    return {}\n",
+        }
+        system_prompt, user_prompt = _proposal_prompt(
+            task=task,
+            generation=1,
+            parent_candidate=candidate,
+            current_best=candidate,
+            candidate_history=[],
+            memories=[
+                {
+                    "experience_id": "prior-assistantbench-tooling",
+                    "experience_outcome": "success",
+                    "verifier_status": "pass",
+                    "failure_pattern": "",
+                    "strategy_hypothesis": "Decomposing the user goal before tool use avoids wasted actions.",
+                    "successful_strategy": "Plan the subgoals first, then use the minimum tool sequence needed.",
+                    "prompt_fragment": "Plan the subgoals first, then use tools in the minimum sequence needed to satisfy the request.",
+                    "candidate_summary": "Dataset-level assistant workflow prior.",
+                    "delta_primary_score": 0.8,
+                    "knowledge_scope": "dataset_prior",
+                    "distilled_skill": "goal decomposition -> tool selection -> verify result -> concise final response",
+                    "applicability_notes": "Use for AssistantBench-like multi-tool assistant environments.",
+                    "source_dataset_ids": ["assistantbench_public_validation"],
+                    "process_failure_mode": "tool call before requirements were clarified",
+                    "process_repair_hint": "Extract the constraints and expected deliverable before the first action.",
+                    "process_trace_summary": "parse request -> plan -> tool -> verify -> answer",
+                }
+            ],
+        )
+        self.assertIn("dataset_prior", user_prompt)
+        self.assertIn("goal decomposition -> tool selection -> verify result -> concise final response", user_prompt)
+        self.assertIn("Use for AssistantBench-like multi-tool assistant environments.", user_prompt)
+        self.assertIn("parse request -> plan -> tool -> verify -> answer", user_prompt)
+        self.assertIn("Return exactly one candidate.", system_prompt)
+
+    def test_multi_turn_reflection_prompt_includes_process_summary(self) -> None:
+        class ReflectionRuntime:
+            def __init__(self) -> None:
+                self.user_prompt = ""
+
+            def complete_json(self, *, purpose, system_prompt, user_prompt, queue_priority):  # noqa: ANN001
+                del purpose, system_prompt, queue_priority
+                self.user_prompt = user_prompt
+                return REFLECTION_PAYLOAD, {"selected_model": "deepseek-chat", "attempt": 1}
+
+        runtime = ReflectionRuntime()
+        task = _fixture_task("shared-agent-contract")
+        previous_best = {
+            "candidate_summary": "Checked-in baseline.",
+            "metrics": {"objective": 0.0},
+        }
+        winner = {
+            "candidate_summary": "Adapter that loops once and then completes.",
+            "strategy": "Inspect the hint and complete immediately.",
+            "rationale": "The fixture succeeds once the adapter emits the completion tool call.",
+            "metrics": {
+                "verifier_status": "fail",
+                "objective": 0.0,
+                "primary_score": 0.0,
+                "tie_break_score": 0.0,
+                "error": None,
+                "test_results": [{"name": "fixture-episode-1", "passed": False}],
+                "item_runs": [
+                    {
+                        "item_id": "fixture-episode-1",
+                        "success": False,
+                        "reward": 0.0,
+                        "turns": [
+                            {
+                                "turn_index": 0,
+                                "action": {
+                                    "tool_calls": [{"name": "complete", "arguments": {"message": "done"}}],
+                                    "done": True,
+                                },
+                                "tool_results": [],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        reflect_strategy_experience(
+            runtime,
+            task=task,
+            generation=1,
+            previous_best=previous_best,
+            winner=winner,
+            delta_primary_score=-0.2,
+            outcome="failure",
+            rejection_reason="Completed too early without satisfying the fixture expectation.",
+        )
+        self.assertIn("Winner process trace summary:", runtime.user_prompt)
+        self.assertIn("fixture-episode-1", runtime.user_prompt)
+        self.assertIn("complete(done)", runtime.user_prompt)
+
     def test_truncated_llm_output_surfaces_parse_details(self) -> None:
         truncated_response = raw_content_response(
-            "```json\n{\"candidates\": [{\"name\": \"cut off\"",
+            "```json\n{\"name\": \"cut off\"",
             completion_tokens=4096,
         )
         runtime = make_runtime([truncated_response, truncated_response, truncated_response])
@@ -479,9 +560,12 @@ class CodegenRunnerTest(unittest.TestCase):
 
         runtime = ProposalRuntime(
             RuntimeConfig(
+                profile="test-profile",
+                provider="openai",
+                transport="openai-compatible",
                 api_key="test-key",
-                api_base="https://api.test/v1",
-                primary_model="deepseek-chat",
+                base_url="https://api.test/v1",
+                default_model="deepseek-chat",
                 available_models=("deepseek-chat",),
                 temperature=0.2,
                 max_tokens=4096,
@@ -496,13 +580,13 @@ class CodegenRunnerTest(unittest.TestCase):
                     runtime.complete_json,
                     purpose="concurrency-test",
                     system_prompt="Return strict JSON only.",
-                    user_prompt='Return {"candidates":[{"name":"n","strategy":"s","rationale":"r","file_body":"def f():\\n    return 1","candidate_summary":"c"}]}',
+                    user_prompt='Return {"name":"n","strategy":"s","rationale":"r","file_body":"def f():\\n    return 1","candidate_summary":"c"}',
                 )
                 for _ in range(5)
             ]
             for future in futures:
                 payload, trace = future.result()
-                self.assertIn("candidates", payload)
+                self.assertEqual(payload["name"], PROPOSAL_PAYLOAD["name"])
                 self.assertEqual(trace["parse_status"], "ok")
         self.assertLessEqual(max_active, 2)
 
@@ -522,9 +606,12 @@ class CodegenRunnerTest(unittest.TestCase):
 
         runtime = ProposalRuntime(
             RuntimeConfig(
+                profile="test-profile",
+                provider="openai",
+                transport="openai-compatible",
                 api_key="test-key",
-                api_base="https://api.test/v1",
-                primary_model="deepseek-chat",
+                base_url="https://api.test/v1",
+                default_model="deepseek-chat",
                 available_models=("deepseek-chat",),
                 temperature=0.2,
                 max_tokens=4096,
@@ -841,6 +928,67 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertTrue(any(event.get("branch_id") == "g2-b1" for event in events))
             self.assertTrue(any(event.get("branch_id") == "g2-b2" for event in events))
 
+    def test_candidate_budget_makes_independent_proposal_calls_per_branch(self) -> None:
+        proposal_requests: list[str] = []
+
+        responses = iter(
+            [
+                chat_response(PROPOSAL_PAYLOAD),
+                chat_response(PARALLEL_PROPOSAL_PAYLOAD),
+                chat_response(FULL_FILE_PROPOSAL_PAYLOAD),
+                chat_response(REFLECTION_PAYLOAD),
+            ]
+        )
+
+        def transport(request_body, _config):  # noqa: ANN001
+            system_prompt = str(request_body["messages"][0]["content"])
+            if "only proposal model" in system_prompt:
+                proposal_requests.append(str(request_body["messages"][1]["content"]))
+            return next(responses)
+
+        runtime = ProposalRuntime(
+            RuntimeConfig(
+                profile="test-profile",
+                provider="openai",
+                transport="openai-compatible",
+                api_key="test-key",
+                base_url="https://api.test/v1",
+                default_model="deepseek-chat",
+                available_models=("deepseek-chat",),
+                temperature=0.2,
+                max_tokens=4096,
+                timeout_s=45,
+                llm_concurrency=4,
+            ),
+            transport=transport,
+        )
+        task = _fixture_task("contains-duplicates")
+        task["generation_budget"] = 1
+        task["branching_factor"] = 1
+        task["candidate_budget"] = 3
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            store = MemoryStore(tmp / "memory.json", markdown_path=tmp / "memory.md")
+            store.ensure_seed_records(seed_strategy_experiences())
+            result = run_codegen_task(
+                task,
+                store,
+                proposal_runtime=runtime,
+                workspace_root=tmp / "workspace",
+                session_id="proposal-fanout",
+            )
+        self.assertEqual(len(proposal_requests), 3)
+        self.assertTrue(all("Generation: 1" in prompt for prompt in proposal_requests))
+        self.assertEqual(len(result["generations"][0]["candidates"]), 3)
+        self.assertEqual(
+            sorted(candidate["agent"] for candidate in result["generations"][0]["candidates"]),
+            ["candidate-1", "candidate-2", "candidate-3"],
+        )
+        self.assertEqual(
+            sorted(candidate["proposal_index"] for candidate in result["generations"][0]["candidates"]),
+            [1, 2, 3],
+        )
+
     def test_branch_transport_error_does_not_abort_other_parallel_branches(self) -> None:
         runtime = make_runtime([])
         task = _fixture_task("contains-duplicates")
@@ -848,19 +996,17 @@ class CodegenRunnerTest(unittest.TestCase):
         task["candidate_budget"] = 1
         task["branching_factor"] = 2
 
-        candidate_specs = [
-            {
-                "agent": "candidate-1",
-                "label": "Full editable file",
-                "strategy": "Return the full editable file for the fixture task.",
-                "rationale": "A valid branch should still complete even if a sibling branch fails in transport.",
-                "imports": [],
-                "file_body": FULL_FILE_PROPOSAL_PAYLOAD["candidates"][0]["file_body"],
-                "candidate_summary": "Set-cardinality duplicate detector returned as a full editable file.",
-                "run_mode": "llm-required",
-                "proposal_model": "deepseek-chat",
-            }
-        ]
+        candidate_spec = {
+            "agent": "candidate-1",
+            "label": "Full editable file",
+            "strategy": "Return the full editable file for the fixture task.",
+            "rationale": "A valid branch should still complete even if a sibling branch fails in transport.",
+            "imports": [],
+            "file_body": FULL_FILE_PROPOSAL_PAYLOAD["file_body"],
+            "candidate_summary": "Set-cardinality duplicate detector returned as a full editable file.",
+            "run_mode": "llm-required",
+            "proposal_model": "deepseek-chat",
+        }
         proposal_lock = threading.Lock()
         proposal_calls = 0
 
@@ -871,13 +1017,13 @@ class CodegenRunnerTest(unittest.TestCase):
                 call_number = proposal_calls
             if call_number == 2:
                 raise LlmTransportError("Model request timed out.", model="deepseek-chat")
-            return candidate_specs, {"selected_model": "deepseek-chat", "parse_status": "ok", "attempt": 1}
+            return candidate_spec, {"selected_model": "deepseek-chat", "parse_status": "ok", "attempt": 1}
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             store = MemoryStore(tmp / "memory.json", markdown_path=tmp / "memory.md")
             store.ensure_seed_records(seed_strategy_experiences())
-            with patch("app.codegen.trainer.propose_code_candidates", side_effect=flaky_proposals), patch(
+            with patch("app.codegen.trainer.propose_code_candidate", side_effect=flaky_proposals), patch(
                 "app.codegen.trainer.reflect_strategy_experience",
                 return_value=(REFLECTION_PAYLOAD, {"selected_model": "deepseek-chat", "attempt": 1}),
             ):
@@ -950,16 +1096,12 @@ class CodegenRunnerTest(unittest.TestCase):
             [
                 chat_response(
                     {
-                        "candidates": [
-                            {
-                                "name": "Lower latency path",
-                                "strategy": "Return a full file candidate for the synthetic min-objective task.",
-                                "rationale": "Selection should rely on normalized objective_score for min-direction tasks.",
-                                "imports": [],
-                                "file_body": _file_with_entry("solve", "values", "return values[0]"),
-                                "candidate_summary": "Synthetic min-objective candidate.",
-                            }
-                        ]
+                        "name": "Lower latency path",
+                        "strategy": "Return a full file candidate for the synthetic min-objective task.",
+                        "rationale": "Selection should rely on normalized objective_score for min-direction tasks.",
+                        "imports": [],
+                        "file_body": _file_with_entry("solve", "values", "return values[0]"),
+                        "candidate_summary": "Synthetic min-objective candidate.",
                     }
                 ),
                 chat_response(REFLECTION_PAYLOAD),
@@ -997,6 +1139,7 @@ class CodegenRunnerTest(unittest.TestCase):
                 "task_signature": ["python-codegen", "synthetic", "min-objective"],
                 "runtime_backend": "dataset",
                 "task_mode": "answer",
+                "interaction_mode": "single_turn",
                 "optimization_scope": "implementation",
                 "generation_budget": 1,
                 "candidate_budget": 1,
@@ -1038,16 +1181,12 @@ class CodegenRunnerTest(unittest.TestCase):
             [
                 chat_response(
                     {
-                        "candidates": [
-                            {
-                                "name": "Reference-only baseline skip candidate",
-                                "strategy": "Return a full file candidate after skipping the checked-in baseline verifier.",
-                                "rationale": "Heavy verifier tasks should still promote the first verified candidate even when the baseline is reference-only.",
-                                "imports": [],
-                                "file_body": _file_with_entry("solve", "values", "return values[0]"),
-                                "candidate_summary": "Synthetic candidate accepted against a reference-only baseline.",
-                            }
-                        ]
+                        "name": "Reference-only baseline skip candidate",
+                        "strategy": "Return a full file candidate after skipping the checked-in baseline verifier.",
+                        "rationale": "Heavy verifier tasks should still promote the first verified candidate even when the baseline is reference-only.",
+                        "imports": [],
+                        "file_body": _file_with_entry("solve", "values", "return values[0]"),
+                        "candidate_summary": "Synthetic candidate accepted against a reference-only baseline.",
                     }
                 ),
                 chat_response(REFLECTION_PAYLOAD),
@@ -1085,6 +1224,7 @@ class CodegenRunnerTest(unittest.TestCase):
                 "task_signature": ["python-codegen", "synthetic", "reference-only-baseline"],
                 "runtime_backend": "dataset",
                 "task_mode": "answer",
+                "interaction_mode": "single_turn",
                 "optimization_scope": "implementation",
                 "generation_budget": 1,
                 "candidate_budget": 1,
@@ -1109,57 +1249,123 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertEqual(result["winner"]["candidate_id"], "synthetic-reference-only-baseline-g1-b1-c1")
             self.assertTrue(result["generations"][0]["winner_accepted"])
 
-    def test_full_sequence_only_runs_comparable_tasks(self) -> None:
-        comparable_tasks = [dict(task) for task in load_codegen_tasks(included_in_main_comparison=True)]
-        for task in comparable_tasks:
+    def test_benchmark_adapter_defaults_to_reference_only_baseline(self) -> None:
+        candidate_metrics = {
+            "status": "pass",
+            "verifier_status": "pass",
+            "objective": 0.25,
+            "objective_score": -0.25,
+            "primary_score": -0.25,
+            "tie_break_score": 0.0,
+            "gate_passed": True,
+            "benchmark_ms": 1.0,
+            "passed_tests": 1,
+            "total_tests": 1,
+        }
+        runtime = make_runtime(
+            [
+                chat_response(
+                    {
+                        "name": "Benchmark adapter candidate",
+                        "strategy": "Return a wrapper candidate without rerunning the checked-in baseline verifier.",
+                        "rationale": "Benchmark-adapter tasks should treat the checked-in file as the search parent, not as a separate paid eval.",
+                        "imports": [],
+                        "file_body": _file_with_entry("respond", "question, runtime", "return 'ok'"),
+                        "candidate_summary": "Synthetic benchmark-adapter candidate accepted against a reference-only baseline.",
+                    }
+                ),
+                chat_response(REFLECTION_PAYLOAD),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            editable_path = tmp / "editable.py"
+            editable_path.write_text(_file_with_entry("respond", "question, runtime", "return 'ok'"))
+            task = {
+                "id": "synthetic-benchmark-adapter-baseline",
+                "title": "Synthetic benchmark adapter baseline",
+                "description": "Benchmark-adapter tasks should skip the baseline verifier by default.",
+                "family": "safety",
+                "function_name": "respond",
+                "entry_symbol": "respond",
+                "editable_file": "editable.py",
+                "editable_filename": "editable.py",
+                "editable_path": str(editable_path),
+                "verifier_path": str(editable_path),
+                "answer_metric": "hallucination_rate",
+                "benchmark_tier": "experiment",
+                "track": "synthetic",
+                "dataset_id": "synthetic_benchmark_adapter_v1",
+                "included_in_main_comparison": False,
+                "objective_label": "hallucination rate",
+                "objective_direction": "min",
+                "objective_spec": {
+                    "display_name": "Hallucination rate",
+                    "direction": "min",
+                    "unit": "ratio",
+                    "summary_template": "Lower is better.",
+                    "formula": "hallucination_rate = failed / total",
+                },
+                "task_signature": ["benchmark-adapter", "single-turn", "synthetic"],
+                "runtime_backend": "benchmark_adapter",
+                "task_mode": "answer",
+                "interaction_mode": "single_turn",
+                "optimization_scope": "wrapper",
+                "generation_budget": 1,
+                "candidate_budget": 1,
+                "branching_factor": 1,
+                "epsilon": 0.0,
+                "baseline_summary": "Baseline synthetic benchmark adapter.",
+            }
+            store = MemoryStore(tmp / "memory.json", markdown_path=tmp / "memory.md")
+            store.ensure_seed_records(seed_strategy_experiences())
+            with patch("app.codegen.trainer.evaluate_materialized_candidate", return_value=candidate_metrics) as evaluate_candidate:
+                result = run_codegen_task(
+                    task,
+                    store,
+                    proposal_runtime=runtime,
+                    workspace_root=tmp / "workspace",
+                    session_id="benchmark-adapter-reference-only-baseline",
+                )
+
+            evaluate_candidate.assert_called_once()
+            self.assertFalse(result["task"]["run_baseline_verifier"])
+            self.assertEqual(result["baseline"]["metrics"]["verifier_status"], "not-run")
+            self.assertEqual(len(result["objective_curve"]), 1)
+            self.assertEqual(result["objective_curve"][0]["candidate_agent"], "candidate-1")
+            self.assertEqual(result["winner"]["agent"], "candidate-1")
+            self.assertEqual(result["winner"]["candidate_id"], "synthetic-benchmark-adapter-baseline-g1-b1-c1")
+            self.assertTrue(result["generations"][0]["winner_accepted"])
+
+    def test_full_sequence_runs_all_active_benchmark_tasks(self) -> None:
+        benchmark_tasks = [dict(task) for task in load_codegen_tasks(included_in_main_comparison=True)]
+        for task in benchmark_tasks:
             task["generation_budget"] = 1
             task["candidate_budget"] = 1
             task["branching_factor"] = 1
             task["item_workers"] = 1
-        runtime = make_runtime([chat_response(QUESTION_SOLVER_PROPOSAL_PAYLOAD) for _ in comparable_tasks])
+
+        def _stub_result(task: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "task": {"id": task["id"]},
+                "included_in_main_comparison": task["included_in_main_comparison"],
+                "generations": [{"winner_accepted": True}],
+                "winner": {
+                    "agent": f"{task['id']}-winner",
+                    "candidate_id": f"{task['id']}-candidate",
+                    "metrics": {"objective": 1.0, "primary_score": 1.0},
+                },
+                "delta_primary_score": 0.0,
+                "total_generations": 1,
+            }
+
+        runtime = make_runtime([])
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
-            for task in comparable_tasks:
-                if task["id"] == "livecodebench":
-                    manifest_path = tmp / "livecodebench-questions.json"
-                    manifest_item = {
-                        "item_id": "livecodebench-test-item",
-                        "name": "livecodebench-test-item",
-                        "prompt": "Read two integers and print their sum.",
-                        "context": "Synthetic LiveCodeBench stdin sample.",
-                        "expected_answer": "Pass all public and private tests.",
-                        "metadata": {
-                            "problem_file": str(ROOT / "tests" / "fixtures" / "livecodebench" / "problems" / "stdin_problem.json"),
-                            "platform": "atcoder",
-                            "evaluation_mode": "stdin",
-                        },
-                    }
-                elif task.get("lazy_item_manifest"):
-                    manifest_path = tmp / f"{task['id']}-questions.json"
-                    manifest_item = {
-                        "item_id": f"{task['id']}-test-item",
-                        "name": f"{task['id']}-test-item",
-                        "prompt": f"Synthetic prompt for {task['id']}.",
-                        "context": "Synthetic dataset sample.",
-                        "choices": ["alpha", "beta", "gamma", "delta"],
-                        "expected_answer": "alpha",
-                        "metadata": {
-                            "correct_choice_index": 0,
-                            "answer_aliases": ["alpha"],
-                        },
-                    }
-                else:
-                    continue
-                manifest_path.write_text(json.dumps({"items": [manifest_item]}, indent=2))
-                task["item_manifest_path"] = str(manifest_path)
-                task["dataset_size"] = 1
-                task["lazy_item_manifest"] = False
             with (
-                patch("app.entries.runner.load_codegen_tasks", return_value=comparable_tasks),
-                patch(
-                    "app.codegen.trainer.reflect_strategy_experience",
-                    return_value=(REFLECTION_PAYLOAD, {"selected_model": "deepseek-chat", "attempt": 1}),
-                ),
+                patch("app.entries.runner.load_codegen_tasks", return_value=benchmark_tasks),
+                patch("app.entries.runner.run_dataset_task", side_effect=lambda task, **_: _stub_result(task)),
+                patch("app.entries.runner.run_codegen_task", side_effect=lambda task, *_args, **_kwargs: _stub_result(task)),
             ):
                 payload = generate_discrete_payload(
                     proposal_runtime=runtime,
@@ -1169,8 +1375,8 @@ class CodegenRunnerTest(unittest.TestCase):
                     branching_factor=1,
                     max_items=1,
                 )
-        self.assertEqual(payload["summary"]["num_tasks"], len(comparable_tasks))
-        self.assertEqual(payload["summary"]["total_runs"], len(comparable_tasks))
+        self.assertEqual(payload["summary"]["num_tasks"], len(benchmark_tasks))
+        self.assertEqual(payload["summary"]["total_runs"], len(benchmark_tasks))
         self.assertEqual(payload["summary"]["experiment_runs"], 0)
         self.assertTrue(payload["runs"])
         self.assertTrue(all(run["included_in_main_comparison"] for run in payload["runs"]))
@@ -1250,6 +1456,61 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertTrue(any(event.get("item_brief") for event in events if event.get("item_id") == items[0]["item_id"]))
             self.assertTrue(any(event.get("expected_answer") == items[0]["expected_answer"] for event in events if event.get("item_id") == items[0]["item_id"]))
 
+    def test_dataset_loaded_event_lists_multi_field_names(self) -> None:
+        runtime = make_runtime(
+            [
+                chat_response(QUESTION_SOLVER_PROPOSAL_PAYLOAD),
+                chat_response(REFLECTION_PAYLOAD),
+            ]
+        )
+        task = next(item for item in load_codegen_tasks() if item["id"] == "olymmath")
+        task = dict(task)
+        task["generation_budget"] = 1
+        task["candidate_budget"] = 1
+        task["branching_factor"] = 1
+        task["item_workers"] = 1
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            items = [
+                {
+                    "item_id": "multi-field-1",
+                    "raw_item_id": "multi-field-1",
+                    "id": "multi-field-1",
+                    "question_id": "multi-field-1",
+                    "name": "Question with prompt, context, and choices",
+                    "prompt": "Pick the best answer.",
+                    "raw_prompt": "Pick the best answer.",
+                    "context": "User profile: prefers concise responses and ocean themes.",
+                    "raw_context": "User profile: prefers concise responses and ocean themes.",
+                    "choices": ["blue", "green", "red", "yellow"],
+                    "raw_choices": ["blue", "green", "red", "yellow"],
+                    "expected_answer": "blue",
+                    "raw_expected_answer": "blue",
+                    "metadata": {"dataset": "fixture", "answer_format": "choice", "correct_choice_index": 0},
+                },
+            ]
+            manifest = tmp / "questions.json"
+            manifest.write_text(json.dumps(items, indent=2))
+            task["item_manifest_path"] = str(manifest)
+            task["dataset_size"] = len(items)
+            events: list[dict[str, object]] = []
+            result = run_dataset_task(
+                task,
+                proposal_runtime=runtime,
+                workspace_root=tmp / "workspace",
+                memory_root=tmp / "item-memory",
+                session_id="dataset-field-preview",
+                progress_callback=events.append,
+            )
+            self.assertEqual(result["dataset_summary"]["total_items"], 1)
+            dataset_loaded = next(event for event in events if event.get("phase") == "dataset_loaded")
+            message = str(dataset_loaded.get("message") or "")
+            self.assertIn("Loaded dataset olymmath with 1 questions.", message)
+            self.assertIn("Question fields (3): prompt, context, choices.", message)
+            self.assertNotIn("Pick the best answer.", message)
+            self.assertNotIn("User profile: prefers concise responses and ocean themes.", message)
+            self.assertNotIn('["blue", "green", "red"]', message)
+
     def test_dataset_task_isolates_single_item_transport_failure(self) -> None:
         def transport(request_body, _config):
             prompt = str(request_body["messages"][1]["content"])
@@ -1261,9 +1522,12 @@ class CodegenRunnerTest(unittest.TestCase):
 
         runtime = ProposalRuntime(
             RuntimeConfig(
+                profile="test-profile",
+                provider="openai",
+                transport="openai-compatible",
                 api_key="test-key",
-                api_base="https://api.test/v1",
-                primary_model="deepseek-chat",
+                base_url="https://api.test/v1",
+                default_model="deepseek-chat",
                 available_models=("deepseek-chat",),
                 temperature=0.2,
                 max_tokens=4096,
@@ -1332,6 +1596,108 @@ class CodegenRunnerTest(unittest.TestCase):
         self.assertEqual(item_runs["olymmath-r2"]["winner"]["metrics"]["status"], "pass")
         self.assertEqual(item_runs["olymmath-r1"]["winner"]["metrics"]["status"], "error")
         self.assertEqual(item_runs["olymmath-r1"]["error_payload"]["error_type"], "llm_transport_error")
+
+    def test_dataset_task_parallel_eval_is_not_capped_by_llm_concurrency(self) -> None:
+        runtime = ProposalRuntime(
+            RuntimeConfig(
+                profile="test-profile",
+                provider="openai",
+                transport="openai-compatible",
+                api_key="test-key",
+                base_url="https://api.test/v1",
+                default_model="deepseek-chat",
+                available_models=("deepseek-chat",),
+                temperature=0.2,
+                max_tokens=4096,
+                timeout_s=45,
+                llm_concurrency=1,
+            ),
+        )
+        task = next(item for item in load_codegen_tasks() if item["id"] == "olymmath")
+        task = dict(task)
+        task["generation_budget"] = 1
+        task["candidate_budget"] = 1
+        task["branching_factor"] = 1
+        task["item_workers"] = 3
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_run_item(*, item, **_kwargs):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                return {
+                    "item_id": item["item_id"],
+                    "baseline": {"metrics": {"objective": 0.0, "primary_score": 0.0, "verifier_status": "pass"}},
+                    "winner": {"metrics": {"objective": 0.0, "primary_score": 0.0, "verifier_status": "pass"}},
+                    "generations": [],
+                    "llm_traces": [],
+                    "memory_before_count": 0,
+                    "memory_after_count": 0,
+                    "positive_experiences_added": 0,
+                    "negative_experiences_added": 0,
+                    "added_experiences": [],
+                }
+            finally:
+                with lock:
+                    active -= 1
+
+        summary = {
+            "total_items": 3,
+            "baseline_passed": 3,
+            "winner_passed": 3,
+            "failure_count": 0,
+            "solved_ratio": 1.0,
+            "avg_baseline_objective": 0.0,
+            "avg_winner_objective": 0.0,
+            "avg_delta_primary_score": 0.0,
+        }
+        items = [
+            {
+                "item_id": f"olymmath-r{index}",
+                "raw_item_id": f"olymmath-r{index}",
+                "id": f"olymmath-r{index}",
+                "question_id": f"olymmath-r{index}",
+                "name": f"Item {index}",
+                "prompt": f"Question {index}?",
+                "raw_prompt": f"Question {index}?",
+                "context": None,
+                "raw_context": None,
+                "choices": [],
+                "raw_choices": [],
+                "expected_answer": str(index),
+                "raw_expected_answer": str(index),
+                "metadata": {"dataset": "olymmath", "answer_format": "numeric"},
+            }
+            for index in range(1, 4)
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest = tmp / "questions.json"
+            manifest.write_text(json.dumps(items, indent=2))
+            task["item_manifest_path"] = str(manifest)
+            task["dataset_size"] = len(items)
+            with (
+                patch("app.codegen.dataset_runner._run_item", side_effect=fake_run_item),
+                patch("app.codegen.dataset_runner.aggregate_dataset_metrics", return_value=summary),
+                patch(
+                    "app.codegen.dataset_runner.aggregate_candidate",
+                    side_effect=lambda role, _runs, _objective_label: {"agent": role, "metrics": {"objective": 0.0}},
+                ),
+            ):
+                result = run_dataset_task(
+                    task,
+                    proposal_runtime=runtime,
+                    workspace_root=tmp / "workspace",
+                    memory_root=tmp / "item-memory",
+                    session_id="dataset-parallel-eval",
+                )
+        self.assertEqual(max_active, 3)
+        self.assertEqual(result["task"]["item_workers"], 3)
 
     def test_dataset_task_can_run_selected_item_ids_only(self) -> None:
         runtime = make_runtime(
@@ -1519,6 +1885,117 @@ class CodegenRunnerTest(unittest.TestCase):
             self.assertEqual(item_run["question"]["id"], items[0]["item_id"])
             self.assertEqual(item_run["question"]["question_id"], items[0]["item_id"])
             self.assertEqual(item_run["question"]["raw_prompt"], items[0]["raw_prompt"])
+
+    def test_selected_skill_is_appended_to_dataset_prompt_context(self) -> None:
+        task = dict(next(item for item in load_codegen_tasks() if item["id"] == "olymmath"))
+        task_catalog = [task_summary(task)]
+        captured_prompt_context: dict[str, str] = {}
+
+        def fake_run_dataset_task(task_payload, **_kwargs):
+            captured_prompt_context["value"] = str(task_payload.get("prompt_context") or "")
+            return self._stub_dataset_run_result(task)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            skill_dir = tmp / "skills" / "olymmath"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / "olymmath-gpt-5-4-task2-20260402_120000.md"
+            skill_path.write_text(
+                "# Distilled Skill for Olympiad Math\n\n"
+                "- task_id: olymmath\n"
+                "- dataset_id: olymmath\n"
+                "- source_model: gpt-5.4\n"
+                "- source_items: 2\n"
+                "- generated_at: 2026-04-02T12:00:00+08:00\n\n"
+                "## Prompt Snippet\n"
+                "- Check divisibility structure before brute force.\n"
+            )
+            with (
+                patch("app.entries.runner.load_codegen_tasks", return_value=[task]),
+                patch("app.entries.runner.list_codegen_task_summaries", return_value=task_catalog),
+                patch("app.entries.runner.run_dataset_task", side_effect=fake_run_dataset_task),
+            ):
+                generate_discrete_payload(
+                    task_id="olymmath",
+                    proposal_runtime=make_runtime([]),
+                    runs_root=tmp,
+                    selected_skill_id="olymmath/olymmath-gpt-5-4-task2-20260402_120000.md",
+                )
+
+        self.assertIn("Distilled prior skill", captured_prompt_context["value"])
+        self.assertIn(
+            "Distilled prior skill\n\nolymmath/olymmath-gpt-5-4-task2-20260402_120000.md",
+            captured_prompt_context["value"],
+        )
+        self.assertNotIn("Distilled prior skill:", captured_prompt_context["value"])
+        self.assertIn("Check divisibility structure before brute force.", captured_prompt_context["value"])
+
+    def test_record_skill_persists_markdown_and_updates_task_catalog(self) -> None:
+        task = dict(next(item for item in load_codegen_tasks() if item["id"] == "olymmath"))
+        task_catalog = [task_summary(task)]
+        item_runs = [
+            {
+                "item_id": "olymmath-01",
+                "item_name": "Question 1",
+                "question": {"prompt": "Q1"},
+                "winner": {"candidate_summary": "winner one", "metrics": {"verifier_status": "pass"}},
+                "delta_primary_score": 0.1,
+                "run_delta_primary_score": 0.1,
+                "selection_reason": "first success",
+                "memory_markdown": "# Memory\n- strategy: use modular arithmetic",
+            },
+            {
+                "item_id": "olymmath-02",
+                "item_name": "Question 2",
+                "question": {"prompt": "Q2"},
+                "winner": {"candidate_summary": "winner two", "metrics": {"verifier_status": "fail"}},
+                "delta_primary_score": -0.1,
+                "run_delta_primary_score": -0.1,
+                "selection_reason": "second failed",
+                "memory_markdown": "# Memory\n- failure: missed invariant",
+            },
+            {
+                "item_id": "olymmath-03",
+                "item_name": "Question 3",
+                "question": {"prompt": "Q3"},
+                "winner": {"candidate_summary": "winner three", "metrics": {"verifier_status": "pass"}},
+                "delta_primary_score": 0.2,
+                "run_delta_primary_score": 0.2,
+                "selection_reason": "third success",
+                "memory_markdown": "# Memory\n- strategy: factor early",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            with (
+                patch("app.entries.runner.load_codegen_tasks", return_value=[task]),
+                patch("app.entries.runner.list_codegen_task_summaries", return_value=task_catalog),
+                patch("app.entries.runner.run_dataset_task", return_value=self._stub_dataset_run_result(task, item_runs=item_runs)),
+            ):
+                payload = generate_discrete_payload(
+                    task_id="olymmath",
+                    proposal_runtime=make_runtime(
+                        [
+                            raw_content_response(
+                                "## Reusable Priors\n- Look for invariants before calculating.\n\n## Prompt Snippet\n- Reuse stable algebraic structure."
+                            )
+                        ]
+                    ),
+                    runs_root=tmp,
+                    record_skill=True,
+                    skill_item_limit=2,
+                )
+            run = payload["runs"][0]
+            generated_skill = run["generated_skill"]
+            self.assertEqual(generated_skill["source_items"], 2)
+            self.assertTrue(Path(generated_skill["path"]).exists())
+            skill_markdown = Path(generated_skill["path"]).read_text()
+            self.assertIn("- source_items: 2", skill_markdown)
+            self.assertIn("## Prompt Snippet", skill_markdown)
+            catalog_entry = next(task_entry for task_entry in payload["task_catalog"] if task_entry["id"] == "olymmath")
+            self.assertEqual(len(catalog_entry["available_skills"]), 1)
+            self.assertEqual(catalog_entry["available_skills"][0]["id"], generated_skill["id"])
 
     def test_external_item_files_can_supply_large_context_without_bloating_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

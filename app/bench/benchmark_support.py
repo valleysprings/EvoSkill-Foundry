@@ -84,6 +84,49 @@ def answer_aliases(*values: object) -> set[str]:
     return aliases
 
 
+DISPLAY_PREVIEW_LIMIT = 120
+
+
+def preview_display_text(value: object, *, limit: int = DISPLAY_PREVIEW_LIMIT) -> str | None:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def choice_label_for_index(index: int) -> str:
+    return chr(ord("A") + index) if 0 <= index < 26 else str(index + 1)
+
+
+def choice_response_display(
+    actual: object,
+    *,
+    raw_actual: object,
+    choices: Iterable[object],
+    preferred_choice_index: int | None = None,
+) -> str | None:
+    actual_text = normalize_answer_text(actual)
+    choice_texts = [str(choice).strip() for choice in choices]
+
+    if isinstance(preferred_choice_index, int) and 0 <= preferred_choice_index < len(choice_texts):
+        preview = preview_display_text(choice_texts[preferred_choice_index])
+        if preview:
+            return f"{choice_label_for_index(preferred_choice_index)} -> {preview}"
+
+    normalized_choices = [normalize_answer_text(choice) for choice in choice_texts]
+    if actual_text:
+        for index, normalized_choice in enumerate(normalized_choices):
+            if normalized_choice and normalized_choice == actual_text:
+                preview = preview_display_text(choice_texts[index])
+                if preview:
+                    return f"{choice_label_for_index(index)} -> {preview}"
+                break
+
+    return preview_display_text(raw_actual) or preview_display_text(actual)
+
+
 def choice_answer_matches(
     actual: object,
     *,

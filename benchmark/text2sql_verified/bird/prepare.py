@@ -160,12 +160,18 @@ def main() -> None:
     existing_count = int(existing.get("prepared_count") or len(existing.get("items") or [])) if existing else 0
 
     try:
-        archive_path = DATA_DIR / "official_dev.zip"
-        if not archive_path.exists():
-            _download_file(OFFICIAL_DEV_URL, archive_path)
-        with zipfile.ZipFile(archive_path) as outer_archive:
-            rows = json.loads(outer_archive.read(f"{OUTER_PREFIX}/{DEV_JSON_NAME}"))
-            table_entries = json.loads(outer_archive.read(f"{OUTER_PREFIX}/{DEV_TABLES_NAME}"))
+        dev_json_path = DATA_DIR / DEV_JSON_NAME
+        dev_tables_path = DATA_DIR / DEV_TABLES_NAME
+        if dev_json_path.exists() and dev_tables_path.exists():
+            rows = _load_json(dev_json_path)
+            table_entries = _load_json(dev_tables_path)
+        else:
+            archive_path = DATA_DIR / "official_dev.zip"
+            if not archive_path.exists():
+                _download_file(OFFICIAL_DEV_URL, archive_path)
+            with zipfile.ZipFile(archive_path) as outer_archive:
+                rows = json.loads(outer_archive.read(f"{OUTER_PREFIX}/{DEV_JSON_NAME}"))
+                table_entries = json.loads(outer_archive.read(f"{OUTER_PREFIX}/{DEV_TABLES_NAME}"))
     except Exception as exc:
         if existing_count > 0:
             print(

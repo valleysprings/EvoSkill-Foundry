@@ -15,8 +15,12 @@ import type {
   LiveEvent,
   ObjectiveSpec,
   Payload,
+  PersonalizationReferenceBenchmark,
+  QuestionRecord,
   Run,
+  RunTask,
   RuntimeInfo,
+  TaskSkill,
   SelectionSpec,
   TaskSummary,
 } from "./types";
@@ -54,23 +58,34 @@ type LiveItemCard = {
   finishedAtMs: number | null;
 };
 
+type SearchRoundSummary = {
+  generation: number;
+  averageObjective: number;
+  sampleCount: number;
+};
+
 type LiveTaskCard = {
   taskId: string;
   title: string;
   description: string;
+  interactionMode: string;
   objectiveLabel: string;
   objectiveUnit: string | null;
   model: string;
   branchingFactor: number;
   generationBudget: number;
   candidateBudget: number;
+  llmConcurrency: number | null;
   itemWorkers: number | null;
   maxItems: number | null;
+  maxEpisodes: number | null;
   selectedItemIds: string[] | null;
   usesMaxItems: boolean;
+  usesMaxEpisodes: boolean;
   defaultMaxItems: number | null;
+  defaultMaxEpisodes: number | null;
   scheduledItems: number | null;
-  currentBest: string | null;
+  roundSummaries: SearchRoundSummary[];
   status: "queued" | "running" | "failed" | "completed";
   totalItems: number;
   completedItems: number;
@@ -89,14 +104,35 @@ type MutableLiveItemCard = LiveItemCard & {
 
 type MutableLiveTaskCard = Omit<LiveTaskCard, "items" | "totalItems" | "completedItems" | "passItems" | "acceptedCount" | "memoryDelta"> & {
   itemsMap: Map<string, MutableLiveItemCard>;
+  roundObjectives: Map<number, Map<string, number>>;
   acceptedCount: number;
   memoryDelta: number;
 };
 
-type TaskGroup = {
-  track: string;
+type BrowseModeGroup = {
+  mode: string;
   label: string;
   tasks: TaskSummary[];
+};
+
+type InteractionGroup = {
+  mode: string;
+  label: string;
+  tasks: TaskSummary[];
+};
+
+type CategoryGroup = {
+  key: string;
+  label: string;
+  tasks: TaskSummary[];
+};
+
+type PersonalizationReferenceSourceGroup = {
+  key: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  mirrorSlug: string | null;
+  references: PersonalizationReferenceBenchmark[];
 };
 
 const IDLE_LATEST_RUN_POLL_MS = 15000;
@@ -105,7 +141,40 @@ const LIVE_JOB_BACKGROUND_POLL_MS = 1500;
 const DEFAULT_FRONTEND_BRANCHING_FACTOR = 1;
 const DEFAULT_FRONTEND_GENERATION_BUDGET = 3;
 const DEFAULT_FRONTEND_CANDIDATE_BUDGET = 1;
+const DEFAULT_FRONTEND_LLM_CONCURRENCY = 20;
 const DEFAULT_FRONTEND_ITEM_WORKERS = 5;
+const DEFAULT_BROWSE_MODE = "general_intelligence";
+const DEFAULT_INTERACTION_MODE = "single_turn";
+const SAFETY_BROWSER_MODE = "safety";
+const PERSONALIZATION_BROWSER_MODE = "personalization";
+const PERSONALIZATION_CATEGORY_ORDER: Record<string, number> = {
+  character_knowledge: 0,
+  character_portrayal: 1,
+  consistency_robustness: 2,
+  user_personalization: 3,
+  agentic_personalization: 4,
+  uncategorized: 5,
+};
+const SAFETY_CATEGORY_ORDER: Record<string, number> = {
+  jailbreak_attack: 0,
+  should_refuse: 1,
+  over_refusal: 2,
+  factuality_hallucination: 3,
+  policy_drift: 4,
+  benign_utility: 5,
+  safety_degradation: 6,
+  uncategorized: 7,
+};
+const SAFETY_FOCUS_ORDER: Record<string, number> = {
+  jailbreak_attack: 0,
+  should_refuse: 1,
+  over_refusal: 2,
+  factuality_hallucination: 3,
+  policy_drift: 4,
+  benign_utility: 5,
+  safety_degradation: 6,
+  uncategorized: 7,
+};
 
 function shortPath(path?: string | null): string {
   return path ? path.replace(/^runs\//, "") : "n/a";
@@ -155,7 +224,51 @@ function firstTestResultReason(candidate: Candidate | undefined | null): string 
 
 function candidateResponseOutput(candidate: Candidate | undefined | null): string | null {
   const result = firstTestResult(candidate);
-  return stringValue(result?.actual) ?? stringValue(result?.actual_raw);
+  return stringValue(result?.actual_display) ?? stringValue(result?.actual) ?? stringValue(result?.actual_raw);
+}
+
+function normalizeResponseText(value: unknown): string {
+  return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function previewResponseText(value: string, limit = 140): string {
+  const text = value.trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit - 3).trimEnd()}...`;
+}
+
+function questionLabelAlias(question: QuestionRecord | undefined | null, label: string): string | null {
+  const metadata = (question?.metadata ?? {}) as Record<string, unknown>;
+  const rawAliases = metadata.label_aliases;
+  if (!rawAliases || typeof rawAliases !== "object") {
+    return null;
+  }
+  const aliases = (rawAliases as Record<string, unknown>)[label];
+  if (!Array.isArray(aliases)) {
+    return null;
+  }
+  const normalizedLabel = normalizeResponseText(label);
+  for (const alias of aliases) {
+    const text = stringValue(alias);
+    if (!text) {
+      continue;
+    }
+    const normalizedAlias = normalizeResponseText(text);
+    if (!normalizedAlias || normalizedAlias === normalizedLabel) {
+      continue;
+    }
+    if (normalizedAlias.length === 1 && normalizedAlias >= "a" && normalizedAlias <= "z") {
+      continue;
+    }
+    return text;
+  }
+  return null;
+}
+
+function choiceLabelForIndex(index: number): string {
+  return index >= 0 && index < 26 ? String.fromCharCode("A".charCodeAt(0) + index) : String(index + 1);
 }
 
 function liveCandidateOutput(value: string | undefined | null): string | null {
@@ -166,16 +279,56 @@ function liveCandidateOutput(value: string | undefined | null): string | null {
   return text === "[]" || text === "{}" ? null : text;
 }
 
-function candidateDisplayOutput(candidate: Candidate | undefined | null): string | null {
-  return candidateResponseOutput(candidate) ?? (firstTestResultReason(candidate) ? "parsing error" : null);
+function candidateDisplayOutput(candidate: Candidate | undefined | null, question?: QuestionRecord | null): string | null {
+  const result = firstTestResult(candidate);
+  const actualDisplay = stringValue(result?.actual_display);
+  if (actualDisplay) {
+    return actualDisplay;
+  }
+
+  const actual = stringValue(result?.actual);
+  const actualRaw = stringValue(result?.actual_raw);
+  const metadata = (question?.metadata ?? {}) as Record<string, unknown>;
+  const allowedLabels = Array.isArray(metadata.allowed_labels)
+    ? metadata.allowed_labels.map((value) => stringValue(value)).filter((value): value is string => Boolean(value))
+    : [];
+  if (actual && allowedLabels.includes(actual)) {
+    const alias = questionLabelAlias(question, actual);
+    if (alias) {
+      return `${actual} -> ${previewResponseText(alias)}`;
+    }
+    return actual;
+  }
+
+  const choices = Array.isArray(question?.choices) ? question?.choices : [];
+  if (actual && choices.length) {
+    const actualKey = normalizeResponseText(actual);
+    const choiceIndex = choices.findIndex((choice) => normalizeResponseText(choice) === actualKey);
+    if (choiceIndex >= 0) {
+      return `${choiceLabelForIndex(choiceIndex)} -> ${previewResponseText(String(choices[choiceIndex]))}`;
+    }
+  }
+
+  if (actualRaw) {
+    return previewResponseText(actualRaw);
+  }
+  if (actual) {
+    return previewResponseText(actual);
+  }
+  const metricError = stringValue(candidate?.metrics?.error);
+  if (metricError) {
+    return previewResponseText(metricError);
+  }
+  return firstTestResultReason(candidate) ? "parsing error" : null;
 }
 
 function latestAttemptedCandidate(itemRun: ItemRun | undefined | null): Candidate | null {
   if (!itemRun) {
     return null;
   }
-  for (let generationIndex = itemRun.generations.length - 1; generationIndex >= 0; generationIndex -= 1) {
-    const generation = itemRun.generations[generationIndex];
+  const generations = itemRun.generations ?? [];
+  for (let generationIndex = generations.length - 1; generationIndex >= 0; generationIndex -= 1) {
+    const generation = generations[generationIndex];
     const candidates = Array.isArray(generation?.candidates) ? generation.candidates : [];
     for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex -= 1) {
       const candidate = candidates[candidateIndex];
@@ -189,6 +342,35 @@ function latestAttemptedCandidate(itemRun: ItemRun | undefined | null): Candidat
 
 function candidateResponseStatus(candidate: Candidate | undefined | null): string | null {
   return stringValue(candidate?.metrics.verifier_status) ?? stringValue(candidate?.metrics.status);
+}
+
+function isUnavailableStatus(status: string | undefined | null): boolean {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  return normalized === "error" || normalized === "not-run";
+}
+
+function candidateObjectiveUnavailable(candidate: Candidate | undefined | null): boolean {
+  return isUnavailableStatus(candidateResponseStatus(candidate));
+}
+
+function formatCandidateObjectiveValue(candidate: Candidate | undefined | null, spec: ObjectiveSpec): string {
+  if (!candidate) {
+    return "n/a";
+  }
+  if (candidateObjectiveUnavailable(candidate)) {
+    return "unavailable";
+  }
+  return formatObjectiveValue(candidate.metrics.objective, spec);
+}
+
+function formatCandidateMetricValue(candidate: Candidate | undefined | null, value: string | number | undefined | null): string {
+  if (!candidate) {
+    return "n/a";
+  }
+  if (candidateObjectiveUnavailable(candidate)) {
+    return "unavailable";
+  }
+  return formatValue(value);
 }
 
 function verifierTone(status: string | undefined | null): "" | "good" | "warn" {
@@ -243,6 +425,18 @@ function formatElapsedDuration(ms: number | null): string | null {
   return `${seconds}s`;
 }
 
+function formatSkillOptionLabel(skill: TaskSkill): string {
+  const parts = [
+    skill.source_model || "unknown model",
+    typeof skill.source_items === "number" ? `${skill.source_items} items` : null,
+  ].filter(Boolean);
+  const generatedAt = stringValue(skill.generated_at);
+  if (generatedAt) {
+    parts.push(generatedAt.replace("T", " ").replace(/([+-]\d\d:\d\d|Z)$/, ""));
+  }
+  return parts.length ? parts.join(" · ") : skill.filename;
+}
+
 function itemElapsedDuration(item: Pick<LiveItemCard, "status" | "startedAtMs" | "latestEventAtMs" | "finishedAtMs">, nowMs: number): string | null {
   if (item.startedAtMs == null) {
     return null;
@@ -285,24 +479,6 @@ function summarizeRetryStates(retryStates: Map<string, RetryState>): string | nu
   return `retry ${current.attempt}/${current.maxAttempts}`;
 }
 
-function parseSuiteConfigInput(
-  input: string,
-  fallback: Record<string, unknown> | null = null,
-): { config: Record<string, unknown> | null; error: string | null } {
-  if (!input.trim()) {
-    return { config: fallback, error: null };
-  }
-  try {
-    const parsed = JSON.parse(input);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { config: null, error: "Suite Config must be a JSON object." };
-    }
-    return { config: parsed as Record<string, unknown>, error: null };
-  } catch {
-    return { config: null, error: "Suite Config is not valid JSON." };
-  }
-}
-
 function parseItemIdsInput(input: string): string[] | null {
   const selected = input
     .replace(/\n/g, ",")
@@ -310,10 +486,6 @@ function parseItemIdsInput(input: string): string[] | null {
     .map((token) => token.trim())
     .filter(Boolean);
   return selected.length ? selected : null;
-}
-
-function prettyJson(value: unknown): string {
-  return JSON.stringify(value ?? {}, null, 2);
 }
 
 function inferSuiteDefaultMaxItems(config: Record<string, unknown> | null | undefined): number | null {
@@ -341,6 +513,96 @@ function inferSuiteDefaultMaxItems(config: Record<string, unknown> | null | unde
   return null;
 }
 
+function inferSuiteDefaultMaxEpisodes(config: Record<string, unknown> | null | undefined): number | null {
+  if (!config) {
+    return null;
+  }
+  for (const key of ["episode_limit", "n_episodes", "max_episodes", "task_limit"]) {
+    const value = config[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.max(1, Math.floor(value));
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.max(1, Math.floor(parsed));
+      }
+    }
+  }
+  for (const key of ["episode_ids", "episodes", "inline_episodes"]) {
+    const value = config[key];
+    if (Array.isArray(value) && value.length) {
+      return value.length;
+    }
+  }
+  return null;
+}
+
+function inferSuiteDefaultMaxTurns(config: Record<string, unknown> | null | undefined): number | null {
+  if (!config) {
+    return null;
+  }
+  const value = config.max_turns;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.max(1, Math.floor(value));
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, Math.floor(parsed));
+    }
+  }
+  return null;
+}
+
+function familyLabel(family: string | undefined | null): string {
+  const normalized = String(family ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    "agent-benchmark": "Agent",
+    coding: "Code",
+    math: "Math",
+    "operations-research": "OR",
+    planning: "Planning",
+    qa: "QA",
+    reasoning: "Reasoning",
+    science: "Science",
+    text2sql: "Text-to-SQL",
+  };
+  return labels[normalized] ?? (normalized ? normalized.replace(/-/g, " ") : "Task");
+}
+
+function taskSupportsParallelWorkers(task: TaskSummary | null | undefined): boolean {
+  if (!task) {
+    return false;
+  }
+  if (task.runtime_backend === "dataset") {
+    return true;
+  }
+  return Boolean(task.supports_max_items || task.supports_max_episodes || task.interaction_mode === "multi_turn");
+}
+
+function defaultParallelWorkers(task: TaskSummary | null | undefined): number {
+  if (!task) {
+    return DEFAULT_FRONTEND_ITEM_WORKERS;
+  }
+  const configured = Number(task.item_workers ?? 0);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1, Math.floor(configured));
+  }
+  if (task.interaction_mode === "multi_turn") {
+    return 1;
+  }
+  return DEFAULT_FRONTEND_ITEM_WORKERS;
+}
+
+function defaultLlmConcurrency(runtime: RuntimeInfo | null | undefined): number {
+  const configured = Number(runtime?.llm_concurrency ?? 0);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1, Math.floor(configured));
+  }
+  return DEFAULT_FRONTEND_LLM_CONCURRENCY;
+}
+
 function average(values: number[]): number | null {
   if (!values.length) {
     return null;
@@ -348,11 +610,13 @@ function average(values: number[]): number | null {
   return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
-function firstRoundWinner(run: { generations?: Generation[] | null }): Candidate | null {
+function firstRoundBaseline(run: { generations?: Generation[] | null }): Candidate | null {
   if (!Array.isArray(run.generations) || !run.generations.length) {
     return null;
   }
-  return run.generations[0]?.winner ?? null;
+  const firstGeneration = run.generations[0];
+  const firstCandidate = Array.isArray(firstGeneration?.candidates) ? (firstGeneration.candidates[0] ?? null) : null;
+  return firstCandidate ?? firstGeneration?.winner ?? null;
 }
 
 function improvementRatio(finalValue: string | number | undefined | null, anchorValue: string | number | undefined | null): number | null {
@@ -364,8 +628,8 @@ function improvementRatio(finalValue: string | number | undefined | null, anchor
 }
 
 function itemRunImprovementRatio(itemRun: ItemRun): number | null {
-  const roundOne = firstRoundWinner(itemRun);
-  return roundOne ? improvementRatio(itemRun.winner.metrics.primary_score, roundOne.metrics.primary_score) : null;
+  const baseline = firstRoundBaseline(itemRun);
+  return baseline && itemRun.winner ? improvementRatio(itemRun.winner.metrics.primary_score, baseline.metrics.primary_score) : null;
 }
 
 function runImprovementRatio(run: Run): number | null {
@@ -375,8 +639,8 @@ function runImprovementRatio(run: Run): number | null {
       .filter((value): value is number => value != null);
     return average(ratios);
   }
-  const roundOne = firstRoundWinner(run);
-  return roundOne ? improvementRatio(run.winner.metrics.primary_score, roundOne.metrics.primary_score) : null;
+  const baseline = firstRoundBaseline(run);
+  return baseline ? improvementRatio(run.winner.metrics.primary_score, baseline.metrics.primary_score) : null;
 }
 
 function formatMultiplier(value: number | null, digits = 4): string {
@@ -422,7 +686,7 @@ function datasetTransitionSummary(run: Run): {
     unchangedFail: 0,
   };
   for (const itemRun of run.item_runs ?? []) {
-    const baselinePassed = passedCandidate(itemRun.baseline);
+    const baselinePassed = passedCandidate(firstRoundBaseline(itemRun));
     const winnerPassed = passedCandidate(itemRun.winner);
     if (!baselinePassed && winnerPassed) {
       counts.improved += 1;
@@ -488,13 +752,27 @@ function parseGenerationBestValue(message?: string | null): number | null {
   return Number(match[1]);
 }
 
-function generationSummaryPill(event: LiveEvent, objectiveLabelText: string, objectiveUnit?: string | null): string | null {
-  const generation = event.generation;
-  const bestValue = parseGenerationBestValue(event.message);
-  if (generation == null || bestValue == null || !Number.isFinite(bestValue)) {
-    return stringValue(event.message);
+function roundAverageTone(
+  roundSummary: SearchRoundSummary,
+  previousSummary: SearchRoundSummary | null,
+): "" | "good" | "warn" {
+  if (!previousSummary) {
+    return "";
   }
-  return `best ${objectiveLabelText} ${formatObjectiveValueFromUnit(bestValue, objectiveUnit)} at gen ${generation}`;
+  if (roundSummary.averageObjective > previousSummary.averageObjective + 1e-9) {
+    return "good";
+  }
+  if (roundSummary.averageObjective < previousSummary.averageObjective - 1e-9) {
+    return "warn";
+  }
+  return "";
+}
+
+function generationObjectiveFromSummary(generation: Generation): number | null {
+  const bestAfterGeneration = (generation as Generation & { best_after_generation?: Candidate }).best_after_generation;
+  const objective = bestAfterGeneration?.metrics?.objective ?? generation.winner?.metrics?.objective;
+  const parsed = numeric(objective);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatLiveEventMessage(event: LiveEvent, objectiveLabelText: string, objectiveUnit?: string | null): string | null {
@@ -534,14 +812,19 @@ function themeChoiceLabel(choice: ThemePreference): string {
 function emptyRuntime(): RuntimeInfo {
   return {
     mode: "llm-required",
-    primary_model: "n/a",
+    profile: "n/a",
+    provider: "n/a",
+    transport: "n/a",
+    default_model: "n/a",
     active_model: "n/a",
     available_models: [],
-    api_base: "n/a",
+    base_url: "n/a",
     temperature: "n/a",
     max_tokens: "n/a",
     timeout_s: "n/a",
     llm_concurrency: "n/a",
+    supports_tools: "n/a",
+    supports_json_mode: "n/a",
   };
 }
 
@@ -566,6 +849,8 @@ function emptyPayload(taskCatalog: TaskSummary[] = []): Payload {
       generated_at: "n/a",
       run_mode: "llm-required",
       active_model: "n/a",
+      policy_model: "n/a",
+      eval_model: null,
       num_tasks: 0,
       total_runs: 0,
       experiment_runs: 0,
@@ -589,6 +874,8 @@ function emptyPayload(taskCatalog: TaskSummary[] = []): Payload {
     audit: {
       workspace_root: "n/a",
       session_id: "n/a",
+      policy_model: "n/a",
+      eval_model: null,
     },
     task_catalog: taskCatalog,
     runs: [],
@@ -598,8 +885,19 @@ function emptyPayload(taskCatalog: TaskSummary[] = []): Payload {
 function normalizePayload(payload: Payload, fallbackCatalog: TaskSummary[]): Payload {
   const taskCatalog = mergeTaskCatalogs(fallbackCatalog, payload.task_catalog);
   const activeTaskIds = new Set(taskCatalog.map((task) => task.id));
+  const normalizedSummary = {
+    ...payload.summary,
+    policy_model: payload.summary?.policy_model ?? payload.summary?.active_model ?? "n/a",
+    eval_model: payload.summary?.eval_model ?? null,
+  };
   return {
     ...payload,
+    summary: normalizedSummary,
+    audit: {
+      ...payload.audit,
+      policy_model: payload.audit?.policy_model ?? normalizedSummary.policy_model ?? null,
+      eval_model: payload.audit?.eval_model ?? normalizedSummary.eval_model ?? null,
+    },
     task_catalog: taskCatalog,
     runs: Array.isArray(payload.runs)
       ? payload.runs
@@ -610,6 +908,8 @@ function normalizePayload(payload: Payload, fallbackCatalog: TaskSummary[]): Pay
               run.selection_spec ?? run.task?.selection_spec ?? catalogTask?.selection_spec ?? emptySelectionSpec();
             return {
               ...run,
+              policy_model: run.policy_model ?? run.active_model ?? normalizedSummary.policy_model,
+              eval_model: run.eval_model ?? normalizedSummary.eval_model ?? null,
               selection_spec: selectionSpec,
               task: {
                 ...run.task,
@@ -640,7 +940,7 @@ function objectiveLabel(spec: ObjectiveSpec): string {
 }
 
 function benchmarkTierLabel(includedInMainComparison: boolean): string {
-  return includedInMainComparison ? "benchmark task" : "auxiliary task";
+  return includedInMainComparison ? "active benchmark task" : "inactive task";
 }
 
 function trackLabel(track: string): string {
@@ -649,12 +949,346 @@ function trackLabel(track: string): string {
     reasoning_verified: "Reasoning",
     text2sql_verified: "Text-to-SQL",
     longcontext_verified: "Long Context",
+    personalization_verified: "Personalization",
+    safety_verified: "Safety",
     browse_snapshot: "Browse",
     science_verified: "Science Reasoning",
     coding_verified: "Coding",
     or_verified: "Operations Research",
+    agent_verified: "Agent Verified",
   };
   return labels[track] ?? track.replace(/_/g, " ");
+}
+
+function browseModeLabel(mode: string | undefined | null): string {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === DEFAULT_BROWSE_MODE || normalized === "general") {
+    return "General Intelligence";
+  }
+  if (normalized === PERSONALIZATION_BROWSER_MODE) {
+    return "Personalization";
+  }
+  if (normalized === SAFETY_BROWSER_MODE) {
+    return "Safety";
+  }
+  return "Unknown";
+}
+
+function interactionModeLabel(mode: string | undefined | null): string {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === "single_turn") {
+    return "Single Turn";
+  }
+  if (normalized === "multi_turn") {
+    return "Multi Turn";
+  }
+  return "Unknown";
+}
+
+function personalizationCategoryLabel(category: string | undefined | null): string {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  if (normalized === "role_play") {
+    return "Role Play";
+  }
+  if (normalized === "user_persona") {
+    return "User Persona";
+  }
+  if (normalized === "trait_behavior") {
+    return "Trait / Behavior";
+  }
+  if (normalized === "explicit_character_persona") {
+    return "Explicit Character Persona";
+  }
+  if (normalized === "user_persona_personalization") {
+    return "User Persona / Personalization";
+  }
+  return "Uncategorized";
+}
+
+function personaBenchmarkCategoryLabel(category: string | undefined | null): string {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  if (normalized === "character_knowledge") {
+    return "Character Knowledge";
+  }
+  if (normalized === "character_portrayal") {
+    return "Character Portrayal";
+  }
+  if (normalized === "consistency_robustness") {
+    return "Consistency / Robustness";
+  }
+  if (normalized === "user_personalization") {
+    return "User Personalization";
+  }
+  if (normalized === "agentic_personalization") {
+    return "Agentic Personalization";
+  }
+  return "Uncategorized";
+}
+
+function personalizationSecondaryCategoryLabel(category: string | undefined | null): string {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    character_knowledge: "character knowledge",
+    personality_fidelity: "personality fidelity",
+    style_fidelity: "style fidelity",
+    attribute_control: "attribute control",
+    social_drift: "social drift",
+    memory_consistency: "memory consistency",
+    self_awareness: "self awareness",
+    temporal_consistency: "temporal consistency",
+    dialogue_consistency: "dialogue consistency",
+    behavior_consistency: "behavior consistency",
+    instruction_resolution: "instruction resolution",
+    literary_dialogue: "literary dialogue",
+    decision_alignment: "decision alignment",
+    persona_conditioning: "persona conditioning",
+    preference_following: "preference following",
+    persona_memory: "persona memory",
+    long_horizon_personalization: "long-horizon personalization",
+    latent_trait_inference: "latent trait inference",
+    agentic_personalization: "agentic personalization",
+    task_success: "task success",
+    factual_reliability: "factual reliability",
+    consistency_stress_test: "consistency stress test",
+    anime_acg_slice: "anime / ACG slice",
+    user_intent_alignment: "user intent alignment",
+  };
+  return labels[normalized] ?? normalized.replace(/[_-]+/g, " ");
+}
+
+function safetyCategoryKey(task: TaskSummary | RunTask | null | undefined): string {
+  const normalized = String(task?.safety_category ?? "").trim().toLowerCase();
+  return normalized || "uncategorized";
+}
+
+function safetyCategoryLabel(category: string | undefined | null): string {
+  const normalized = String(category ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    jailbreak_attack: "Jailbreak / Attack",
+    should_refuse: "Should Refuse",
+    over_refusal: "Over-refusal",
+    factuality_hallucination: "Factuality / Hallucination",
+    policy_drift: "Policy Drift",
+    benign_utility: "Benign Utility",
+    safety_degradation: "Safety Degradation",
+  };
+  return labels[normalized] ?? "Uncategorized";
+}
+
+function safetyFocusKey(task: TaskSummary | RunTask | null | undefined): string {
+  const normalized = String(task?.safety_focus ?? "").trim().toLowerCase();
+  return normalized || "uncategorized";
+}
+
+function safetyFocusLabel(focus: string | undefined | null): string {
+  return safetyCategoryLabel(focus);
+}
+
+function safetyBenchmarkCategoryKey(task: TaskSummary | RunTask | null | undefined): string {
+  return safetyCategoryKey(task);
+}
+
+function safetyBenchmarkCategoryLabel(task: TaskSummary | RunTask | null | undefined): string {
+  return safetyCategoryLabel(safetyCategoryKey(task));
+}
+
+function subjectDomainLabel(domain: string | undefined | null): string {
+  const normalized = String(domain ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    anime_acg: "anime / ACG",
+    games: "games",
+    literary_fiction: "literary fiction",
+    movie_tv: "movie / TV",
+    general_fiction: "general fiction",
+    celebrity_real_person: "celebrity / real person",
+    assistant_task_oriented: "assistant / task-oriented",
+  };
+  return labels[normalized] ?? normalized.replaceAll("_", " ");
+}
+
+function officialMetricBackendLabel(backend: string | undefined | null): string {
+  const normalized = String(backend ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    deterministic_local: "deterministic local",
+    llm_judge: "LLM judge",
+    reward_model: "reward model",
+    hybrid: "hybrid",
+  };
+  return labels[normalized] ?? normalized.replaceAll("_", " ");
+}
+
+function metricFidelityLabel(fidelity: string | undefined | null): string {
+  const normalized = String(fidelity ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    official: "official",
+    adapted_local: "adapted local",
+    proxy_local: "proxy local",
+    reference_only: "reference only",
+  };
+  return labels[normalized] ?? normalized.replaceAll("_", " ");
+}
+
+function officialMetricGranularityLabel(granularity: string | undefined | null): string {
+  const normalized = String(granularity ?? "").trim().toLowerCase();
+  const labels: Record<string, string> = {
+    item_level: "item level",
+    turn_level: "turn level",
+    dialogue_level: "dialogue level",
+    episode_level: "episode level",
+    benchmark_level: "benchmark level",
+  };
+  return labels[normalized] ?? normalized.replaceAll("_", " ");
+}
+
+function referenceStatusLabel(status: string | undefined | null): string {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  if (normalized === "local_task") {
+    return "local task";
+  }
+  if (normalized === "planned_task") {
+    return "planned task";
+  }
+  if (normalized === "external_reference") {
+    return "external reference";
+  }
+  return "reference";
+}
+
+function referenceStatusTone(status: string | undefined | null): "" | "good" | "warn" {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  if (normalized === "local_task") {
+    return "good";
+  }
+  if (normalized === "planned_task") {
+    return "warn";
+  }
+  return "";
+}
+
+function referenceImplementationStatusKey(status: string | undefined | null): "running" | "planned" | "blocked" {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  if (normalized === "running") {
+    return "running";
+  }
+  if (normalized === "blocked") {
+    return "blocked";
+  }
+  return "planned";
+}
+
+function referenceImplementationStatusLabel(status: string | undefined | null): string {
+  const key = referenceImplementationStatusKey(status);
+  if (key === "running") {
+    return "running";
+  }
+  if (key === "blocked") {
+    return "blocked";
+  }
+  return "planned";
+}
+
+function referenceImplementationStatusTone(status: string | undefined | null): "good" | "warn" | "bad" {
+  const key = referenceImplementationStatusKey(status);
+  if (key === "running") {
+    return "good";
+  }
+  if (key === "blocked") {
+    return "bad";
+  }
+  return "warn";
+}
+
+function taskShapeLabel(shape: string | undefined | null): string {
+  const normalized = String(shape ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "shape unknown";
+  }
+  return normalized.replaceAll("_", " ");
+}
+
+function scoringModeLabel(mode: string | undefined | null): string {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "scoring unknown";
+  }
+  return normalized.replaceAll("_", " ");
+}
+
+function referenceCategoryKey(reference: PersonalizationReferenceBenchmark): string {
+  return String(reference.primary_category ?? "").trim().toLowerCase();
+}
+
+function referenceSourceKey(reference: PersonalizationReferenceBenchmark): string {
+  const mirrorSlug = String(reference.mirror_slug ?? "").trim().toLowerCase();
+  if (mirrorSlug) {
+    return `mirror:${mirrorSlug}`;
+  }
+  const sourceUrl = String(reference.source_url ?? "").trim().toLowerCase();
+  if (sourceUrl) {
+    return `source:${sourceUrl}`;
+  }
+  return `label:${String(reference.source_label ?? "").trim().toLowerCase()}`;
+}
+
+function referenceTaskIds(reference: PersonalizationReferenceBenchmark): string[] {
+  const values: string[] = [];
+  for (const rawValue of Array.isArray(reference.task_ids) ? reference.task_ids : []) {
+    const value = String(rawValue ?? "").trim();
+    if (value && !values.includes(value)) {
+      values.push(value);
+    }
+  }
+  const taskId = String(reference.task_id ?? "").trim();
+  if (taskId && !values.includes(taskId)) {
+    values.push(taskId);
+  }
+  return values;
+}
+
+function primaryCategoryForTask(
+  task: TaskSummary | RunTask | null | undefined,
+  references: PersonalizationReferenceBenchmark[] = [],
+): string {
+  if (!task) {
+    return "uncategorized";
+  }
+  for (const reference of references) {
+    if (!referenceTaskIds(reference).includes(task.id)) {
+      continue;
+    }
+    const primaryCategory = String(reference.primary_category ?? "").trim().toLowerCase();
+    if (primaryCategory) {
+      return primaryCategory;
+    }
+  }
+  const legacyCategory = String(task.personalization_category ?? "").trim().toLowerCase();
+  if (legacyCategory === "role_play") {
+    return "character_portrayal";
+  }
+  if (legacyCategory === "user_persona") {
+    return "user_personalization";
+  }
+  return "uncategorized";
+}
+
+function browserModeForTask(task: TaskSummary | RunTask | null | undefined): string {
+  if (!task) {
+    return DEFAULT_BROWSE_MODE;
+  }
+  const researchLine = String(task.research_line ?? "").trim().toLowerCase();
+  if (researchLine === PERSONALIZATION_BROWSER_MODE) {
+    return PERSONALIZATION_BROWSER_MODE;
+  }
+  if (researchLine === SAFETY_BROWSER_MODE) {
+    return SAFETY_BROWSER_MODE;
+  }
+  if (researchLine === DEFAULT_BROWSE_MODE) {
+    return DEFAULT_BROWSE_MODE;
+  }
+  if (String(task.track ?? "").trim().toLowerCase() === "safety_verified") {
+    return SAFETY_BROWSER_MODE;
+  }
+  return DEFAULT_BROWSE_MODE;
 }
 
 function taskModeLabel(mode: string | undefined | null): string {
@@ -685,38 +1319,221 @@ function optimizationScopeLabel(scope: string | undefined | null): string {
   return "scope unknown";
 }
 
-function groupTasksByTrack(tasks: TaskSummary[]): TaskGroup[] {
-  const groups = new Map<string, TaskGroup>();
+function groupTasksByBrowseMode(tasks: TaskSummary[]): BrowseModeGroup[] {
+  const groups = new Map<string, BrowseModeGroup>();
   for (const task of tasks) {
-    const track = task.track;
-    const existing = groups.get(track);
+    const mode = browserModeForTask(task);
+    const existing = groups.get(mode);
     if (existing) {
       existing.tasks.push(task);
       continue;
     }
-    groups.set(track, {
-      track,
-      label: trackLabel(track),
+    groups.set(mode, {
+      mode,
+      label: browseModeLabel(mode),
       tasks: [task],
     });
   }
-  return [...groups.values()];
+  return [DEFAULT_BROWSE_MODE, PERSONALIZATION_BROWSER_MODE, SAFETY_BROWSER_MODE]
+    .map((mode) => groups.get(mode))
+    .filter((group): group is BrowseModeGroup => Boolean(group));
 }
 
-function datasetIntroCopy(task: TaskSummary): string {
+function groupTasksByInteractionMode(
+  tasks: TaskSummary[],
+  browseMode: string,
+  references: PersonalizationReferenceBenchmark[] = [],
+): InteractionGroup[] {
+  const groups = new Map<string, InteractionGroup>();
+  for (const task of tasks) {
+    const mode = String(task.interaction_mode ?? DEFAULT_INTERACTION_MODE).trim().toLowerCase() || DEFAULT_INTERACTION_MODE;
+    const existing = groups.get(mode);
+    if (existing) {
+      existing.tasks.push(task);
+      continue;
+    }
+    groups.set(mode, {
+      mode,
+      label: interactionModeLabel(mode),
+      tasks: [task],
+    });
+  }
+  if (browseMode === PERSONALIZATION_BROWSER_MODE) {
+    for (const reference of references) {
+      const mode = String(reference.interaction_mode ?? DEFAULT_INTERACTION_MODE).trim().toLowerCase() || DEFAULT_INTERACTION_MODE;
+      if (groups.has(mode)) {
+        continue;
+      }
+      groups.set(mode, {
+        mode,
+        label: interactionModeLabel(mode),
+        tasks: [],
+      });
+    }
+  }
+  return [DEFAULT_INTERACTION_MODE, "multi_turn"]
+    .map((mode) => groups.get(mode))
+    .filter((group): group is InteractionGroup => Boolean(group));
+}
+
+function taskCategoryKey(
+  task: TaskSummary,
+  browseMode: string,
+  references: PersonalizationReferenceBenchmark[] = [],
+): string {
+  if (browseMode === PERSONALIZATION_BROWSER_MODE) {
+    return primaryCategoryForTask(task, references);
+  }
+  if (browseMode === SAFETY_BROWSER_MODE) {
+    return safetyBenchmarkCategoryKey(task);
+  }
+  return String(task.track || "").trim();
+}
+
+function taskCategoryLabel(
+  task: TaskSummary | RunTask,
+  browseMode: string,
+  references: PersonalizationReferenceBenchmark[] = [],
+): string {
+  if (browseMode === PERSONALIZATION_BROWSER_MODE) {
+    return personaBenchmarkCategoryLabel(primaryCategoryForTask(task, references));
+  }
+  if (browseMode === SAFETY_BROWSER_MODE) {
+    return safetyBenchmarkCategoryLabel(task);
+  }
+  return trackLabel(String(task.track || ""));
+}
+
+function groupTasksByCategory(
+  tasks: TaskSummary[],
+  browserMode: string,
+  interactionMode: string,
+  references: PersonalizationReferenceBenchmark[] = [],
+): CategoryGroup[] {
+  const groups = new Map<string, CategoryGroup>();
+  for (const task of tasks) {
+    const key = taskCategoryKey(task, browserMode, references);
+    if (!key) {
+      continue;
+    }
+    const existing = groups.get(key);
+    if (existing) {
+      existing.tasks.push(task);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: taskCategoryLabel(task, browserMode, references),
+      tasks: [task],
+    });
+  }
+  if (browserMode === PERSONALIZATION_BROWSER_MODE) {
+    for (const reference of references) {
+      const mode = String(reference.interaction_mode ?? DEFAULT_INTERACTION_MODE).trim().toLowerCase();
+      if (mode !== interactionMode) {
+        continue;
+      }
+      const key = referenceCategoryKey(reference);
+      if (!key || groups.has(key)) {
+        continue;
+      }
+      groups.set(key, {
+        key,
+        label: personaBenchmarkCategoryLabel(key),
+        tasks: [],
+      });
+    }
+  }
+  return Array.from(groups.values()).sort((left, right) => {
+    if (browserMode === PERSONALIZATION_BROWSER_MODE) {
+      const leftOrder = PERSONALIZATION_CATEGORY_ORDER[left.key] ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = PERSONALIZATION_CATEGORY_ORDER[right.key] ?? Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+    }
+    if (browserMode === SAFETY_BROWSER_MODE) {
+      const leftCategoryOrder = SAFETY_CATEGORY_ORDER[left.key || "uncategorized"] ?? Number.MAX_SAFE_INTEGER;
+      const rightCategoryOrder = SAFETY_CATEGORY_ORDER[right.key || "uncategorized"] ?? Number.MAX_SAFE_INTEGER;
+      if (leftCategoryOrder !== rightCategoryOrder) {
+        return leftCategoryOrder - rightCategoryOrder;
+      }
+      const leftFocusOrder = SAFETY_FOCUS_ORDER[left.key || "uncategorized"] ?? Number.MAX_SAFE_INTEGER;
+      const rightFocusOrder = SAFETY_FOCUS_ORDER[right.key || "uncategorized"] ?? Number.MAX_SAFE_INTEGER;
+      if (leftFocusOrder !== rightFocusOrder) {
+        return leftFocusOrder - rightFocusOrder;
+      }
+    }
+    return left.label.localeCompare(right.label);
+  });
+}
+
+function inferSuiteSplitLabel(config: Record<string, unknown> | null | undefined): string | null {
+  if (!config) {
+    return null;
+  }
+  for (const key of ["episode_split", "task_split", "split"]) {
+    const value = config[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function inferSuiteToolCount(config: Record<string, unknown> | null | undefined): number | null {
+  if (!config) {
+    return null;
+  }
+  const tools = config.tools;
+  if (!Array.isArray(tools) || !tools.length) {
+    return null;
+  }
+  return tools.length;
+}
+
+function taskBriefCaption(task: TaskSummary): string {
+  return task.local_dataset_only ? "dataset brief" : "task brief";
+}
+
+function taskBriefCopy(task: TaskSummary): string {
   const parts = [task.description];
+  const defaultMaxTurns = inferSuiteDefaultMaxTurns(task.suite_run_config ?? null);
+  const defaultMaxEpisodes = inferSuiteDefaultMaxEpisodes(task.suite_run_config ?? null) ?? task.default_max_episodes ?? null;
+  const suiteSplit = inferSuiteSplitLabel(task.suite_run_config ?? null);
+
   if (typeof task.dataset_size === "number" && task.dataset_size > 0) {
-    parts.push(`Local mirror: ${task.dataset_size} items.`);
+    parts.push(
+      task.supports_max_episodes
+        ? `Catalog size: ${task.dataset_size} episodes.`
+        : `Local mirror: ${task.dataset_size} items.`,
+    );
   }
   if (task.split) {
     parts.push(`Split: ${task.split}.`);
+  } else if (suiteSplit) {
+    parts.push(`Suite slice: ${suiteSplit}.`);
   }
   parts.push(
     task.included_in_main_comparison
-      ? "Included in the benchmark task set used for direct task runs."
-      : "Reserved for targeted or auxiliary runs, outside the active benchmark task set.",
+      ? "Included in the active benchmark task set used for direct task runs."
+      : "Present in catalog metadata, but not included in the active benchmark task set.",
   );
-  parts.push("A dataset run opens one item at a time, evolves code against that prompt, verifies locally, and then aggregates item outcomes into one report.");
+  if (task.supports_max_episodes) {
+    if (typeof defaultMaxEpisodes === "number" && defaultMaxEpisodes > 0) {
+      parts.push(`Default eval cap: ${defaultMaxEpisodes} episodes.`);
+    }
+    if (typeof defaultMaxTurns === "number" && defaultMaxTurns > 0) {
+      parts.push(`Default max turns per episode: ${defaultMaxTurns}.`);
+    }
+    parts.push(
+      "A multi-turn benchmark run opens one episode at a time, executes the shared agent contract against the suite-owned environment, and then aggregates episode outcomes into one report.",
+    );
+  } else {
+    parts.push(
+      "A dataset run opens one item at a time, evolves code against that prompt, verifies locally, and then aggregates item outcomes into one report.",
+    );
+  }
   return parts.join(" ");
 }
 
@@ -776,6 +1593,97 @@ function formatSolvedFraction(solved: number | string | undefined | null, total:
   return `${solvedCount}/${totalCount} (${formatPercent(solvedCount / totalCount)})`;
 }
 
+function seededEpisodeItems(task: TaskSummary | RunTask | null | undefined): Array<{ itemId: string; itemName: string; itemBrief: string; expectedAnswer: string }> {
+  const config = task?.suite_run_config;
+  const rows = Array.isArray(config?.inline_episodes) ? config.inline_episodes : [];
+  return rows
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+    .map((row, index) => {
+      const itemId = stringValue(row.episode_id) ?? `${task?.id ?? "episode"}-${index + 1}`;
+      const instruction = stringValue(row.instruction) ?? "Episode instruction unavailable.";
+      return {
+        itemId,
+        itemName: itemId,
+        itemBrief: instruction,
+        expectedAnswer: "Solve episode",
+      };
+    });
+}
+
+function outcomeItemRuns(run: Run | undefined | null): ItemRun[] {
+  if (!run) {
+    return [];
+  }
+  if (Array.isArray(run.item_runs) && run.item_runs.length) {
+    return run.item_runs;
+  }
+  return Array.isArray(run.winner?.metrics?.item_runs) ? run.winner.metrics.item_runs : [];
+}
+
+function toolCallDigest(toolCall: Record<string, unknown> | undefined | null): string | null {
+  const name = stringValue(toolCall?.name);
+  if (!name) {
+    return null;
+  }
+  const argumentsValue = (toolCall?.arguments ?? {}) as Record<string, unknown>;
+  const detail = stringValue(argumentsValue.command) ?? stringValue(argumentsValue.message);
+  return detail ? `${name}(${detail})` : name;
+}
+
+function turnActionSummary(turn: Record<string, unknown> | undefined | null): string | null {
+  const action = (turn?.action ?? {}) as Record<string, unknown>;
+  const toolCalls = Array.isArray(action.tool_calls) ? action.tool_calls as Array<Record<string, unknown>> : [];
+  const toolSummary = toolCalls.map((call) => toolCallDigest(call)).filter(Boolean).join(", ");
+  const message = stringValue(action.message);
+  const done = action.done === true ? "done" : null;
+  const parts = [toolSummary, message, done].filter(Boolean);
+  return parts.length ? parts.join(" | ") : null;
+}
+
+function turnObservationSummary(turn: Record<string, unknown> | undefined | null): string | null {
+  const observation = (turn?.observation ?? {}) as Record<string, unknown>;
+  return (
+    stringValue(observation.text)
+    ?? stringValue(observation.instruction)
+    ?? stringValue(observation.hint)
+    ?? null
+  );
+}
+
+function itemRunPrompt(itemRun: ItemRun): string {
+  return (
+    stringValue(itemRun.question?.prompt)
+    ?? stringValue(itemRun.payload?.instruction)
+    ?? turnObservationSummary((itemRun.turns ?? [])[0] as Record<string, unknown> | undefined)
+    ?? "Prompt preview unavailable."
+  );
+}
+
+function itemRunExpected(itemRun: ItemRun): string | null {
+  if (itemRun.question?.expected_answer != null) {
+    return String(itemRun.question.expected_answer);
+  }
+  return stringValue(itemRun.payload?.expected_answer) ?? "Solve episode";
+}
+
+function itemRunLatestEventOutput(itemRun: ItemRun): string | null {
+  const latestTurn = Array.isArray(itemRun.turns) && itemRun.turns.length
+    ? itemRun.turns[itemRun.turns.length - 1] as Record<string, unknown>
+    : null;
+  return turnActionSummary(latestTurn) ?? null;
+}
+
+function itemRunWinnerOutput(itemRun: ItemRun): string | null {
+  const summary = itemRunLatestEventOutput(itemRun);
+  if (summary) {
+    return summary;
+  }
+  if (typeof itemRun.success === "boolean") {
+    return itemRun.success ? "Episode solved" : "Episode not solved";
+  }
+  return null;
+}
+
 function summarizeLiveTasks(
   events: LiveEvent[],
   taskCatalog: TaskSummary[],
@@ -795,13 +1703,21 @@ function summarizeLiveTasks(
     if (existing) {
       return existing;
     }
-    const usesMaxItems = Boolean(catalogTask?.supports_max_items ?? catalogTask?.local_dataset_only ?? completedRun?.task.local_dataset_only);
+    const interactionMode = catalogTask?.interaction_mode ?? completedRun?.task.interaction_mode ?? DEFAULT_INTERACTION_MODE;
+    const usesMaxItems = Boolean(catalogTask?.supports_max_items ?? completedRun?.task.supports_max_items ?? catalogTask?.local_dataset_only ?? completedRun?.task.local_dataset_only);
+    const usesMaxEpisodes = Boolean(catalogTask?.supports_max_episodes ?? completedRun?.task.supports_max_episodes);
     const datasetSize = catalogTask?.dataset_size ?? completedRun?.task.dataset_size ?? null;
     const defaultMaxItems = catalogTask?.default_max_items ?? completedRun?.task.default_max_items ?? null;
+    const defaultMaxEpisodes = catalogTask?.default_max_episodes ?? completedRun?.task.default_max_episodes ?? null;
     const requestedItems = liveJob?.max_items ?? null;
+    const requestedEpisodes = liveJob?.max_episodes ?? null;
     const selectedItemIds = Array.isArray(liveJob?.item_ids) && liveJob?.item_ids.length ? liveJob.item_ids : null;
     const scheduledItems = selectedItemIds
       ? selectedItemIds.length
+      : usesMaxEpisodes
+      ? typeof requestedEpisodes === "number" && requestedEpisodes > 0
+        ? requestedEpisodes
+        : defaultMaxEpisodes
       : usesMaxItems
       ? typeof requestedItems === "number" && requestedItems > 0
         ? typeof datasetSize === "number" && datasetSize > 0
@@ -815,22 +1731,27 @@ function summarizeLiveTasks(
       taskId,
       title: catalogTask?.title ?? completedRun?.task.title ?? taskId,
       description: catalogTask?.description ?? completedRun?.task.description ?? "Benchmark description unavailable.",
+      interactionMode,
       objectiveLabel: objectiveLabel(catalogTask?.objective_spec ?? completedRun?.task.objective_spec ?? { display_name: "Benchmark objective", direction: "max", summary_template: "", formula: "" }),
       objectiveUnit: catalogTask?.objective_spec?.unit ?? completedRun?.task.objective_spec?.unit ?? null,
-      model: liveJob?.model ?? completedRun?.active_model ?? "n/a",
+      model: liveJob?.policy_model ?? liveJob?.model ?? completedRun?.policy_model ?? completedRun?.active_model ?? "n/a",
       branchingFactor:
         liveJob?.branching_factor ?? catalogTask?.branching_factor ?? completedRun?.task.branching_factor ?? 1,
       generationBudget:
         liveJob?.generation_budget ?? catalogTask?.generation_budget ?? completedRun?.task.generation_budget ?? 0,
       candidateBudget:
         liveJob?.candidate_budget ?? catalogTask?.candidate_budget ?? completedRun?.task.candidate_budget ?? 0,
+      llmConcurrency: liveJob?.llm_concurrency ?? null,
       itemWorkers: liveJob?.item_workers ?? catalogTask?.item_workers ?? completedRun?.task.item_workers ?? null,
       maxItems: liveJob?.max_items ?? null,
+      maxEpisodes: liveJob?.max_episodes ?? null,
       selectedItemIds,
       usesMaxItems,
+      usesMaxEpisodes,
       defaultMaxItems,
+      defaultMaxEpisodes,
       scheduledItems,
-      currentBest: null,
+      roundSummaries: [],
       status:
         liveJob?.status === "completed"
           ? "completed"
@@ -850,13 +1771,44 @@ function summarizeLiveTasks(
     const mutableEntry: MutableLiveTaskCard = {
       ...entry,
       itemsMap: new Map<string, MutableLiveItemCard>(),
+      roundObjectives: new Map<number, Map<string, number>>(),
     };
+    for (const seededItem of seededEpisodeItems(catalogTask ?? completedRun?.task)) {
+      mutableEntry.itemsMap.set(seededItem.itemId, {
+        itemKey: seededItem.itemId,
+        itemId: seededItem.itemId,
+        displayName: humanizeItemName(seededItem.itemName, seededItem.itemId),
+        status: liveJob?.status === "running" ? "running" : "queued",
+        latestGeneration: 0,
+        branchCount: 0,
+        passCount: 0,
+        failCount: 0,
+        errorCount: 0,
+        acceptCount: 0,
+        memoryDelta: 0,
+        bestObjective: null,
+        itemBrief: seededItem.itemBrief,
+        expectedAnswer: seededItem.expectedAnswer,
+        latestResponseOutput: null,
+        latestResponseStatus: null,
+        responseOutput: null,
+        responseStatus: null,
+        latestMessage: null,
+        retryLabel: null,
+        startedAtMs: null,
+        latestEventAtMs: null,
+        finishedAtMs: null,
+        acceptedKeys: new Set<string>(),
+        branchIds: new Set<string>(),
+        retryStates: new Map<string, RetryState>(),
+      });
+    }
     taskMap.set(taskId, mutableEntry);
     return mutableEntry;
   }
 
   function getItem(task: MutableLiveTaskCard, event: LiveEvent): MutableLiveItemCard | null {
-    if (!event.item_id && task.usesMaxItems) {
+    if (!event.item_id && (task.usesMaxItems || task.usesMaxEpisodes)) {
       return null;
     }
     const itemKey = event.item_id ?? task.taskId;
@@ -988,7 +1940,14 @@ function summarizeLiveTasks(
     }
     task.memoryDelta += event.memory_delta ?? 0;
     if (event.phase === "generation_finished") {
-      task.currentBest = generationSummaryPill(event, task.objectiveLabel, task.objectiveUnit) ?? task.currentBest;
+      if (item && typeof event.generation === "number") {
+        const objective = parseGenerationBestValue(event.message);
+        if (objective != null && Number.isFinite(objective)) {
+          const generationObjectives = task.roundObjectives.get(event.generation) ?? new Map<string, number>();
+          generationObjectives.set(item.itemKey, objective);
+          task.roundObjectives.set(event.generation, generationObjectives);
+        }
+      }
       if (item && item.latestGeneration >= task.generationBudget) {
         item.status = "completed";
         item.finishedAtMs = eventTimestampMs ?? item.latestEventAtMs ?? item.finishedAtMs;
@@ -999,7 +1958,7 @@ function summarizeLiveTasks(
   return [...taskMap.values()]
     .map((task) => {
       const completedRun = completedRunForTask(task.taskId);
-      const completedItemRuns = new Map((completedRun?.item_runs ?? []).map((itemRun) => [itemRun.item_id, itemRun]));
+      const completedItemRuns = new Map(outcomeItemRuns(completedRun).map((itemRun) => [itemRun.item_id, itemRun]));
       const itemKeys = new Set<string>([...task.itemsMap.keys(), ...completedItemRuns.keys()]);
       const items = [...itemKeys]
         .map((itemKey) => {
@@ -1008,16 +1967,16 @@ function summarizeLiveTasks(
           const latestAttempt = latestAttemptedCandidate(completedItemRun);
           const latestResponseOutput =
             item?.latestResponseOutput
-            ?? candidateDisplayOutput(latestAttempt)
+            ?? candidateDisplayOutput(latestAttempt, completedItemRun?.question)
             ?? null;
           const latestResponseStatus =
             item?.latestResponseStatus
             ?? candidateResponseStatus(latestAttempt)
             ?? null;
-          const winnerResponseOutput = candidateDisplayOutput(completedItemRun?.winner);
+          const winnerResponseOutput = candidateDisplayOutput(completedItemRun?.winner, completedItemRun?.question);
           const fallbackResponseOutput =
             item?.responseOutput
-            ?? candidateDisplayOutput(latestAttempt)
+            ?? candidateDisplayOutput(latestAttempt, completedItemRun?.question)
             ?? null;
           const responseOutput = winnerResponseOutput ?? fallbackResponseOutput;
           const winnerResponseStatus = candidateResponseStatus(completedItemRun?.winner);
@@ -1030,8 +1989,8 @@ function summarizeLiveTasks(
               ? (winnerResponseStatus ?? fallbackResponseStatus)
               : (fallbackResponseStatus ?? winnerResponseStatus);
           const winnerPassed = passedCandidate(completedItemRun?.winner);
-          const winnerStatus = completedItemRun?.winner.metrics.verifier_status ?? completedItemRun?.winner.metrics.status ?? null;
-          const latestGeneration = item?.latestGeneration ?? completedItemRun?.generations.length ?? 0;
+          const winnerStatus = candidateResponseStatus(completedItemRun?.winner);
+          const latestGeneration = item?.latestGeneration ?? completedItemRun?.generations?.length ?? 0;
           const itemStatus =
             liveJob?.status === "completed" || completedItemRun || latestGeneration >= task.generationBudget
               ? "completed"
@@ -1054,13 +2013,13 @@ function summarizeLiveTasks(
             errorCount: item?.errorCount ?? (completedItemRun && winnerStatus === "error" ? 1 : 0),
             acceptCount: item?.acceptCount ?? 0,
             memoryDelta: item?.memoryDelta ?? 0,
-            bestObjective: item?.bestObjective ?? (completedItemRun ? numeric(completedItemRun.winner.metrics.objective) : null),
-            itemBrief: completedItemRun ? questionPreview(completedItemRun.question.prompt, 240) : item?.itemBrief ?? null,
-            expectedAnswer: completedItemRun ? String(completedItemRun.question.expected_answer) : item?.expectedAnswer ?? null,
-            latestResponseOutput,
+            bestObjective: item?.bestObjective ?? (completedItemRun?.winner ? numeric(completedItemRun.winner.metrics.objective) : null),
+            itemBrief: completedItemRun ? questionPreview(itemRunPrompt(completedItemRun), 240) : item?.itemBrief ?? null,
+            expectedAnswer: completedItemRun ? itemRunExpected(completedItemRun) : item?.expectedAnswer ?? null,
+            latestResponseOutput: latestResponseOutput ?? (completedItemRun ? itemRunLatestEventOutput(completedItemRun) : null),
             latestResponseStatus,
-            responseOutput,
-            responseStatus,
+            responseOutput: responseOutput ?? (completedItemRun ? itemRunWinnerOutput(completedItemRun) : null),
+            responseStatus: responseStatus ?? (typeof completedItemRun?.success === "boolean" ? (completedItemRun.success ? "pass" : "fail") : null),
             latestMessage: item?.latestMessage ?? completedItemRun?.selection_reason ?? null,
             retryLabel: item?.retryLabel ?? null,
             startedAtMs: item?.startedAtMs ?? null,
@@ -1069,6 +2028,34 @@ function summarizeLiveTasks(
           };
         })
         .sort((left, right) => left.itemId.localeCompare(right.itemId));
+      const roundObjectives = new Map<number, Map<string, number>>();
+      for (const [generation, objectives] of task.roundObjectives.entries()) {
+        roundObjectives.set(generation, new Map(objectives));
+      }
+      for (const [itemKey, itemRun] of completedItemRuns.entries()) {
+        for (const generation of itemRun.generations ?? []) {
+          if (typeof generation.generation !== "number") {
+            continue;
+          }
+          const objective = generationObjectiveFromSummary(generation);
+          if (objective == null) {
+            continue;
+          }
+          const generationObjectives = roundObjectives.get(generation.generation) ?? new Map<string, number>();
+          if (!generationObjectives.has(itemKey)) {
+            generationObjectives.set(itemKey, objective);
+          }
+          roundObjectives.set(generation.generation, generationObjectives);
+        }
+      }
+      const roundSummaries = [...roundObjectives.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([generation, objectives]) => ({
+          generation,
+          averageObjective: average([...objectives.values()]) ?? 0,
+          sampleCount: objectives.size,
+        }))
+        .filter((summary) => summary.sampleCount > 0);
       const totalItems = Math.max(items.length, task.scheduledItems ?? items.length);
       return {
         ...task,
@@ -1082,6 +2069,7 @@ function summarizeLiveTasks(
         totalItems,
         completedItems: items.filter((item) => item.status === "completed").length,
         passItems: items.filter((item) => item.responseStatus === "pass").length,
+        roundSummaries,
         items,
       };
     })
@@ -1267,6 +2255,7 @@ function metricTemplate(spec: ObjectiveSpec, selectionSpec: SelectionSpec) {
 }
 
 function candidateCard(candidate: Candidate, objectiveSpec: ObjectiveSpec, tone: "winner" | "candidate" = "candidate") {
+  const candidateError = stringValue(candidate.metrics.error);
   return (
     <details className={`detail-card ${tone}`} key={candidate.candidate_id ?? candidate.agent}>
       <summary className="detail-summary">
@@ -1282,15 +2271,16 @@ function candidateCard(candidate: Candidate, objectiveSpec: ObjectiveSpec, tone:
       </summary>
       <div className="detail-body">
         <div className="metric-grid compact-metrics">
-          {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(candidate.metrics.objective, objectiveSpec))}
-          {metric("normalized score", formatValue(candidate.metrics.objective_score))}
-          {metric("tie-break score", formatValue(candidate.metrics.tie_break_score))}
+          {metric(objectiveLabel(objectiveSpec), formatCandidateObjectiveValue(candidate, objectiveSpec))}
+          {metric("normalized score", formatCandidateMetricValue(candidate, candidate.metrics.objective_score))}
+          {metric("tie-break score", formatCandidateMetricValue(candidate, candidate.metrics.tie_break_score))}
           {metric("verifier time", candidate.metrics.benchmark_ms == null ? "n/a" : `${candidate.metrics.benchmark_ms} ms`)}
           {metric("tests passed", `${candidate.metrics.passed_tests ?? "n/a"}/${candidate.metrics.total_tests ?? "n/a"}`)}
           {metric("workspace path", shortPath(candidate.workspace_path))}
         </div>
         <p className="muted">{candidate.strategy}</p>
         <p className="small">{candidate.rationale}</p>
+        {candidateError ? <p className="small muted">{candidateError}</p> : null}
         <pre className="code-block"><code>{candidate.source_code}</code></pre>
       </div>
     </details>
@@ -1386,17 +2376,9 @@ function generationCard(generation: Generation, objectiveSpec: ObjectiveSpec, op
 function liveTaskSection(task: LiveTaskCard, nowMs: number) {
   const completedRatio = task.totalItems ? task.completedItems / task.totalItems : 0;
   const passRatio = task.totalItems ? task.passItems / task.totalItems : 0;
-  const itemScopeSummary = task.selectedItemIds?.length
-    ? task.selectedItemIds.length <= 3
-      ? `items ${task.selectedItemIds.join(",")}`
-      : `selected items ${task.selectedItemIds.length}`
-    : task.usesMaxItems
-      ? task.maxItems
-        ? `item cap ${task.maxItems}`
-        : task.defaultMaxItems
-          ? `item cap default ${task.defaultMaxItems}`
-          : "item cap default"
-      : "item cap off";
+  const recentTaskEvents = task.events
+    .filter((event) => !event.item_id && stringValue(event.message))
+    .slice(-6);
   return (
     <article className="task-card live-task-card" key={task.taskId}>
       <div className="panel-header">
@@ -1410,31 +2392,49 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
           <span className="badge">{task.model}</span>
         </div>
       </div>
-      <div className="task-summary-row">
-        <span className="summary-pill">{task.taskId}</span>
-        {task.branchingFactor > 0 ? <span className="summary-pill">frontier parents {task.branchingFactor}</span> : null}
-        {task.itemWorkers && task.itemWorkers > 0 ? <span className="summary-pill">workers {task.itemWorkers}</span> : null}
-        {task.candidateBudget > 0 ? <span className="summary-pill">candidates/branch {task.candidateBudget}</span> : null}
-        {task.generationBudget > 0 ? <span className="summary-pill">max rounds {task.generationBudget}</span> : null}
-        <span className="summary-pill">{itemScopeSummary}</span>
-        <span className="summary-pill">{task.currentBest ?? "awaiting first selection"}</span>
-      </div>
       <div className="metric-grid compact-metrics">
-        {metric("items scheduled", task.totalItems)}
-        {metric("items complete", `${task.completedItems}/${task.totalItems || "?"}`)}
+        {metric(task.usesMaxEpisodes ? "episodes scheduled" : "items scheduled", task.totalItems)}
+        {metric(task.usesMaxEpisodes ? "episodes complete" : "items complete", `${task.completedItems}/${task.totalItems || "?"}`)}
         {metric("completion", formatPercent(completedRatio))}
-        {metric("items solved", `${task.passItems}/${task.totalItems || "?"}`)}
+        {metric(task.usesMaxEpisodes ? "episodes solved" : "items solved", `${task.passItems}/${task.totalItems || "?"}`)}
         {metric("solve rate", formatPercent(passRatio))}
         {metric("frontier accepts", task.acceptedCount)}
         {metric("memory delta", task.memoryDelta > 0 ? `+${task.memoryDelta}` : task.memoryDelta)}
       </div>
+      {task.roundSummaries.length || recentTaskEvents.length ? (
+        <section className="subpanel">
+          <div className="subpanel-header">
+            <div>
+              <p className="eyebrow">evolution trace</p>
+              <h4>Current Search State</h4>
+            </div>
+          </div>
+          <div className="badge-row">
+            {task.roundSummaries.map((summary, index) => (
+              <span
+                className={`badge ${roundAverageTone(summary, index > 0 ? task.roundSummaries[index - 1] : null)}`}
+                key={`${task.taskId}-round-${summary.generation}`}
+                title={`${summary.sampleCount} item${summary.sampleCount === 1 ? "" : "s"} contributed to round ${summary.generation}.`}
+              >
+                {`round ${summary.generation} avg ${formatObjectiveValueFromUnit(summary.averageObjective, task.objectiveUnit)}`}
+              </span>
+            ))}
+            {task.generationBudget > 0 ? <span className="badge">max rounds {task.generationBudget}</span> : null}
+          </div>
+          {recentTaskEvents.length ? (
+            <ul className="dense-list compact-list">
+              {recentTaskEvents.map((event, index) => (
+                <li key={`${task.taskId}-event-${index}`}>{event.message}</li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
       <div className="live-scroll">
         {task.items.length ? (
           task.items.map((item) => {
             const responseTone = verifierTone(item.responseStatus ?? item.latestResponseStatus);
             const itemDuration = itemElapsedDuration(item, nowMs);
-            const isFinalItem = item.status === "completed" || item.status === "failed";
-            const finalResponseDuration = isFinalItem ? itemDuration : null;
             return (
             <article className="live-item-row" key={item.itemKey}>
               <div className="panel-header">
@@ -1455,9 +2455,9 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
               <div className="split-grid report-grid">
                 <section className="subpanel brief-panel">
                   <div className="section-label">Brief</div>
-                  <p className="brief-question"><strong>Question.</strong> {item.itemBrief ?? "Question brief is still loading."}</p>
+                  <p className="brief-question"><strong>{task.usesMaxEpisodes ? "Instruction." : "Question."}</strong> {item.itemBrief ?? "Question brief is still loading."}</p>
                   <div className="badge-row">
-                    <span className="badge">Answer {item.expectedAnswer ?? "n/a"}</span>
+                    <span className="badge">{task.usesMaxEpisodes ? "Target" : "Answer"} {item.expectedAnswer ?? "n/a"}</span>
                   </div>
                 </section>
                 <section className={`subpanel response-panel ${responseTone}`}>
@@ -1468,21 +2468,11 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
                       <div className={`response-value compact ${verifierTone(item.latestResponseStatus)}`}>
                         {item.latestResponseOutput ?? (item.status === "completed" ? "No event output captured." : "Waiting for the latest candidate.")}
                       </div>
-                      <div className="badge-row">
-                        <span className={`badge ${verifierTone(item.latestResponseStatus)}`}>
-                          {statusWithDuration(item.latestResponseStatus, item.latestResponseStatus && item.latestResponseStatus !== "pending" ? finalResponseDuration : null)}
-                        </span>
-                      </div>
                     </div>
                     <div className="response-entry">
                       <div className="response-caption">Winner</div>
                       <div className={`response-value compact ${verifierTone(item.responseStatus)}`}>
                         {item.responseOutput ?? (item.status === "completed" ? "No winner output captured." : "Waiting for the selected candidate.")}
-                      </div>
-                      <div className="badge-row">
-                        <span className={`badge ${verifierTone(item.responseStatus)}`}>
-                          {statusWithDuration(item.responseStatus, item.responseStatus && item.responseStatus !== "pending" ? finalResponseDuration : null)}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -1502,88 +2492,112 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
 
 function itemRunCard(itemRun: ItemRun) {
   const displayName = humanizeItemName(itemRun.item_name, itemRun.item_id);
+  const questionPrompt = itemRunPrompt(itemRun);
+  const baselineCandidate = firstRoundBaseline(itemRun);
   const latestAttempt = latestAttemptedCandidate(itemRun);
-  const winnerResponseOutput = candidateDisplayOutput(itemRun.winner);
-  const responseOutput = winnerResponseOutput ?? candidateDisplayOutput(latestAttempt);
-  const winnerResponseStatus = candidateResponseStatus(itemRun.winner);
+  const latestResponseOutput = candidateDisplayOutput(latestAttempt, itemRun.question) ?? itemRunLatestEventOutput(itemRun);
+  const latestResponseStatus = candidateResponseStatus(latestAttempt);
+  const winnerResponseOutput = candidateDisplayOutput(itemRun.winner, itemRun.question) ?? itemRunWinnerOutput(itemRun);
+  const responseOutput = winnerResponseOutput ?? latestResponseOutput;
+  const winnerResponseStatus = candidateResponseStatus(itemRun.winner) ?? (typeof itemRun.success === "boolean" ? (itemRun.success ? "pass" : "fail") : null);
   const responseStatus =
     winnerResponseOutput != null
       ? (winnerResponseStatus ?? candidateResponseStatus(latestAttempt))
       : (candidateResponseStatus(latestAttempt) ?? winnerResponseStatus);
-  const baselineStatus = itemRun.baseline.metrics.verifier_status ?? itemRun.baseline.metrics.status ?? "n/a";
-  const finalStatus = itemRun.winner.metrics.verifier_status ?? itemRun.winner.metrics.status ?? "n/a";
+  const baselineStatus = candidateResponseStatus(baselineCandidate) ?? "n/a";
+  const finalStatus = candidateResponseStatus(itemRun.winner) ?? responseStatus ?? "n/a";
+  const generationsUsed = itemRun.generations?.length ?? 0;
   return (
-    <details className="detail-card generation-card" key={itemRun.item_id}>
-      <summary className="detail-summary">
-        <div>
+    <article className="live-item-row" key={itemRun.item_id}>
+      <div className="panel-header">
+        <div className="live-item-main">
           <strong>{displayName}</strong>
-          <div className="detail-summary-copy">{questionPreview(itemRun.question.prompt)}</div>
+          <div className="detail-summary-copy live-item-id">{itemRun.item_id}</div>
         </div>
         <div className="badge-row">
           <span className={`badge ${finalStatus === "pass" ? "good" : "warn"}`}>
             {finalStatus}
           </span>
           {baselineStatus !== finalStatus ? <span className="badge">{`baseline ${baselineStatus} -> final ${finalStatus}`}</span> : null}
-        </div>
-      </summary>
-      <div className="detail-body stack">
-        <div className="split-grid report-grid">
-          <section className="subpanel brief-panel">
-            <div className="section-label">Brief</div>
-            <p className="brief-question"><strong>Question.</strong> {itemRun.question.prompt}</p>
-            <div className="badge-row">
-              <span className="badge">Answer {String(itemRun.question.expected_answer)}</span>
-            </div>
-          </section>
-          <section className={`subpanel response-panel ${verifierTone(responseStatus)}`}>
-            <div className="section-label">Response</div>
-            <div className={`response-value ${verifierTone(responseStatus)}`}>
-              {responseOutput ?? "No verified output captured."}
-            </div>
-            <div className="badge-row">
-              <span className={`badge ${verifierTone(responseStatus)}`}>{responseStatus ?? "n/a"}</span>
-            </div>
-          </section>
-        </div>
-        <div className="metric-grid compact-metrics">
-          {metric("item key", itemRun.item_id)}
-          {metric("baseline status", baselineStatus)}
-          {metric("final status", finalStatus)}
-          {metric("generations used", itemRun.generations.length)}
-          {metric("memory ledger", `${itemRun.memory_before_count ?? "n/a"} → ${itemRun.memory_after_count ?? "n/a"}`)}
-        </div>
-        <p className="small">{itemRun.selection_reason}</p>
-        {itemRun.question.context ? (
-          <pre className="code-block compact"><code>{JSON.stringify(itemRun.question.context, null, 2)}</code></pre>
-        ) : null}
-        {itemRun.question.choices?.length ? (
-          <div className="badge-row">
-            {itemRun.question.choices.map((choice) => (
-              <span className="badge" key={`${itemRun.item_id}-${choice}`}>
-                {choice}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        <div className="split-grid">
-          {candidateCard(itemRun.baseline, objectiveSpec, "candidate")}
-          {candidateCard(itemRun.winner, objectiveSpec, "winner")}
+          <span className="badge">{`generations ${generationsUsed}`}</span>
         </div>
       </div>
-    </details>
+      <div className="split-grid report-grid">
+        <section className="subpanel brief-panel">
+          <div className="section-label">Brief</div>
+          <p className="brief-question"><strong>{itemRun.question ? "Question." : "Instruction."}</strong> {questionPrompt}</p>
+          {itemRunExpected(itemRun) ? (
+            <div className="badge-row">
+              <span className="badge">{itemRun.question ? "Answer" : "Target"} {String(itemRunExpected(itemRun))}</span>
+            </div>
+          ) : null}
+        </section>
+        <section className={`subpanel response-panel ${verifierTone(responseStatus)}`}>
+          <div className="section-label">Response</div>
+          <div className="response-stack">
+            <div className="response-entry">
+              <div className="response-caption">Latest Event</div>
+              <div className={`response-value compact ${verifierTone(latestResponseStatus)}`}>
+                {latestResponseOutput ?? "No event output captured."}
+              </div>
+            </div>
+            <div className="response-entry">
+              <div className="response-caption">Winner</div>
+              <div className={`response-value compact ${verifierTone(responseStatus)}`}>
+                {responseOutput ?? "No winner output captured."}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+      {itemRun.selection_reason ? <p className="small live-item-message">{itemRun.selection_reason}</p> : null}
+      {Array.isArray(itemRun.turns) && itemRun.turns.length ? (
+        <details className="detail-card">
+          <summary className="detail-summary">
+            <div>
+              <strong>Episode trace</strong>
+              <div className="detail-summary-copy">{itemRun.turns.length} turns</div>
+            </div>
+          </summary>
+          <div className="detail-body">
+            <ul className="dense-list compact-list">
+              {itemRun.turns.map((turn, index) => (
+                <li key={`${itemRun.item_id}-turn-${index}`}>
+                  <strong>t{index}</strong> {turnObservationSummary(turn) ?? "Observation unavailable."}
+                  {turnActionSummary(turn) ? ` -> ${turnActionSummary(turn)}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </details>
+      ) : null}
+    </article>
   );
 }
 
 function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean, onToggle: () => void) {
   const objectiveSpec = run.task.objective_spec;
   const selectionSpec = run.selection_spec ?? run.task.selection_spec ?? defaultSelectionSpec;
-  const isDatasetRun = Array.isArray(run.item_runs) && run.item_runs.length > 0;
+  const policyModel = run.policy_model ?? run.active_model;
+  const evalModel = run.eval_model ?? null;
+  const itemOutcomes = outcomeItemRuns(run);
+  const hasItemOutcomes = itemOutcomes.length > 0;
+  const hasEvolutionTrace = Array.isArray(run.generations) && run.generations.length > 0;
+  const isDatasetRun = hasItemOutcomes;
   const transitions = isDatasetRun ? datasetTransitionSummary(run) : null;
-  const roundOneWinner = firstRoundWinner(run);
+  const baselineCandidate = firstRoundBaseline(run);
   const improvement = runImprovementRatio(run);
-  const totalItems = run.dataset_summary?.total_items ?? run.item_runs?.length ?? 0;
-  const baselineSolved = run.dataset_summary?.baseline_passed ?? 0;
-  const finalSolved = run.dataset_summary?.winner_passed ?? 0;
+  const winnerStatus = candidateResponseStatus(run.winner);
+  const winnerUnavailable = candidateObjectiveUnavailable(run.winner);
+  const baselineUnavailable = candidateObjectiveUnavailable(baselineCandidate);
+  const runError = stringValue(run.winner.metrics.error);
+  const totalItems = run.dataset_summary?.total_items ?? itemOutcomes.length ?? 0;
+  const baselineSolved = isDatasetRun
+    ? itemOutcomes.filter((itemRun) => passedCandidate(firstRoundBaseline(itemRun))).length
+    : (run.dataset_summary?.baseline_passed ?? 0);
+  const finalSolved = isDatasetRun
+    ? itemOutcomes.filter((itemRun) => passedCandidate(itemRun.winner) || itemRun.success === true).length
+    : (run.dataset_summary?.winner_passed ?? 0);
   const baselineSolveRate = totalItems ? baselineSolved / totalItems : 0;
   const finalSolveRate = totalItems ? finalSolved / totalItems : 0;
   const solveRateGain = finalSolveRate - baselineSolveRate;
@@ -1596,8 +2610,10 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
           <p className="muted">{run.task.description}</p>
         </div>
         <div className="accordion-meta">
-          <span className="badge">{run.active_model}</span>
+          <span className="badge">policy {policyModel}</span>
+          {evalModel ? <span className="badge">eval {evalModel}</span> : null}
           <span className="badge">branches {run.task.branching_factor}</span>
+          <span className={`badge ${verifierTone(winnerStatus)}`}>{winnerStatus ?? "n/a"}</span>
           {isDatasetRun ? (
             <>
               <span className="badge">solved {finalSolved}/{totalItems}</span>
@@ -1606,25 +2622,29 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
           ) : (
             <>
               <span className="badge">
-                {objectiveLabel(objectiveSpec)} {formatObjectiveValue(run.winner.metrics.objective, objectiveSpec)}
+                {objectiveLabel(objectiveSpec)} {formatCandidateObjectiveValue(run.winner, objectiveSpec)}
               </span>
               <span className={`badge ${ratioTone(improvement)}`}>
-                improvement {formatMultiplier(improvement)}
+                improvement {winnerUnavailable || baselineUnavailable ? "n/a" : formatMultiplier(improvement)}
               </span>
             </>
           )}
         </div>
       </button>
-      <div className="task-summary-row">
-        <span className="summary-pill">{run.task.id}</span>
-        <span className="summary-pill">{benchmarkTierLabel(run.included_in_main_comparison)}</span>
-        <span className="summary-pill">{trackLabel(run.track, run.task.id)}</span>
-        <span className="summary-pill">{directionCopy(objectiveSpec.direction)}</span>
-        <span className="summary-pill">{run.selection_reason}</span>
-      </div>
       {isOpen ? (
         <div className="accordion-body stack">
           {metricTemplate(objectiveSpec, selectionSpec)}
+          {runError ? (
+            <section className="subpanel error-panel">
+              <div className="subpanel-header">
+                <div>
+                  <p className="eyebrow">run failure</p>
+                  <h4>Verifier reported an unavailable runtime</h4>
+                </div>
+              </div>
+              <p className="muted">{runError}</p>
+            </section>
+          ) : null}
 
           <div className="metric-grid">
             {isDatasetRun ? (
@@ -1638,11 +2658,10 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
               </>
             ) : (
               <>
-                {metric("checked-in objective", formatObjectiveValue(run.baseline.metrics.objective, objectiveSpec))}
-                {metric("round 1 objective", roundOneWinner ? formatObjectiveValue(roundOneWinner.metrics.objective, objectiveSpec) : "n/a")}
-                {metric("selected objective", formatObjectiveValue(run.winner.metrics.objective, objectiveSpec))}
-                {metric("objective delta", formatObjectiveDelta(run.run_delta_objective ?? 0, objectiveSpec))}
-                {metric("improvement vs round 1", formatMultiplier(improvement))}
+                {metric("baseline objective", baselineCandidate ? formatCandidateObjectiveValue(baselineCandidate, objectiveSpec) : "n/a")}
+                {metric("selected objective", formatCandidateObjectiveValue(run.winner, objectiveSpec))}
+                {metric("objective delta", winnerUnavailable || baselineUnavailable ? "n/a" : formatObjectiveDelta(run.run_delta_objective ?? 0, objectiveSpec))}
+                {metric("improvement vs baseline", winnerUnavailable || baselineUnavailable ? "n/a" : formatMultiplier(improvement))}
                 {metric("generations", run.generations.length)}
                 {metric("new memories", run.added_experiences?.length ?? 0)}
                 {metric("memory ledger", `${run.memory_before_count ?? "n/a"} → ${run.memory_after_count ?? "n/a"}`)}
@@ -1650,12 +2669,12 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
             )}
           </div>
 
-          {isDatasetRun ? (
+          {hasItemOutcomes ? (
             <section className="subpanel">
               <div className="subpanel-header">
                 <div>
-                  <p className="eyebrow">dataset summary</p>
-                  <h4>Item-level outcomes</h4>
+                  <p className="eyebrow">{run.task.interaction_mode === "multi_turn" ? "episode summary" : "dataset summary"}</p>
+                  <h4>{run.task.interaction_mode === "multi_turn" ? "Episode-level outcomes" : "Item-level outcomes"}</h4>
                 </div>
               </div>
               <div className="metric-grid compact-metrics">
@@ -1668,10 +2687,12 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
                 {metric("still failing", run.dataset_summary?.failure_count ?? 0)}
               </div>
               <section className="stack">
-                {run.item_runs?.map((itemRun) => itemRunCard(itemRun))}
+                {itemOutcomes.map((itemRun) => itemRunCard(itemRun))}
               </section>
             </section>
-          ) : (
+          ) : null}
+
+          {hasEvolutionTrace ? (
             <>
               <div className="split-grid">
                 {candidateCard(run.baseline, objectiveSpec, "candidate")}
@@ -1699,9 +2720,9 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
                 </section>
               </div>
             </>
-          )}
+          ) : null}
 
-          {!isDatasetRun ? (
+          {hasEvolutionTrace ? (
             <section className="subpanel">
               <div className="subpanel-header">
                 <div>
@@ -1713,7 +2734,7 @@ function runCard(run: Run, defaultSelectionSpec: SelectionSpec, isOpen: boolean,
             </section>
           ) : null}
 
-          {!isDatasetRun ? (
+          {hasEvolutionTrace ? (
             <section className="stack">
               {run.generations.map((generation, index) => generationCard(generation, objectiveSpec, index === run.generations.length - 1))}
             </section>
@@ -1728,21 +2749,42 @@ function themeChoices(): ThemePreference[] {
   return ["system", "light", "dark"];
 }
 
+function debugModeEnabled(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const rawValue = new URLSearchParams(window.location.search).get("debug");
+  if (rawValue === null) {
+    return false;
+  }
+  const normalized = rawValue.trim().toLowerCase();
+  return normalized === "" || normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 export function App() {
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>(emptyRuntime());
   const [payload, setPayload] = useState<Payload>(emptyPayload());
+  const [selectedBrowseMode, setSelectedBrowseMode] = useState(DEFAULT_BROWSE_MODE);
+  const [selectedInteractionMode, setSelectedInteractionMode] = useState(DEFAULT_INTERACTION_MODE);
+  const [selectedCategory, setSelectedCategory] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [selectedEvalModel, setSelectedEvalModel] = useState("");
   const [branchingFactorInput, setBranchingFactorInput] = useState(String(DEFAULT_FRONTEND_BRANCHING_FACTOR));
   const [generationBudgetInput, setGenerationBudgetInput] = useState(String(DEFAULT_FRONTEND_GENERATION_BUDGET));
-  const [candidateBudgetInput, setCandidateBudgetInput] = useState(String(DEFAULT_FRONTEND_CANDIDATE_BUDGET));
+  const [candidateBudgetInput, setCandidateBudgetInput] = useState("");
+  const [llmConcurrencyInput, setLlmConcurrencyInput] = useState("");
   const [itemWorkersInput, setItemWorkersInput] = useState(String(DEFAULT_FRONTEND_ITEM_WORKERS));
   const [maxItemsInput, setMaxItemsInput] = useState("");
+  const [maxEpisodesInput, setMaxEpisodesInput] = useState("");
+  const [maxTurnsInput, setMaxTurnsInput] = useState("");
   const [selectedItemIdsInput, setSelectedItemIdsInput] = useState("");
-  const [suiteConfigInput, setSuiteConfigInput] = useState("");
+  const [selectedSkillId, setSelectedSkillId] = useState("");
+  const [recordSkillEnabled, setRecordSkillEnabled] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
-  const [datasetIntroTaskId, setDatasetIntroTaskId] = useState<string | null>(null);
+  const [taskBriefTaskId, setTaskBriefTaskId] = useState<string | null>(null);
   const [datasetWarnings, setDatasetWarnings] = useState<DatasetWarning[]>([]);
+  const [personalizationReferenceBenchmarks, setPersonalizationReferenceBenchmarks] = useState<PersonalizationReferenceBenchmark[]>([]);
   const [datasetWarningOpen, setDatasetWarningOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [liveJob, setLiveJob] = useState<JobState | null>({
@@ -1753,20 +2795,146 @@ export function App() {
   const [openCompletedTasks, setOpenCompletedTasks] = useState<Record<string, boolean>>({});
   const pollToken = useRef(0);
   const hydratedTaskId = useRef<string | null>(null);
+  const showTrackedBenchmarks = useMemo(() => debugModeEnabled(), []);
 
-  const selectedTask = useMemo(
-    () => payload.task_catalog.find((task) => task.id === selectedTaskId) ?? payload.task_catalog[0] ?? null,
-    [payload.task_catalog, selectedTaskId],
-  );
-
-  const taskGroups = useMemo(
-    () => groupTasksByTrack(payload.task_catalog),
+  const taskBrowserTasks = useMemo(
+    () => payload.task_catalog.filter((task) => task.included_in_main_comparison),
     [payload.task_catalog],
   );
 
-  const datasetIntroTask = useMemo(
-    () => payload.task_catalog.find((task) => task.id === datasetIntroTaskId) ?? null,
-    [payload.task_catalog, datasetIntroTaskId],
+  const browseModeGroups = useMemo(
+    () => groupTasksByBrowseMode(taskBrowserTasks),
+    [taskBrowserTasks],
+  );
+
+  const browseModeTasks = useMemo(() => {
+    const filtered = taskBrowserTasks.filter((task) => browserModeForTask(task) === selectedBrowseMode);
+    return filtered.length ? filtered : taskBrowserTasks;
+  }, [taskBrowserTasks, selectedBrowseMode]);
+
+  const strictBrowseModeTasks = useMemo(
+    () => taskBrowserTasks.filter((task) => browserModeForTask(task) === selectedBrowseMode),
+    [taskBrowserTasks, selectedBrowseMode],
+  );
+
+  const interactionGroups = useMemo(
+    () => groupTasksByInteractionMode(strictBrowseModeTasks, selectedBrowseMode, personalizationReferenceBenchmarks),
+    [strictBrowseModeTasks, selectedBrowseMode, personalizationReferenceBenchmarks],
+  );
+
+  const strictInteractionTasks = useMemo(
+    () => strictBrowseModeTasks.filter(
+      (task) => String(task.interaction_mode ?? DEFAULT_INTERACTION_MODE).trim().toLowerCase() === selectedInteractionMode,
+    ),
+    [strictBrowseModeTasks, selectedInteractionMode],
+  );
+
+  const categoryGroups = useMemo(
+    () => groupTasksByCategory(strictInteractionTasks, selectedBrowseMode, selectedInteractionMode, personalizationReferenceBenchmarks),
+    [strictInteractionTasks, selectedBrowseMode, selectedInteractionMode, personalizationReferenceBenchmarks],
+  );
+
+  const strictVisibleTasks = useMemo(() => {
+    if (!selectedCategory) {
+      return strictInteractionTasks;
+    }
+    return strictInteractionTasks.filter(
+      (task) => taskCategoryKey(task, selectedBrowseMode, personalizationReferenceBenchmarks) === selectedCategory,
+    );
+  }, [strictInteractionTasks, selectedBrowseMode, selectedCategory, personalizationReferenceBenchmarks]);
+
+  const visibleTasks = useMemo(() => strictVisibleTasks, [strictVisibleTasks]);
+
+  const filteredPersonalizationReferences = useMemo(() => {
+    if (selectedBrowseMode !== PERSONALIZATION_BROWSER_MODE) {
+      return [];
+    }
+    return personalizationReferenceBenchmarks
+      .filter((reference) => String(reference.interaction_mode ?? "").trim().toLowerCase() === selectedInteractionMode)
+      .filter((reference) => !selectedCategory || referenceCategoryKey(reference) === selectedCategory)
+      .sort((left, right) => {
+        const leftStatus = referenceImplementationStatusKey(left.implementation_status);
+        const rightStatus = referenceImplementationStatusKey(right.implementation_status);
+        const leftOrder = leftStatus === "running" ? 0 : leftStatus === "planned" ? 1 : 2;
+        const rightOrder = rightStatus === "running" ? 0 : rightStatus === "planned" ? 1 : 2;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        const leftLocal = left.status === "local_task" ? 0 : 1;
+        const rightLocal = right.status === "local_task" ? 0 : 1;
+        if (leftLocal !== rightLocal) {
+          return leftLocal - rightLocal;
+        }
+        return left.title.localeCompare(right.title);
+      });
+  }, [personalizationReferenceBenchmarks, selectedBrowseMode, selectedInteractionMode, selectedCategory]);
+
+  const filteredPersonalizationSourceGroups = useMemo(() => {
+    const groups = new Map<string, PersonalizationReferenceSourceGroup>();
+    for (const reference of filteredPersonalizationReferences) {
+      const key = referenceSourceKey(reference);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.references.push(reference);
+        continue;
+      }
+      groups.set(key, {
+        key,
+        sourceLabel: reference.source_label,
+        sourceUrl: reference.source_url,
+        mirrorSlug: reference.mirror_slug ?? null,
+        references: [reference],
+      });
+    }
+    return Array.from(groups.values()).sort((left, right) => left.sourceLabel.localeCompare(right.sourceLabel));
+  }, [filteredPersonalizationReferences]);
+
+  const personalizationTaskById = useMemo(
+    () => new Map(payload.task_catalog.map((task) => [task.id, task] as const)),
+    [payload.task_catalog],
+  );
+
+  const filteredPersonalizationLocalCount = useMemo(
+    () => filteredPersonalizationReferences.filter((reference) => reference.status === "local_task").length,
+    [filteredPersonalizationReferences],
+  );
+
+  const filteredPersonalizationExternalCount = filteredPersonalizationReferences.length - filteredPersonalizationLocalCount;
+  const filteredPersonalizationSourceCount = filteredPersonalizationSourceGroups.length;
+  const filteredPersonalizationDerivedTaskCount = useMemo(
+    () => filteredPersonalizationReferences.reduce((total, reference) => total + referenceTaskIds(reference).length, 0),
+    [filteredPersonalizationReferences],
+  );
+  const filteredPersonalizationRunningCount = useMemo(
+    () =>
+      filteredPersonalizationReferences.filter(
+        (reference) => referenceImplementationStatusKey(reference.implementation_status) === "running",
+      ).length,
+    [filteredPersonalizationReferences],
+  );
+  const filteredPersonalizationPlannedCount = useMemo(
+    () =>
+      filteredPersonalizationReferences.filter(
+        (reference) => referenceImplementationStatusKey(reference.implementation_status) === "planned",
+      ).length,
+    [filteredPersonalizationReferences],
+  );
+  const filteredPersonalizationBlockedCount = useMemo(
+    () =>
+      filteredPersonalizationReferences.filter(
+        (reference) => referenceImplementationStatusKey(reference.implementation_status) === "blocked",
+      ).length,
+    [filteredPersonalizationReferences],
+  );
+
+  const selectedTask = useMemo(
+    () => visibleTasks.find((task) => task.id === selectedTaskId) ?? visibleTasks[0] ?? null,
+    [visibleTasks, selectedTaskId],
+  );
+
+  const taskBriefTask = useMemo(
+    () => payload.task_catalog.find((task) => task.id === taskBriefTaskId) ?? null,
+    [payload.task_catalog, taskBriefTaskId],
   );
 
   const liveTasks = useMemo(
@@ -1801,18 +2969,18 @@ export function App() {
   }, [themePreference]);
 
   useEffect(() => {
-    if (!datasetIntroTask && !datasetWarningOpen) {
+    if (!datasetWarningOpen && !taskBriefTask) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setDatasetIntroTaskId(null);
+        setTaskBriefTaskId(null);
         setDatasetWarningOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [datasetIntroTask, datasetWarningOpen]);
+  }, [datasetWarningOpen, taskBriefTask]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1825,9 +2993,14 @@ export function App() {
         }
         const tasks = tasksPayload.tasks;
         const startupWarnings = Array.isArray(tasksPayload.dataset_warnings) ? tasksPayload.dataset_warnings : [];
+        const startupReferences = Array.isArray(tasksPayload.personalization_reference_benchmarks)
+          ? tasksPayload.personalization_reference_benchmarks
+          : [];
         setRuntimeInfo(runtime);
         setSelectedModel(runtime.active_model);
+        setSelectedEvalModel("");
         setDatasetWarnings(startupWarnings);
+        setPersonalizationReferenceBenchmarks(startupReferences);
         setDatasetWarningOpen(startupWarnings.length > 0);
         setPayload(emptyPayload(tasks));
         setLiveJob({
@@ -1839,6 +3012,11 @@ export function App() {
           return;
         }
         const defaultTaskId = initialTaskId(tasks, latest);
+        const defaultTask = tasks.find((task) => task.id === defaultTaskId) ?? tasks[0] ?? null;
+        const defaultBrowserMode = browserModeForTask(defaultTask);
+        setSelectedBrowseMode(defaultBrowserMode);
+        setSelectedInteractionMode(String(defaultTask?.interaction_mode ?? DEFAULT_INTERACTION_MODE));
+        setSelectedCategory(defaultTask ? taskCategoryKey(defaultTask, defaultBrowserMode, startupReferences) : "");
         setSelectedTaskId(defaultTaskId);
         const scopedLatest = scopedPayloadOrEmpty(latest, defaultTaskId, tasks);
         if (defaultTaskId && scopedLatest.runs.length) {
@@ -1911,12 +3089,86 @@ export function App() {
     }
     setBranchingFactorInput(String(DEFAULT_FRONTEND_BRANCHING_FACTOR));
     setGenerationBudgetInput(String(DEFAULT_FRONTEND_GENERATION_BUDGET));
-    setCandidateBudgetInput(String(DEFAULT_FRONTEND_CANDIDATE_BUDGET));
-    setItemWorkersInput(selectedTask.runtime_backend === "benchmark_adapter" ? "" : String(DEFAULT_FRONTEND_ITEM_WORKERS));
+    setCandidateBudgetInput("");
+    setItemWorkersInput(taskSupportsParallelWorkers(selectedTask) ? String(defaultParallelWorkers(selectedTask)) : "");
     setMaxItemsInput("");
+    setMaxEpisodesInput("");
+    setMaxTurnsInput("");
     setSelectedItemIdsInput("");
-    setSuiteConfigInput(selectedTask.supports_runtime_config ? prettyJson(selectedTask.suite_run_config ?? {}) : "");
+    setSelectedSkillId("");
+    setRecordSkillEnabled(false);
+    if (selectedTask.supports_eval_model) {
+      setSelectedEvalModel(selectedTask.default_eval_model || selectedModel || runtimeInfo.active_model);
+      return;
+    }
+    setSelectedEvalModel("");
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!selectedTask?.supports_eval_model) {
+      return;
+    }
+    const nextEvalModel = selectedTask?.default_eval_model || selectedEvalModel || selectedModel || runtimeInfo.active_model;
+    if (nextEvalModel && nextEvalModel !== selectedEvalModel) {
+      setSelectedEvalModel(nextEvalModel);
+    }
+  }, [
+    runtimeInfo.active_model,
+    selectedEvalModel,
+    selectedModel,
+    selectedTask?.default_eval_model,
+    selectedTask?.supports_eval_model,
+  ]);
+
+  useEffect(() => {
+    if (!selectedTask) {
+      return;
+    }
+    const availableSkills = Array.isArray(selectedTask.available_skills) ? selectedTask.available_skills : [];
+    if (!availableSkills.some((skill) => skill.id === selectedSkillId)) {
+      setSelectedSkillId("");
+    }
+  }, [selectedTask, selectedSkillId]);
+
+  useEffect(() => {
+    if (!browseModeGroups.length) {
+      return;
+    }
+    if (browseModeGroups.some((group) => group.mode === selectedBrowseMode)) {
+      return;
+    }
+    setSelectedBrowseMode(browseModeGroups[0].mode);
+  }, [browseModeGroups, selectedBrowseMode]);
+
+  useEffect(() => {
+    if (!interactionGroups.length) {
+      return;
+    }
+    if (interactionGroups.some((group) => group.mode === selectedInteractionMode)) {
+      return;
+    }
+    setSelectedInteractionMode(interactionGroups[0].mode);
+  }, [interactionGroups, selectedInteractionMode]);
+
+  useEffect(() => {
+    if (!categoryGroups.length) {
+      return;
+    }
+    if (categoryGroups.some((group) => group.key === selectedCategory)) {
+      return;
+    }
+    setSelectedCategory(categoryGroups[0].key);
+  }, [categoryGroups, selectedCategory]);
+
+  useEffect(() => {
+    if (!visibleTasks.length) {
+      return;
+    }
+    if (visibleTasks.some((task) => task.id === selectedTaskId)) {
+      return;
+    }
+    setSelectedTaskId(visibleTasks[0].id);
+  }, [visibleTasks, selectedTaskId]);
 
   useEffect(() => {
     if (!selectedTaskId || liveJob?.status === "running" || liveJob?.status === "loading") {
@@ -2023,9 +3275,15 @@ export function App() {
 
   async function runTask(taskId: string | null) {
     const model = selectedModel || runtimeInfo.active_model;
+    const evalModel = selectedTask?.supports_eval_model
+      ? selectedEvalModel || selectedTask?.default_eval_model || model
+      : null;
+    const runtimeLlmConcurrencyDefault = defaultLlmConcurrency(runtimeInfo);
     const isBenchmarkAdapterTask = selectedTask?.runtime_backend === "benchmark_adapter";
     const isDatasetTask = selectedTask?.runtime_backend === "dataset";
+    const supportsParallelWorkers = taskSupportsParallelWorkers(selectedTask);
     const supportsMaxItems = Boolean(selectedTask?.supports_max_items);
+    const supportsMaxEpisodes = Boolean(selectedTask?.supports_max_episodes);
     const branchingFactor = Math.max(
       1,
       Math.floor(numeric(branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR)),
@@ -2034,27 +3292,24 @@ export function App() {
       1,
       Math.floor(numeric(generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET)),
     );
-    const candidateBudget = Math.max(
-      1,
-      Math.floor(numeric(candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET)),
-    );
-    const itemWorkers = isBenchmarkAdapterTask
-      ? null
-      : Math.max(1, Math.floor(numeric(itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS)));
+    const requestedCandidateBudget = candidateBudgetInput.trim()
+      ? Math.max(1, Math.floor(numeric(candidateBudgetInput)))
+      : null;
+    const candidateBudget = requestedCandidateBudget ?? DEFAULT_FRONTEND_CANDIDATE_BUDGET;
+    const requestedLlmConcurrency = llmConcurrencyInput.trim()
+      ? Math.max(1, Math.floor(numeric(llmConcurrencyInput)))
+      : null;
+    const llmConcurrency = requestedLlmConcurrency ?? runtimeLlmConcurrencyDefault;
+    const itemWorkers = supportsParallelWorkers
+      ? Math.max(1, Math.floor(numeric(itemWorkersInput || defaultParallelWorkers(selectedTask))))
+      : null;
     const selectedItemIds = isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null;
+    const chosenSkillId = isDatasetTask && selectedSkillId.trim() ? selectedSkillId.trim() : null;
+    const recordSkill = isDatasetTask ? recordSkillEnabled : false;
     const maxItems = selectedItemIds ? null : supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
-    const suiteConfig = selectedTask?.supports_runtime_config
-      ? parseSuiteConfigInput(suiteConfigInput, selectedTask.suite_run_config ?? null)
-      : { config: null, error: null };
-    if (suiteConfig.error) {
-      setError({
-        terminal: true,
-        error_type: "config_error",
-        error: suiteConfig.error,
-        model,
-      });
-      return;
-    }
+    const maxEpisodes = supportsMaxEpisodes && maxEpisodesInput.trim() ? Math.max(1, Math.floor(numeric(maxEpisodesInput))) : null;
+    const maxTurns = supportsMaxEpisodes && maxTurnsInput.trim() ? Math.max(1, Math.floor(numeric(maxTurnsInput))) : null;
+    const suiteConfig = isBenchmarkAdapterTask && maxTurns != null ? { max_turns: maxTurns } : null;
     pollToken.current += 1;
     const token = pollToken.current;
     setError(null);
@@ -2062,36 +3317,49 @@ export function App() {
       status: "running",
       taskId,
       model,
+      policy_model: model,
+      eval_model: evalModel,
       branching_factor: branchingFactor,
       generation_budget: generationBudget,
       candidate_budget: candidateBudget,
+      llm_concurrency: llmConcurrency,
       item_workers: itemWorkers,
       max_items: maxItems,
+      max_episodes: maxEpisodes,
       item_ids: selectedItemIds,
-      suite_config: suiteConfig.config,
       events: [
         {
           phase: "queued",
           message: isBenchmarkAdapterTask
             ? `Launching ${taskId ?? "selected task"} on ${model} ` +
-              `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}` +
-              `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxItems ? `, item cap=${maxItems}` : ""}).`
+              `${evalModel ? `[eval ${evalModel}] ` : ""}` +
+              `(gen=${generationBudget}, proposal-calls/branch=${candidateBudget}, branches=${branchingFactor}, llm-concurrency=${llmConcurrency}` +
+              `${itemWorkers ? `, parallel-eval=${itemWorkers}` : ""}` +
+              `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxEpisodes ? `, episode count=${maxEpisodes}` : maxItems ? `, item cap=${maxItems}` : ""}` +
+              `${maxTurns ? `, max-turns/episode=${maxTurns}` : ""}).`
             : `Launching ${taskId ?? "selected task"} on ${model} ` +
-              `(gen=${generationBudget}, candidates/branch=${candidateBudget}, branches=${branchingFactor}, workers=${itemWorkers}` +
+              `${evalModel ? `[eval ${evalModel}] ` : ""}` +
+              `(gen=${generationBudget}, proposal-calls/branch=${candidateBudget}, branches=${branchingFactor}, llm-concurrency=${llmConcurrency}` +
+              `${itemWorkers ? `, parallel-eval=${itemWorkers}` : ""}` +
               `${selectedItemIds ? `, items=${selectedItemIds.join(",")}` : maxItems ? `, item cap=${maxItems}` : ""}).`,
         },
       ],
     });
 
     try {
-      const start = await startJob(taskId, model, {
-        branchingFactor,
-        generationBudget,
-        candidateBudget,
-        itemWorkers,
-        maxItems,
-        itemIds: selectedItemIds,
-        suiteConfig: suiteConfig.config,
+        const start = await startJob(taskId, model, {
+          branchingFactor,
+          generationBudget,
+          candidateBudget: requestedCandidateBudget,
+          evalModel,
+          llmConcurrency: requestedLlmConcurrency,
+          itemWorkers,
+          maxItems,
+          maxEpisodes,
+          itemIds: selectedItemIds,
+          suiteConfig,
+          recordSkill,
+          selectedSkillId: chosenSkillId,
       });
       let job = await loadJob(start.job_id);
       while (job.status === "running" && token === pollToken.current) {
@@ -2142,10 +3410,18 @@ export function App() {
         status: "failed",
         taskId,
         model,
+        policy_model: model,
+        eval_model: evalModel,
         branching_factor: Math.max(1, Math.floor(numeric(branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR))),
         generation_budget: Math.max(1, Math.floor(numeric(generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET))),
-        candidate_budget: Math.max(1, Math.floor(numeric(candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET))),
-        item_workers: isBenchmarkAdapterTask ? null : Math.max(1, Math.floor(numeric(itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS))),
+        candidate_budget:
+          (candidateBudgetInput.trim() ? Math.max(1, Math.floor(numeric(candidateBudgetInput))) : null) ??
+          DEFAULT_FRONTEND_CANDIDATE_BUDGET,
+        llm_concurrency:
+          (llmConcurrencyInput.trim() ? Math.max(1, Math.floor(numeric(llmConcurrencyInput))) : null) ??
+          runtimeLlmConcurrencyDefault,
+        item_workers: supportsParallelWorkers ? Math.max(1, Math.floor(numeric(itemWorkersInput || defaultParallelWorkers(selectedTask)))) : null,
+        max_episodes: supportsMaxEpisodes && maxEpisodesInput.trim() ? Math.max(1, Math.floor(numeric(maxEpisodesInput))) : null,
         item_ids: isDatasetTask ? parseItemIdsInput(selectedItemIdsInput) : null,
         events: [],
       });
@@ -2153,42 +3429,143 @@ export function App() {
   }
 
   const defaultSelectionSpec = selectedTask?.selection_spec ?? payload.task_catalog[0]?.selection_spec ?? emptySelectionSpec();
-  const suiteConfigDraft = selectedTask?.supports_runtime_config
-    ? parseSuiteConfigInput(suiteConfigInput, selectedTask.suite_run_config ?? null)
-    : { config: null, error: null };
   const selectedTaskDefaultMaxItems = selectedTask?.local_dataset_only
     ? selectedTask.dataset_size ?? null
-    : inferSuiteDefaultMaxItems(suiteConfigDraft.config ?? selectedTask?.suite_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
+    : inferSuiteDefaultMaxItems(selectedTask?.suite_run_config ?? null) ?? selectedTask?.default_max_items ?? null;
+  const selectedTaskDefaultMaxEpisodes =
+    inferSuiteDefaultMaxEpisodes(selectedTask?.suite_run_config ?? null) ?? selectedTask?.default_max_episodes ?? null;
+  const selectedTaskDefaultMaxTurns = inferSuiteDefaultMaxTurns(selectedTask?.suite_run_config ?? null);
+  const selectedTaskEpisodeDatasetSize = selectedTask?.supports_max_episodes ? selectedTask?.dataset_size ?? null : null;
   const selectedTaskUsesMaxItems = Boolean(selectedTask?.supports_max_items);
-  const selectedTaskHasDatasetIntro = Boolean(selectedTask?.local_dataset_only);
+  const selectedTaskUsesMaxEpisodes = Boolean(selectedTask?.supports_max_episodes);
+  const selectedTaskSupportsParallelWorkers = taskSupportsParallelWorkers(selectedTask);
+  const selectedTaskSupportsEvalModel = Boolean(selectedTask?.supports_eval_model);
+  const selectedTaskRequiresEvalModel = Boolean(selectedTask?.requires_eval_model);
+  const selectedTaskDefaultEvalModel = selectedTask?.default_eval_model ?? null;
   const selectedTaskIsDataset = selectedTask?.runtime_backend === "dataset";
-  const selectedTaskIsBenchmarkAdapter = selectedTask?.runtime_backend === "benchmark_adapter";
   const selectedTaskIsCoding = selectedTask?.track === "coding_verified";
+  const selectedTaskAvailableSkills = selectedTask?.available_skills ?? [];
+  const showUseSkillField = selectedTaskIsDataset && selectedTaskAvailableSkills.length > 0;
+  const selectedTaskParallelWorkerDefault = defaultParallelWorkers(selectedTask);
+  const selectedTaskLlmConcurrencyDefault = defaultLlmConcurrency(runtimeInfo);
   const parsedSelectedItemIds = selectedTaskIsDataset ? parseItemIdsInput(selectedItemIdsInput) : null;
   const parsedMaxItems = parsedSelectedItemIds ? null : selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
-  const requestedItemCount = selectedTaskUsesMaxItems ? (parsedMaxItems ?? selectedTaskDefaultMaxItems ?? null) : null;
-  const showDemoMaxItemsWarning = Boolean(selectedTaskIsCoding && requestedItemCount && requestedItemCount > 50);
+  const parsedMaxEpisodes = selectedTaskUsesMaxEpisodes && maxEpisodesInput.trim() ? Math.max(1, Math.floor(numeric(maxEpisodesInput))) : null;
+  const parsedMaxTurns = selectedTaskUsesMaxEpisodes && maxTurnsInput.trim() ? Math.max(1, Math.floor(numeric(maxTurnsInput))) : null;
+  const parsedCandidateBudget = candidateBudgetInput.trim() ? Math.max(1, Math.floor(numeric(candidateBudgetInput))) : null;
+  const parsedLlmConcurrency = llmConcurrencyInput.trim() ? Math.max(1, Math.floor(numeric(llmConcurrencyInput))) : null;
+  const effectiveCandidateBudget = parsedCandidateBudget ?? DEFAULT_FRONTEND_CANDIDATE_BUDGET;
+  const effectiveLlmConcurrency = parsedLlmConcurrency ?? selectedTaskLlmConcurrencyDefault;
+  const effectiveEvalModel = selectedTaskSupportsEvalModel
+    ? selectedEvalModel || selectedTaskDefaultEvalModel || selectedModel || runtimeInfo.active_model
+    : null;
+  const requestedEvalCount = parsedSelectedItemIds
+    ? parsedSelectedItemIds.length
+    : selectedTaskUsesMaxEpisodes
+      ? parsedMaxEpisodes ?? selectedTaskDefaultMaxEpisodes ?? selectedTaskEpisodeDatasetSize ?? null
+      : selectedTaskUsesMaxItems
+        ? parsedMaxItems ?? selectedTaskDefaultMaxItems ?? null
+        : null;
+  const showDemoCodingWarning = Boolean(selectedTaskIsCoding && requestedEvalCount && requestedEvalCount > 50);
+  const evalLimitLabel = "Eval Limit";
   const maxItemsLabel = selectedTaskUsesMaxItems && selectedTask?.dataset_size
-    ? `${selectedTaskIsCoding ? "Problem Count" : "Item Cap"} (full dataset = ${selectedTask.dataset_size})`
+    ? `${evalLimitLabel} (full dataset = ${selectedTask.dataset_size})`
     : selectedTaskUsesMaxItems
       ? selectedTaskDefaultMaxItems
-        ? `Task Cap (default = ${selectedTaskDefaultMaxItems})`
-        : "Task Cap"
-      : "Item Cap";
+        ? `${evalLimitLabel} (default = ${selectedTaskDefaultMaxItems})`
+        : evalLimitLabel
+      : evalLimitLabel;
   const maxItemsHelper = selectedTaskUsesMaxItems && selectedTask?.dataset_size
-    ? `Dataset size: ${selectedTask.dataset_size} ${selectedTaskIsCoding ? "coding problems" : "items"}`
+    ? parsedMaxItems
+      ? `The first ${parsedMaxItems} ${selectedTaskIsCoding ? "problems" : "items"} will be used for eval.`
+      : `Blank uses the full dataset. The first ${selectedTask.dataset_size} ${selectedTaskIsCoding ? "problems" : "items"} will be used for eval.`
     : selectedTaskUsesMaxItems
-      ? selectedTaskDefaultMaxItems
-        ? `Blank uses the current suite config default of ${selectedTaskDefaultMaxItems} tasks.`
-        : "Blank uses the current suite config default task subset."
+      ? parsedMaxItems
+        ? `The first ${parsedMaxItems} tasks will be used for eval.`
+        : selectedTaskDefaultMaxItems
+          ? `Blank uses the current default. The first ${selectedTaskDefaultMaxItems} tasks will be used for eval.`
+          : "Blank uses the current default task subset for eval."
       : "Single-item task: cap disabled";
+  const maxEpisodesLabel = selectedTaskEpisodeDatasetSize
+    ? `${evalLimitLabel} (full dataset = ${selectedTaskEpisodeDatasetSize})`
+    : selectedTaskDefaultMaxEpisodes
+      ? `${evalLimitLabel} (default = ${selectedTaskDefaultMaxEpisodes})`
+      : evalLimitLabel;
+  const maxEpisodesHelper = parsedMaxEpisodes
+    ? `The first ${parsedMaxEpisodes} episodes/problems will be used for eval.`
+    : selectedTaskEpisodeDatasetSize && selectedTaskDefaultMaxEpisodes
+      ? `Blank uses the current default of ${selectedTaskDefaultMaxEpisodes}. The full dataset contains ${selectedTaskEpisodeDatasetSize} episodes/problems.`
+      : selectedTaskEpisodeDatasetSize
+        ? `Blank uses the full dataset. The first ${selectedTaskEpisodeDatasetSize} episodes/problems will be used for eval.`
+        : selectedTaskDefaultMaxEpisodes
+          ? `Blank uses the current default of ${selectedTaskDefaultMaxEpisodes} episodes/problems.`
+          : "Set how many episodes/problems to use for eval in this run.";
+  const maxTurnsLabel = selectedTaskDefaultMaxTurns
+    ? `Max Turns per Episode (default = ${selectedTaskDefaultMaxTurns})`
+    : "Max Turns per Episode";
+  const maxTurnsHelper = parsedMaxTurns
+    ? `Each episode will stop after ${parsedMaxTurns} environment/API turns unless it finishes earlier.`
+    : selectedTaskDefaultMaxTurns
+      ? `Blank uses the current default of ${selectedTaskDefaultMaxTurns} turns per episode.`
+      : "Cap how many environment/API turns each episode can take.";
+  const skillSelectHelper = selectedTaskAvailableSkills.length
+    ? `${selectedTaskAvailableSkills.length} distilled skill${selectedTaskAvailableSkills.length === 1 ? "" : "s"} available for this dataset.`
+    : "No distilled skill recorded for this dataset yet.";
+  const skillRecordHelper = recordSkillEnabled
+    ? "After the run, all completed item memories from this eval prefix will be distilled into a reusable markdown skill."
+    : "Leave unchecked to skip recording a distilled skill artifact for this run.";
+  const parallelEvalHelper = selectedTaskUsesMaxEpisodes
+    ? "How many episodes to evaluate in parallel for this run."
+    : "How many items/questions to evaluate in parallel for this run.";
+  const candidateBudgetHelper = parsedCandidateBudget
+    ? `This run will issue ${parsedCandidateBudget} independent proposal requests per branch.`
+    : `Blank uses ${DEFAULT_FRONTEND_CANDIDATE_BUDGET} independent proposal request per branch.`;
+  const llmConcurrencyHelper = parsedLlmConcurrency
+    ? `This run will allow up to ${parsedLlmConcurrency} LLM requests in flight at once.`
+    : `Blank uses the current runtime default of ${selectedTaskLlmConcurrencyDefault} in-flight LLM requests.`;
+  const searchRoundsSummary = `${generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET} rounds`;
+  const proposalCallsSummary = `${effectiveCandidateBudget} proposal calls/branch`;
+  const llmConcurrencySummary = `${effectiveLlmConcurrency} reqs`;
+  const evalModelSummary = selectedTaskSupportsEvalModel
+    ? effectiveEvalModel || (selectedTaskRequiresEvalModel ? "required" : "optional")
+    : "Not used";
+  const frontierParentsSummary = `${branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR} frontier parents`;
+  const evalScopeSummary = parsedSelectedItemIds
+    ? `Items ${parsedSelectedItemIds.join(", ")}`
+    : selectedTaskUsesMaxEpisodes
+      ? parsedMaxEpisodes
+        ? `First ${parsedMaxEpisodes} episodes`
+        : selectedTaskDefaultMaxEpisodes
+          ? `First ${selectedTaskDefaultMaxEpisodes} episodes`
+          : "Task episodes"
+      : selectedTaskUsesMaxItems
+        ? parsedMaxItems
+          ? `First ${parsedMaxItems} tasks`
+          : selectedTaskDefaultMaxItems
+            ? `First ${selectedTaskDefaultMaxItems} tasks`
+            : "Task subset"
+        : "Single item";
+  const parallelismSummary = selectedTaskSupportsParallelWorkers
+    ? `${itemWorkersInput || selectedTaskParallelWorkerDefault} evals`
+    : "Backend managed";
+  const selectedPersonaCategoryLabel = selectedCategory ? personaBenchmarkCategoryLabel(selectedCategory) : "Uncategorized";
+  const selectedPersonaTurnLabel = interactionModeLabel(selectedInteractionMode);
+  const personalizationSliceHasLocalTask = strictVisibleTasks.length > 0;
+  const taskBrowserEmptyMessage = useMemo(() => {
+    if (visibleTasks.length) {
+      return null;
+    }
+    if (selectedBrowseMode === PERSONALIZATION_BROWSER_MODE) {
+      return `No runnable local tasks match ${selectedPersonaTurnLabel} / ${selectedPersonaCategoryLabel}.`;
+    }
+    return "No runnable local tasks match the current filters.";
+  }, [visibleTasks.length, selectedBrowseMode, selectedPersonaTurnLabel, selectedPersonaCategoryLabel]);
 
   return (
     <main className="app-shell">
       <section className="topbar">
         <div>
-          <p className="eyebrow">verified benchmark search</p>
-          <strong className="topbar-title">Auto Research Console</strong>
+          <strong className="topbar-title">EvoSkill Foundry 😎</strong>
         </div>
         <div className="theme-toggle" role="tablist" aria-label="Theme">
           {themeChoices().map((choice) => (
@@ -2207,183 +3584,455 @@ export function App() {
       <section className="panel control-panel">
         <div className="panel-header">
           <div className="hero-block">
-            <p className="eyebrow">run launcher</p>
-            <h1 className="hero-title">Auto Research Operations Console</h1>
-            <p className="muted hero-copy">
-              Each task runs a bounded evolutionary search, verifies candidates locally, and keeps only accepted gains and memory writes.
-            </p>
+            <h2>Launch Controls</h2>
           </div>
         </div>
 
-        <div className="control-grid triple">
-          <label className="field">
-            <span className="field-label">Benchmark Task</span>
-            <select className="control" value={selectedTask?.id ?? ""} onChange={(event) => setSelectedTaskId(event.target.value)}>
-              {taskGroups.map((group) => (
-                <optgroup key={group.track} label={group.label}>
-                  {group.tasks.map((task) => (
-                    <option key={task.id} value={task.id}>
-                      {task.id}
+        <div className="stack launcher-panel-stack">
+          <section className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <p className="eyebrow">TASK SELECTION</p>
+              </div>
+            </div>
+            <div className="stack">
+              <div className="control-grid triple">
+                <label className="field">
+                  <span className="field-label">Browse Mode</span>
+                  <select className="control" value={selectedBrowseMode} onChange={(event) => setSelectedBrowseMode(event.target.value)}>
+                    {browseModeGroups.map((group) => (
+                      <option key={group.mode} value={group.mode}>
+                        {group.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field-label">Turn Mode</span>
+                  <select className="control" value={selectedInteractionMode} onChange={(event) => setSelectedInteractionMode(event.target.value)}>
+                    {interactionGroups.map((group) => (
+                      <option key={group.mode} value={group.mode}>
+                        {group.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field-label">Category</span>
+                  <select className="control" value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
+                    {categoryGroups.map((group) => (
+                      <option key={group.key} value={group.key}>
+                        {group.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="field field-span-full">
+                  <span className="field-label">Task Browser</span>
+                  {visibleTasks.length ? (
+                    <div className="task-picker-grid">
+                      {visibleTasks.map((task) => {
+                        const active = selectedTask?.id === task.id;
+                        return (
+                          <article
+                            key={task.id}
+                            className={`task-picker-card ${active ? "active" : ""}`}
+                            onClick={() => setSelectedTaskId(task.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                setSelectedTaskId(task.id);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            <div className="task-picker-header">
+                              <div className="task-picker-copy">
+                                <strong>{task.title}</strong>
+                                <span className="small muted">{task.description}</span>
+                              </div>
+                              <div className="task-picker-actions">
+                                <button
+                                  className="action subtle"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setTaskBriefTaskId(task.id);
+                                  }}
+                                  type="button"
+                                >
+                                  Open brief
+                                </button>
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="empty-state">
+                      <h3>No tasks in this slice</h3>
+                      <p className="muted">{taskBrowserEmptyMessage}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {showTrackedBenchmarks && selectedBrowseMode === PERSONALIZATION_BROWSER_MODE && filteredPersonalizationReferences.length ? (
+                <details className="detail-card" open>
+                  <summary className="detail-summary">
+                    <div>
+                      <strong>Tracked Benchmarks</strong>
+                      <div className="detail-summary-copy">
+                        {selectedPersonaTurnLabel} / {selectedPersonaCategoryLabel} slice with {filteredPersonalizationReferences.length} tracked benchmark
+                        {filteredPersonalizationReferences.length === 1 ? "" : "s"} from {filteredPersonalizationSourceCount} source suite
+                        {filteredPersonalizationSourceCount === 1 ? "" : "s"}.
+                        {!personalizationSliceHasLocalTask ? " No runnable local task is wired for this slice yet." : ""}
+                      </div>
+                    </div>
+                    <div className="badge-row">
+                      <span className="badge">{filteredPersonalizationReferences.length} tracked benchmarks</span>
+                      <span className="badge">{filteredPersonalizationSourceCount} source suites</span>
+                      <span className="badge">{filteredPersonalizationDerivedTaskCount} local tasks</span>
+                      <span className="badge good">{filteredPersonalizationRunningCount} running</span>
+                      <span className="badge warn">{filteredPersonalizationPlannedCount} planned</span>
+                      <span className="badge bad">{filteredPersonalizationBlockedCount} blocked</span>
+                      <span className="badge">{filteredPersonalizationLocalCount} local benchmarks</span>
+                      <span className="badge">{filteredPersonalizationExternalCount} reference-only</span>
+                    </div>
+                  </summary>
+                  <div className="detail-body">
+                    <ul className="dense-list compact-list">
+                      {filteredPersonalizationSourceGroups.map((group) => (
+                        <li key={group.key}>
+                          <div className="badge-row">
+                            <strong>{group.sourceLabel}</strong>
+                            <span className="badge">{group.references.length} benchmark{group.references.length === 1 ? "" : "s"}</span>
+                            {group.mirrorSlug ? <span className="badge">mirror {group.mirrorSlug}</span> : null}
+                          </div>
+                          <a className="text-link small" href={group.sourceUrl} target="_blank" rel="noreferrer">
+                            {group.sourceUrl}
+                          </a>
+                          <ul className="dense-list compact-list">
+                            {group.references.map((reference) => {
+                              const localTaskIds = referenceTaskIds(reference);
+                              return (
+                                <li key={reference.id}>
+                                  <div className="badge-row">
+                                    <strong>{reference.title}</strong>
+                                    <span className={`badge ${referenceImplementationStatusTone(reference.implementation_status)}`}>
+                                      {referenceImplementationStatusLabel(reference.implementation_status)}
+                                    </span>
+                                    <span className={`badge ${referenceStatusTone(reference.status)}`}>{referenceStatusLabel(reference.status)}</span>
+                                    <span className="badge">{personalizationCategoryLabel(reference.benchmark_category)}</span>
+                                    <span className="badge">{personaBenchmarkCategoryLabel(reference.primary_category)}</span>
+                                    {localTaskIds.length ? (
+                                      <span className="badge">{localTaskIds.length} local task{localTaskIds.length === 1 ? "" : "s"}</span>
+                                    ) : null}
+                                    <span className="badge">{taskShapeLabel(reference.task_shape)}</span>
+                                    <span className="badge">{scoringModeLabel(reference.scoring_mode)}</span>
+                                    <span className="badge">{officialMetricBackendLabel(reference.official_metric_backend)}</span>
+                                    <span className="badge">{metricFidelityLabel(reference.metric_fidelity)}</span>
+                                    {reference.requires_eval_model ? <span className="badge warn">eval model required</span> : null}
+                                  </div>
+                                  <div className="small">{reference.focus}</div>
+                                  <div className="small">{reference.summary}</div>
+                                  <div className="small muted">
+                                    Official metric: {reference.official_metric_name} · {officialMetricBackendLabel(reference.official_metric_backend)} · {officialMetricGranularityLabel(reference.official_metric_granularity)} · {metricFidelityLabel(reference.metric_fidelity)}.
+                                  </div>
+                                  <div className="small muted">Protocol: {reference.protocol_summary}</div>
+                                  <div className="small muted">Current wave: {reference.implementation_note}</div>
+                                  {reference.secondary_categories?.length ? (
+                                    <div className="badge-row">
+                                      {reference.secondary_categories.map((category) => (
+                                        <span key={`${reference.id}:secondary:${category}`} className="badge">
+                                          {personalizationSecondaryCategoryLabel(category)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  {reference.official_dimensions?.length ? (
+                                    <div className="badge-row">
+                                      {reference.official_dimensions.map((dimension) => (
+                                        <span key={`${reference.id}:dimension:${dimension}`} className="badge">
+                                          {dimension}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  {reference.subject_domains?.length ? (
+                                    <div className="badge-row">
+                                      {reference.subject_domains.map((domain) => (
+                                        <span key={`${reference.id}:domain:${domain}`} className="badge">
+                                          {subjectDomainLabel(domain)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  {reference.blocking_reason ? <div className="small muted">Blocked: {reference.blocking_reason}</div> : null}
+                                  {localTaskIds.length ? (
+                                    <ul className="dense-list compact-list">
+                                      {localTaskIds.map((taskId) => {
+                                        const localTask = personalizationTaskById.get(taskId) ?? null;
+                                        return (
+                                          <li key={`${reference.id}:${taskId}`}>
+                                            <div className="badge-row">
+                                              <strong>{localTask?.title ?? taskId}</strong>
+                                              <span className="badge">{taskId}</span>
+                                              {typeof localTask?.dataset_size === "number" && localTask.dataset_size > 0 ? (
+                                                <span className="badge">{localTask.dataset_size} items</span>
+                                              ) : null}
+                                              {localTask?.split ? <span className="badge">{localTask.split}</span> : null}
+                                            </div>
+                                          </li>
+                                        );
+                                      })}
+                                    </ul>
+                                  ) : null}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <p className="eyebrow">TASK CONFIGURATION</p>
+              </div>
+            </div>
+            <div className="control-grid triple">
+              <label className="field">
+                <span className="field-label">Proposal Model</span>
+                <select className="control" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtimeInfo.available_models.length}>
+                  {runtimeInfo.available_models.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
                     </option>
                   ))}
-                </optgroup>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field-label">Proposal Model</span>
-            <select className="control" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtimeInfo.available_models.length}>
-              {runtimeInfo.available_models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field-label">Frontier Parents</span>
-            <input
-              className="control"
-              type="number"
-              min={1}
-              step={1}
-              value={branchingFactorInput}
-              onChange={(event) => setBranchingFactorInput(event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">Max Search Rounds</span>
-            <input
-              className="control"
-              type="number"
-              min={1}
-              step={1}
-              value={generationBudgetInput}
-              onChange={(event) => setGenerationBudgetInput(event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">Candidates Count per Branch</span>
-            <input
-              className="control"
-              type="number"
-              min={1}
-              step={1}
-              value={candidateBudgetInput}
-              onChange={(event) => setCandidateBudgetInput(event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">Parallel Item Workers</span>
-            <input
-              className="control"
-              type="number"
-              min={1}
-              step={1}
-              value={itemWorkersInput}
-              onChange={(event) => setItemWorkersInput(event.target.value)}
-              disabled={selectedTaskIsBenchmarkAdapter}
-              placeholder={selectedTaskIsBenchmarkAdapter ? "n/a" : undefined}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">{maxItemsLabel}</span>
-            <input
-              className="control"
-              type="number"
-              min={1}
-              step={1}
-              placeholder={selectedTaskUsesMaxItems ? (selectedTask?.dataset_size ? "all" : "default") : "n/a"}
-              value={maxItemsInput}
-              onChange={(event) => setMaxItemsInput(event.target.value)}
-              disabled={!selectedTaskUsesMaxItems || Boolean(parsedSelectedItemIds)}
-            />
-            <span className="small muted">
-              {parsedSelectedItemIds ? "Specific item ids selected: Item Cap is ignored for this run." : maxItemsHelper}
-            </span>
-            {showDemoMaxItemsWarning ? (
-              <span className="small launcher-warning">
-                Demo warning: running more than 50 LiveCodeBench items here is not recommended.
-              </span>
-            ) : null}
-          </label>
+                </select>
+              </label>
+              {selectedTaskSupportsEvalModel ? (
+                <label className="field">
+                  <span className="field-label">Eval Model</span>
+                  <select
+                    className="control"
+                    value={effectiveEvalModel ?? ""}
+                    onChange={(event) => setSelectedEvalModel(event.target.value)}
+                    disabled={!runtimeInfo.available_models.length}
+                  >
+                    {runtimeInfo.available_models.map((model) => (
+                      <option key={`eval-${model}`} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="small muted">
+                    {selectedTaskRequiresEvalModel
+                      ? "Used for judge/reward scoring. The policy model remains the benchmarked model."
+                      : "Optional evaluator for judge/reward metrics. The policy model remains the benchmarked model."}
+                  </span>
+                </label>
+              ) : null}
+              <label className="field">
+                <span className="field-label">Frontier Parents</span>
+                <input
+                  className="control"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={branchingFactorInput}
+                  onChange={(event) => setBranchingFactorInput(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Max Evolve Rounds</span>
+                <input
+                  className="control"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={generationBudgetInput}
+                  onChange={(event) => setGenerationBudgetInput(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Proposal Calls per Branch</span>
+                <input
+                  className="control"
+                  type="number"
+                  min={1}
+                  step={1}
+                  placeholder={String(DEFAULT_FRONTEND_CANDIDATE_BUDGET)}
+                  value={candidateBudgetInput}
+                  onChange={(event) => setCandidateBudgetInput(event.target.value)}
+                />
+                <span className="small muted">{candidateBudgetHelper}</span>
+              </label>
+              <label className="field">
+                <span className="field-label">LLM Concurrency</span>
+                <input
+                  className="control"
+                  type="number"
+                  min={1}
+                  step={1}
+                  placeholder={String(selectedTaskLlmConcurrencyDefault)}
+                  value={llmConcurrencyInput}
+                  onChange={(event) => setLlmConcurrencyInput(event.target.value)}
+                />
+                <span className="small muted">{llmConcurrencyHelper}</span>
+              </label>
+              <label className="field">
+                <span className="field-label">Parallel Eval</span>
+                <input
+                  className="control"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={itemWorkersInput}
+                  onChange={(event) => setItemWorkersInput(event.target.value)}
+                  disabled={!selectedTaskSupportsParallelWorkers}
+                  placeholder={selectedTaskSupportsParallelWorkers ? String(selectedTaskParallelWorkerDefault) : "n/a"}
+                />
+                <span className="small muted">
+                  {selectedTaskSupportsParallelWorkers ? parallelEvalHelper : "This task uses its own backend-specific scheduling."}
+                </span>
+              </label>
+              {selectedTaskUsesMaxItems ? (
+                <label className="field">
+                  <span className="field-label">{maxItemsLabel}</span>
+                  <input
+                    className="control"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder={selectedTaskUsesMaxItems ? (selectedTask?.dataset_size ? "all" : "default") : "n/a"}
+                    value={maxItemsInput}
+                    onChange={(event) => setMaxItemsInput(event.target.value)}
+                    disabled={!selectedTaskUsesMaxItems || Boolean(parsedSelectedItemIds)}
+                  />
+                  <span className="small muted">
+                    {parsedSelectedItemIds ? "Specific item ids selected: Eval Limit is ignored for this run." : maxItemsHelper}
+                  </span>
+                </label>
+              ) : null}
+              {selectedTaskUsesMaxEpisodes ? (
+                <label className="field">
+                  <span className="field-label">{maxEpisodesLabel}</span>
+                  <input
+                    className="control"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="default"
+                    value={maxEpisodesInput}
+                    onChange={(event) => setMaxEpisodesInput(event.target.value)}
+                  />
+                  <span className="small muted">{maxEpisodesHelper}</span>
+                </label>
+              ) : null}
+              {selectedTaskUsesMaxEpisodes ? (
+                <label className="field">
+                  <span className="field-label">{maxTurnsLabel}</span>
+                  <input
+                    className="control"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder={selectedTaskDefaultMaxTurns ? String(selectedTaskDefaultMaxTurns) : "default"}
+                    value={maxTurnsInput}
+                    onChange={(event) => setMaxTurnsInput(event.target.value)}
+                  />
+                  <span className="small muted">{maxTurnsHelper}</span>
+                </label>
+              ) : null}
+              {selectedTaskIsDataset ? (
+                <label className="field">
+                  <span className="field-label">Item IDs (Optional)</span>
+                  <input
+                    className="control"
+                    type="text"
+                    placeholder="1,2,3 or aime-2026-01,aime-2026-10"
+                    value={selectedItemIdsInput}
+                    onChange={(event) => setSelectedItemIdsInput(event.target.value)}
+                  />
+                  <span className="small muted">Comma-separated manifest ids or 1-based question numbers. When set, this overrides Eval Limit.</span>
+                </label>
+              ) : null}
+              {showDemoCodingWarning ? (
+                <div className="field field-span-full">
+                  <span className="small launcher-warning">
+                    Demo warning: running more than 50 coding items here is not recommended.
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          </section>
+
           {selectedTaskIsDataset ? (
-            <label className="field">
-              <span className="field-label">Item IDs (Optional)</span>
-              <input
-                className="control"
-                type="text"
-                placeholder="1,2,3 or aime-2026-01,aime-2026-10"
-                value={selectedItemIdsInput}
-                onChange={(event) => setSelectedItemIdsInput(event.target.value)}
-              />
-              <span className="small muted">Comma-separated manifest ids or 1-based question numbers. When set, this overrides Item Cap.</span>
-            </label>
-          ) : null}
-          {selectedTask?.supports_runtime_config ? (
-            <label className="field field-span-full">
-              <span className="field-label">Suite Config</span>
-              <textarea
-                className="control code-textarea"
-                rows={14}
-                value={suiteConfigInput}
-                onChange={(event) => setSuiteConfigInput(event.target.value)}
-                spellCheck={false}
-              />
-              <span className="small muted">
-                Per-run JSON override for the benchmark-adapter suite. This does not rewrite the checked-in `editable.py`.
-              </span>
-              {suiteConfigDraft.error ? <span className="small launcher-warning">{suiteConfigDraft.error}</span> : null}
-            </label>
+            <section className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <p className="eyebrow">SKILL RECORD/LOAD</p>
+                </div>
+              </div>
+              <div className="control-grid">
+                {showUseSkillField ? (
+                  <label className="field field-row-start">
+                    <span className="field-label">Use Skill</span>
+                    <select
+                      className="control"
+                      value={selectedSkillId}
+                      onChange={(event) => setSelectedSkillId(event.target.value)}
+                    >
+                      <option value="">No prior skill</option>
+                      {selectedTaskAvailableSkills.map((skill) => (
+                        <option key={skill.id} value={skill.id}>
+                          {formatSkillOptionLabel(skill)}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="small muted">{skillSelectHelper}</span>
+                  </label>
+                ) : null}
+                <div className={`field ${showUseSkillField ? "" : "field-span-full"}`}>
+                  <span className="field-label">Record Skill from This Run</span>
+                  <label className="toggle-card">
+                    <span className="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={recordSkillEnabled}
+                        onChange={(event) => setRecordSkillEnabled(event.target.checked)}
+                      />
+                      <span className="toggle-title">Record a distilled skill artifact for this run</span>
+                    </span>
+                    <span className="small muted toggle-description">
+                      Save a distilled markdown skill beside this dataset&apos;s verified runs.
+                    </span>
+                    <span className="small muted toggle-description">{skillRecordHelper}</span>
+                  </label>
+                </div>
+              </div>
+            </section>
           ) : null}
         </div>
 
-        <div className="button-row">
+        <div className="button-row launcher-actions">
           <button className="action primary" onClick={() => void runTask(selectedTask?.id ?? null)} type="button">
             Start verified run
           </button>
         </div>
-        <p className="small muted">
-          Runs execute one task at a time. For dataset and benchmark-adapter tasks, Item Cap limits how many local items or benchmark episodes are expanded in this session.
-          {selectedTaskIsBenchmarkAdapter ? " Benchmark-adapter tasks also use the standard search loop; the JSON suite config above only changes runner-side suite settings for this run." : ""}
-          {selectedTaskIsCoding ? " LiveCodeBench lazily caches only the requested prefix on first use." : ""}
-        </p>
-
-        {selectedTask ? (
-          <div className="task-preview">
-            <div className="task-summary-row">
-              <span className="summary-pill">{benchmarkTierLabel(selectedTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(selectedTask.track)}</span>
-              <span className="summary-pill">{selectedTask.answer_metric}</span>
-              <span className="summary-pill">{selectedTask.function_name}</span>
-              <span className="summary-pill">{taskModeLabel(selectedTask.task_mode)}</span>
-              <span className="summary-pill">{optimizationScopeLabel(selectedTask.optimization_scope)}</span>
-              <span className="summary-pill">
-                cap {generationBudgetInput || DEFAULT_FRONTEND_GENERATION_BUDGET} rounds | {candidateBudgetInput || DEFAULT_FRONTEND_CANDIDATE_BUDGET} candidates/branch | {branchingFactorInput || DEFAULT_FRONTEND_BRANCHING_FACTOR} frontier parents
-              </span>
-              {selectedTaskIsBenchmarkAdapter ? <span className="summary-pill">configured via suite config</span> : <span className="summary-pill">workers {itemWorkersInput || DEFAULT_FRONTEND_ITEM_WORKERS}</span>}
-              {parsedSelectedItemIds ? <span className="summary-pill">items {parsedSelectedItemIds.join(", ")}</span> : null}
-              {selectedTaskIsBenchmarkAdapter ? (
-                <span className="summary-pill">
-                  {parsedMaxItems ? `task cap ${parsedMaxItems}` : selectedTaskDefaultMaxItems ? `task cap default ${selectedTaskDefaultMaxItems}` : "task cap default"}
-                </span>
-              ) : null}
-            </div>
-            <p className="muted">{selectedTask.description}</p>
-            {selectedTaskHasDatasetIntro ? (
-              <div className="button-row intro-button-row">
-                <button className="action" onClick={() => setDatasetIntroTaskId(selectedTask.id)} type="button">
-                  Open dataset brief
-                </button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
       </section>
 
       {error ? (
         <section className="panel error-panel">
-          <p className="eyebrow">run failure</p>
+          <p className="caption">run failure</p>
           <h2>{error.error_type}</h2>
           <p className="muted">{error.error}</p>
           {error.details != null ? (
@@ -2398,26 +4047,61 @@ export function App() {
 
       <section className="panel">
         <div className="panel-header">
-          <div>
-            <p className="eyebrow">runtime profile</p>
-            <h2>Runtime and verifier configuration</h2>
-          </div>
-          <div className="badge-row">
-            <span className="badge">active {selectedModel || runtimeInfo.active_model}</span>
+          <div className="hero-block">
+            <h2>Runtime Profile</h2>
           </div>
         </div>
-        <div className="metric-grid">
-          {metric("temperature", runtimeInfo.temperature)}
-          {metric("max tokens", runtimeInfo.max_tokens)}
-          {metric("timeout", `${runtimeInfo.timeout_s}s`)}
+        <div className="stack">
+          <section className="subpanel">
+            <div className="subpanel-header">
+              <div>
+                <p className="eyebrow">llm</p>
+              </div>
+            </div>
+            <div className="metric-grid">
+              {metric("policy model", selectedModel || runtimeInfo.active_model)}
+              {selectedTaskSupportsEvalModel ? metric("eval model", effectiveEvalModel ?? "required") : null}
+              {metric("endpoint", runtimeInfo.base_url)}
+              {metric("temperature", runtimeInfo.temperature)}
+              {metric("llm concurrency", runtimeInfo.llm_concurrency)}
+              {metric("max tokens", runtimeInfo.max_tokens)}
+              {metric("timeout", `${runtimeInfo.timeout_s}s`)}
+            </div>
+          </section>
+          {selectedTask ? (
+            <section className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <p className="eyebrow">task specification</p>
+                </div>
+              </div>
+              <div className="metric-grid">
+                {metric("task", selectedTask.title)}
+                {metric("browse mode", browseModeLabel(browserModeForTask(selectedTask)))}
+                {metric("category", taskCategoryLabel(selectedTask, browserModeForTask(selectedTask), personalizationReferenceBenchmarks))}
+                {selectedTask.personalization_category ? metric("persona lane", personalizationCategoryLabel(selectedTask.personalization_category)) : null}
+                {selectedTask.safety_category ? metric("safety category", safetyCategoryLabel(selectedTask.safety_category)) : null}
+                {metric("turn mode", interactionModeLabel(selectedTask.interaction_mode))}
+                {metric("metric", selectedTask.answer_metric)}
+                {selectedTaskSupportsEvalModel ? metric("eval model", evalModelSummary) : null}
+                {metric("candidate", taskModeLabel(selectedTask.task_mode).replace(/^mode\s+/i, ""))}
+                {metric("optimization", optimizationScopeLabel(selectedTask.optimization_scope).replace(/^scope\s+/i, ""))}
+                {metric("search rounds", searchRoundsSummary)}
+                {metric("proposal calls", proposalCallsSummary)}
+                {metric("llm concurrency", llmConcurrencySummary)}
+                {metric("frontier parents", frontierParentsSummary)}
+                {metric("parallel eval", parallelismSummary)}
+                {metric("eval scope", evalScopeSummary)}
+              </div>
+            </section>
+          ) : null}
         </div>
       </section>
 
       <section className="panel stack">
         <div className="panel-header">
-          <div>
-            <p className="eyebrow">live execution</p>
-            <h2>Live execution trace</h2>
+          <div className="hero-block">
+            <h2>Active Run Stream</h2>
           </div>
         </div>
         {liveTasks.length ? (
@@ -2432,13 +4116,13 @@ export function App() {
 
       <section className="panel stack">
         <div className="panel-header">
-          <div>
-            <p className="eyebrow">selected task report</p>
-            <h2>Latest cached report</h2>
+          <div className="hero-block">
+            <h2>Latest Cached Report</h2>
           </div>
           <div className="badge-row">
             <span className="badge">{selectedTask?.id ?? "no task selected"}</span>
-            <span className="badge">{payload.summary.active_model}</span>
+            <span className="badge">policy {payload.summary.policy_model ?? payload.summary.active_model}</span>
+            {payload.summary.eval_model ? <span className="badge">eval {payload.summary.eval_model}</span> : null}
           </div>
         </div>
         <div className="history-scroll">
@@ -2467,8 +4151,8 @@ export function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="panel-header">
-              <div>
-                <p className="eyebrow">warning</p>
+              <div className="hero-block">
+                <p className="caption">warning</p>
                 <h2 id="dataset-warning-title">Local dataset setup incomplete</h2>
               </div>
               <button className="action" onClick={() => setDatasetWarningOpen(false)} type="button">
@@ -2496,8 +4180,8 @@ export function App() {
         </section>
       ) : null}
 
-      {datasetIntroTask ? (
-        <section className="modal-overlay" onClick={() => setDatasetIntroTaskId(null)} role="presentation">
+      {taskBriefTask ? (
+        <section className="modal-overlay" onClick={() => setTaskBriefTaskId(null)} role="presentation">
           <article
             className="modal-card"
             role="dialog"
@@ -2506,33 +4190,71 @@ export function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="panel-header">
-              <div>
-                <p className="eyebrow">dataset brief</p>
-                <h2 id="dataset-intro-title">{datasetIntroTask.title}</h2>
+              <div className="hero-block">
+                <p className="caption">{taskBriefCaption(taskBriefTask)}</p>
+                <h2 id="dataset-intro-title">{taskBriefTask.title}</h2>
               </div>
-              <button className="action" onClick={() => setDatasetIntroTaskId(null)} type="button">
+              <button className="action" onClick={() => setTaskBriefTaskId(null)} type="button">
                 Dismiss
               </button>
             </div>
-            <p className="muted modal-copy">{datasetIntroCopy(datasetIntroTask)}</p>
+            <p className="muted modal-copy">{taskBriefCopy(taskBriefTask)}</p>
             <div className="task-summary-row">
-              <span className="summary-pill">{benchmarkTierLabel(datasetIntroTask.included_in_main_comparison)}</span>
-              <span className="summary-pill">{trackLabel(datasetIntroTask.track)}</span>
-              <span className="summary-pill">{datasetIntroTask.answer_metric}</span>
-              <span className="summary-pill">{datasetIntroTask.objective_label}</span>
-              <span className="summary-pill">{datasetIntroTask.function_name}</span>
-              <span className="summary-pill">{taskModeLabel(datasetIntroTask.task_mode)}</span>
-              <span className="summary-pill">{optimizationScopeLabel(datasetIntroTask.optimization_scope)}</span>
+              <span className="summary-pill">{benchmarkTierLabel(taskBriefTask.included_in_main_comparison)}</span>
+              <span className="summary-pill">{trackLabel(taskBriefTask.track)}</span>
+              <span className="summary-pill">{taskBriefTask.answer_metric}</span>
+              <span className="summary-pill">{taskBriefTask.objective_label}</span>
+              <span className="summary-pill">{taskBriefTask.function_name}</span>
+              <span className="summary-pill">{taskModeLabel(taskBriefTask.task_mode)}</span>
+              <span className="summary-pill">{optimizationScopeLabel(taskBriefTask.optimization_scope)}</span>
             </div>
             <div className="metric-grid compact-metrics">
-              {metric("local items", datasetIntroTask.dataset_size ?? "n/a")}
-              {metric("source", datasetIntroTask.dataset_id)}
-              {metric("split", datasetIntroTask.split ?? "local")}
-              {metric("editable file", datasetIntroTask.editable_file)}
+              {metric(
+                taskBriefTask.supports_max_episodes ? "catalog episodes" : "local items",
+                taskBriefTask.dataset_size ?? "n/a",
+              )}
+              {metric("source", taskBriefTask.dataset_id)}
+              {metric(
+                "split",
+                taskBriefTask.split ?? inferSuiteSplitLabel(taskBriefTask.suite_run_config ?? null) ?? "local",
+              )}
+              {metric("editable file", taskBriefTask.editable_file)}
+              {metric("runtime", taskBriefTask.runtime_backend)}
+              {metric("turn mode", interactionModeLabel(taskBriefTask.interaction_mode))}
+              {taskBriefTask.supports_max_episodes
+                ? metric(
+                    "default episode cap",
+                    inferSuiteDefaultMaxEpisodes(taskBriefTask.suite_run_config ?? null) ??
+                      taskBriefTask.default_max_episodes ??
+                      "n/a",
+                  )
+                : null}
+              {taskBriefTask.supports_max_episodes
+                ? metric("max turns / episode", inferSuiteDefaultMaxTurns(taskBriefTask.suite_run_config ?? null) ?? "n/a")
+                : null}
+              {taskBriefTask.supports_runtime_config
+                ? metric("tool surface", inferSuiteToolCount(taskBriefTask.suite_run_config ?? null) ?? "backend-owned")
+                : null}
             </div>
+            {taskBriefTask.supports_runtime_config && taskBriefTask.suite_run_config ? (
+              <details className="detail-card" open>
+                <summary className="detail-summary">
+                  <div>
+                    <strong>Runtime slice</strong>
+                    <div className="detail-summary-copy">
+                      Backend-owned split, limits, and tool schema for this task.
+                    </div>
+                  </div>
+                </summary>
+                <div className="detail-body">
+                  <pre className="code-block compact"><code>{JSON.stringify(taskBriefTask.suite_run_config, null, 2)}</code></pre>
+                </div>
+              </details>
+            ) : null}
           </article>
         </section>
       ) : null}
+
     </main>
   );
 }

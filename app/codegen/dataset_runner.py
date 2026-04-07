@@ -16,7 +16,7 @@ from app.codegen.dataset_support import (
     load_question_manifest,
 )
 from app.codegen.llm import ProposalRuntime
-from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.codegen.task_contracts import infer_interaction_mode, infer_optimization_scope, infer_runtime_backend, infer_task_mode
 from app.codegen.trainer import run_codegen_task
 from app.memory.store import MemoryStore
 
@@ -29,6 +29,37 @@ def _question_preview(prompt: str, *, limit: int = QUESTION_PREVIEW_LIMIT) -> st
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 3].rstrip() + "..."
+
+
+def _question_field_names(item: dict[str, Any]) -> list[str]:
+    field_names: list[str] = []
+
+    prompt = str(item.get("raw_prompt") or item.get("prompt") or "").strip()
+    if prompt:
+        field_names.append("prompt")
+
+    context = item.get("raw_context") if item.get("raw_context") is not None else item.get("context")
+    if context not in (None, "", [], {}):
+        field_names.append("context")
+
+    raw_choices = item.get("raw_choices")
+    choices = raw_choices if isinstance(raw_choices, list) and raw_choices else item.get("choices")
+    if isinstance(choices, list) and choices:
+        field_names.append("choices")
+
+    return field_names
+
+
+def _dataset_loaded_message(task_id: str, items: list[dict[str, Any]]) -> str:
+    message = f"Loaded dataset {task_id} with {len(items)} questions."
+    if not items:
+        return message
+
+    field_names = _question_field_names(items[0])
+    if len(field_names) < 2:
+        return message
+
+    return f"{message} Question fields ({len(field_names)}): {', '.join(field_names)}."
 
 
 def _memory_store_for_item(memory_root: Path, dataset_task_id: str, item_id: str) -> MemoryStore:
@@ -350,6 +381,7 @@ def run_dataset_task(
     memory_root: Path,
     session_id: str,
     max_items: int | None = None,
+    eval_model: str | None = None,
     selected_item_ids: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
@@ -357,8 +389,9 @@ def run_dataset_task(
     if not is_dataset_task(task):
         raise ValueError(f"Task {task['id']} does not use the dataset runtime backend.")
 
-    requested_items = max_items if isinstance(max_items, int) and max_items > 0 else int(task.get("dataset_size") or 0) or None
-    items = load_question_manifest(task, min_items=requested_items)
+    task_for_run = {**task, "eval_model": eval_model}
+    requested_items = max_items if isinstance(max_items, int) and max_items > 0 else int(task_for_run.get("dataset_size") or 0) or None
+    items = load_question_manifest(task_for_run, min_items=requested_items)
     if selected_item_ids:
         items = _select_requested_items(items, selected_item_ids)
     elif isinstance(max_items, int) and max_items > 0:
@@ -367,17 +400,17 @@ def run_dataset_task(
         progress_callback(
             {
                 "phase": "dataset_loaded",
-                "task_id": task["id"],
-                "message": f"Loaded dataset {task['id']} with {len(items)} questions.",
+                "task_id": task_for_run["id"],
+                "message": _dataset_loaded_message(task_for_run["id"], items),
             }
         )
 
-    configured_workers = int(task.get("item_workers") or 20)
-    max_workers = max(1, min(configured_workers, proposal_runtime.config.llm_concurrency, len(items)))
+    configured_workers = int(task_for_run.get("item_workers") or 20)
+    max_workers = max(1, min(configured_workers, len(items)))
     if len(items) <= 1:
         item_runs = [
             _run_item(
-                task=task,
+                task=task_for_run,
                 item=items[0],
                 proposal_runtime=proposal_runtime,
                 workspace_root=workspace_root,
@@ -395,7 +428,7 @@ def run_dataset_task(
             future_to_item = {
                 executor.submit(
                     _run_item,
-                    task=task,
+                    task=task_for_run,
                     item=item,
                     proposal_runtime=proposal_runtime,
                     workspace_root=workspace_root,
@@ -413,7 +446,7 @@ def run_dataset_task(
                 except Exception as exc:
                     item_runs.append(
                         _failed_item_result(
-                            task=task,
+                            task=task_for_run,
                             item=item,
                             proposal_runtime=proposal_runtime,
                             memory_before_count=0,
@@ -443,42 +476,55 @@ def run_dataset_task(
     return {
         "run_mode": "llm-required",
         "active_model": proposal_runtime.active_model,
-        "selection_spec": dict(task["selection_spec"]),
-        "benchmark_tier": task["benchmark_tier"],
-        "track": task["track"],
-        "dataset_id": task["dataset_id"],
-        "included_in_main_comparison": task["included_in_main_comparison"],
+        "selection_spec": dict(task_for_run["selection_spec"]),
+        "benchmark_tier": task_for_run["benchmark_tier"],
+        "track": task_for_run["track"],
+        "dataset_id": task_for_run["dataset_id"],
+        "included_in_main_comparison": task_for_run["included_in_main_comparison"],
         "task": {
-            "id": task["id"],
-            "title": task["title"],
-            "description": task["description"],
-            "family": task["family"],
-            "function_name": task["function_name"],
-            "entry_symbol": task["entry_symbol"],
-            "editable_file": task["editable_file"],
-            "answer_metric": task["answer_metric"],
-            "objective_label": task["objective_label"],
-            "objective_direction": task["objective_direction"],
-            "objective_spec": task["objective_spec"],
-            "selection_spec": task["selection_spec"],
-            "generation_budget": task["generation_budget"],
-            "candidate_budget": task["candidate_budget"],
-            "branching_factor": task["branching_factor"],
+            "id": task_for_run["id"],
+            "title": task_for_run["title"],
+            "description": task_for_run["description"],
+            "family": task_for_run["family"],
+            "function_name": task_for_run["function_name"],
+            "entry_symbol": task_for_run["entry_symbol"],
+            "editable_file": task_for_run["editable_file"],
+            "answer_metric": task_for_run["answer_metric"],
+            "objective_label": task_for_run["objective_label"],
+            "objective_direction": task_for_run["objective_direction"],
+            "objective_spec": task_for_run["objective_spec"],
+            "selection_spec": task_for_run["selection_spec"],
+            "generation_budget": task_for_run["generation_budget"],
+            "candidate_budget": task_for_run["candidate_budget"],
+            "branching_factor": task_for_run["branching_factor"],
             "item_workers": configured_workers,
-            "runtime_backend": infer_runtime_backend(task),
-            "task_mode": infer_task_mode(task),
-            "optimization_scope": infer_optimization_scope(task),
-            "benchmark_tier": task["benchmark_tier"],
-            "track": task["track"],
-            "dataset_id": task["dataset_id"],
-            "dataset_size": task["dataset_size"] or len(items),
-            "local_dataset_only": task["local_dataset_only"],
-            "split": task.get("split"),
-            "included_in_main_comparison": task["included_in_main_comparison"],
-            "run_baseline_verifier": bool(task.get("run_baseline_verifier", True)),
+            "runtime_backend": infer_runtime_backend(task_for_run),
+            "task_mode": infer_task_mode(task_for_run),
+            "interaction_mode": infer_interaction_mode(task_for_run),
+            "optimization_scope": infer_optimization_scope(task_for_run),
+            "benchmark_tier": task_for_run["benchmark_tier"],
+            "track": task_for_run["track"],
+            "dataset_id": task_for_run["dataset_id"],
+            "dataset_size": task_for_run["dataset_size"] or len(items),
+            "local_dataset_only": task_for_run["local_dataset_only"],
+            "split": task_for_run.get("split"),
+            "research_line": task_for_run.get("research_line"),
+            "personalization_category": task_for_run.get("personalization_category"),
+            "personalization_focus": task_for_run.get("personalization_focus"),
+            "safety_category": task_for_run.get("safety_category"),
+            "safety_focus": task_for_run.get("safety_focus"),
+            "included_in_main_comparison": task_for_run["included_in_main_comparison"],
+            "supports_eval_model": bool(task_for_run.get("supports_eval_model")),
+            "requires_eval_model": bool(task_for_run.get("requires_eval_model")),
+            "default_eval_model": task_for_run.get("default_eval_model"),
+            "run_baseline_verifier": bool(task_for_run.get("run_baseline_verifier", True)),
+            "supports_max_items": True,
+            "default_max_items": task_for_run["dataset_size"] or len(items),
+            "supports_max_episodes": False,
+            "default_max_episodes": None,
         },
-        "baseline": aggregate_candidate("baseline", item_runs, task["objective_label"]),
-        "winner": aggregate_candidate("winner", item_runs, task["objective_label"]),
+        "baseline": aggregate_candidate("baseline", item_runs, task_for_run["objective_label"]),
+        "winner": aggregate_candidate("winner", item_runs, task_for_run["objective_label"]),
         "dataset_summary": summary,
         "item_runs": item_runs,
         "generations": [],
@@ -498,8 +544,8 @@ def run_dataset_task(
         "run_delta_primary_score": average_delta_primary_score,
         "run_delta_objective": average_objective_delta,
         "selection_reason": (
-            f"Dataset {task['id']} aggregated {summary['winner_passed']}/{summary['total_items']} solved questions "
-            f"with average {task['objective_label']}={summary['avg_winner_objective']}."
+            f"Dataset {task_for_run['id']} aggregated {summary['winner_passed']}/{summary['total_items']} solved questions "
+            f"with average {task_for_run['objective_label']}={summary['avg_winner_objective']}."
         ),
         "total_generations": generations_total,
     }

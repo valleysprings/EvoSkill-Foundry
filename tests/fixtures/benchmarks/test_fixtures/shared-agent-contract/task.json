@@ -3,12 +3,14 @@
   "title": "Shared Agent Contract Fixture",
   "description": "Minimal benchmark-adapter fixture that validates the multi_turn_agent_v1 contract.",
   "benchmark_tier": "experiment",
+  "included_in_main_comparison": false,
   "track": "test_fixtures",
   "dataset_id": "shared-agent-contract",
   "answer_metric": "success_rate",
   "family": "agent-benchmark",
   "runtime_backend": "benchmark_adapter",
   "task_mode": "agent",
+  "interaction_mode": "multi_turn",
   "optimization_scope": "wrapper",
   "task_signature": [
     "benchmark-adapter",
@@ -22,6 +24,7 @@
   "generation_budget": 0,
   "candidate_budget": 0,
   "branching_factor": 1,
+  "item_workers": 1,
   "baseline_summary": "Checked-in shared multi-turn fixture adapter.",
   "prompt_context": "Edit editable.py only. Preserve def step(turn, runtime) and optionally def init_episode(episode).",
   "runtime_suite_config": {

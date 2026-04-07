@@ -46,6 +46,7 @@ class ServerApiTest(unittest.TestCase):
             job_id = server._start_job(
                 "contains-duplicates",
                 make_runtime([]),
+                None,
                 branching_factor=None,
                 generation_budget=None,
                 candidate_budget=None,
@@ -181,9 +182,10 @@ class ServerApiTest(unittest.TestCase):
             try:
                 status, payload = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/runtime")
                 self.assertEqual(status, 200)
-                self.assertEqual(payload["primary_model"], "deepseek-chat")
+                self.assertEqual(payload["default_model"], "deepseek-chat")
                 self.assertIn("deepseek-reasoner", payload["available_models"])
                 self.assertIn("glm-5", payload["available_models"])
+                self.assertEqual(payload["transport"], "openai-compatible")
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -201,21 +203,47 @@ class ServerApiTest(unittest.TestCase):
             aime_2026 = next(task for task in payload["tasks"] if task["id"] == "aime-2026")
             planbench = next(task for task in payload["tasks"] if task["id"] == "planbench")
             arc_challenge = next(task for task in payload["tasks"] if task["id"] == "arc-challenge")
+            bbh = next(task for task in payload["tasks"] if task["id"] == "bbh")
+            mmlu_pro = next(task for task in payload["tasks"] if task["id"] == "mmlu-pro")
             longbench = next((task for task in payload["tasks"] if task["id"] == "longbench-v2"), None)
+            incharacter = next(task for task in payload["tasks"] if task["id"] == "incharacter")
+            characterbench = next(task for task in payload["tasks"] if task["id"] == "characterbench")
+            timechara = next(task for task in payload["tasks"] if task["id"] == "timechara")
+            personamem = next(task for task in payload["tasks"] if task["id"] == "personamem-32k")
+            personafeedback = next(task for task in payload["tasks"] if task["id"] == "personafeedback")
+            alpsbench = next(task for task in payload["tasks"] if task["id"] == "alpsbench")
+            alpbench = next(task for task in payload["tasks"] if task["id"] == "alpbench")
+            socialbench = next(task for task in payload["tasks"] if task["id"] == "socialbench")
+            reference_benchmarks = payload.get("personalization_reference_benchmarks", [])
             sciq = next(task for task in payload["tasks"] if task["id"] == "sciq")
             qasc = next(task for task in payload["tasks"] if task["id"] == "qasc")
             scienceqa = next(task for task in payload["tasks"] if task["id"] == "scienceqa")
             openbookqa = next(task for task in payload["tasks"] if task["id"] == "openbookqa")
+            gpqa_diamond = next(task for task in payload["tasks"] if task["id"] == "gpqa-diamond")
             livecodebench = next(task for task in payload["tasks"] if task["id"] == "livecodebench")
             co_bench = next(task for task in payload["tasks"] if task["id"] == "co-bench")
             task_ids = {task["id"] for task in payload["tasks"]}
             self.assertNotIn("contains-duplicates", task_ids)
             self.assertNotIn("planbench-lite", task_ids)
             self.assertNotIn("terminal-bench", task_ids)
+            self.assertNotIn("bloom-self-preferential-bias", task_ids)
+            self.assertNotIn("bloom-trait-examples", task_ids)
+            self.assertNotIn("roleeval-zh-dev", task_ids)
+            self.assertNotIn("incharacter-acg", task_ids)
+            self.assertNotIn("characterbench-acg", task_ids)
+            self.assertNotIn("ditto", task_ids)
+            self.assertNotIn("rmtbench", task_ids)
+            self.assertNotIn("tom-gibbs-multiturn-jailbreak", task_ids)
+            self.assertNotIn("safemtdata-benign-utility", task_ids)
             self.assertNotIn("tau-bench-retail", task_ids)
             self.assertNotIn("tau-bench-airline", task_ids)
-            self.assertNotIn("nl4opt", task_ids)
-            self.assertNotIn("industryor", task_ids)
+            self.assertNotIn("alfworld", task_ids)
+            self.assertNotIn("assistantbench", task_ids)
+            self.assertNotIn("gaia", task_ids)
+            self.assertNotIn("gaia2", task_ids)
+            self.assertNotIn("osworld", task_ids)
+            self.assertNotIn("charactereval", task_ids)
+            self.assertNotIn("coser", task_ids)
             self.assertEqual(olymmath["dataset_id"], "olymmath")
             self.assertEqual(olymmath["dataset_size"], 100)
             self.assertTrue(olymmath["local_dataset_only"])
@@ -233,10 +261,19 @@ class ServerApiTest(unittest.TestCase):
             self.assertTrue(planbench["included_in_main_comparison"])
             self.assertEqual(planbench["runtime_backend"], "dataset")
             self.assertEqual(planbench["task_mode"], "answer")
+            self.assertEqual(planbench["interaction_mode"], "single_turn")
             self.assertEqual(planbench["optimization_scope"], "wrapper")
             self.assertEqual(arc_challenge["dataset_size"], 299)
             self.assertEqual(arc_challenge["track"], "reasoning_verified")
             self.assertEqual(arc_challenge["split"], "validation:ARC-Challenge")
+            self.assertEqual(bbh["dataset_size"], 6511)
+            self.assertEqual(bbh["track"], "reasoning_verified")
+            self.assertEqual(bbh["split"], "train:all_configs")
+            self.assertEqual(mmlu_pro["dataset_size"], 12032)
+            self.assertEqual(mmlu_pro["track"], "reasoning_verified")
+            self.assertEqual(mmlu_pro["split"], "default:test")
+            self.assertEqual(mmlu_pro["interaction_mode"], "single_turn")
+            self.assertTrue(mmlu_pro["included_in_main_comparison"])
             if longbench is not None:
                 self.assertEqual(longbench["dataset_size"], 503)
                 self.assertEqual(longbench["track"], "longcontext_verified")
@@ -245,6 +282,198 @@ class ServerApiTest(unittest.TestCase):
             else:
                 warning_ids = {warning["task_id"] for warning in payload.get("dataset_warnings", [])}
                 self.assertIn("longbench-v2", warning_ids)
+            self.assertEqual(incharacter["track"], "personalization_verified")
+            self.assertEqual(incharacter["dataset_size"], 448)
+            self.assertEqual(incharacter["interaction_mode"], "single_turn")
+            self.assertEqual(incharacter["task_shape"], "dialogue_judgement")
+            self.assertTrue(incharacter["supports_eval_model"])
+            self.assertTrue(incharacter["requires_eval_model"])
+            self.assertTrue(incharacter["included_in_main_comparison"])
+            self.assertEqual(characterbench["track"], "personalization_verified")
+            self.assertEqual(characterbench["dataset_size"], 3250)
+            self.assertEqual(characterbench["task_shape"], "dialogue_judgement")
+            self.assertTrue(characterbench["supports_eval_model"])
+            self.assertTrue(characterbench["requires_eval_model"])
+            self.assertTrue(characterbench["included_in_main_comparison"])
+            self.assertEqual(timechara["track"], "personalization_verified")
+            self.assertEqual(timechara["dataset_size"], 10895)
+            self.assertEqual(timechara["interaction_mode"], "single_turn")
+            self.assertEqual(timechara["task_shape"], "dialogue_judgement")
+            self.assertTrue(timechara["supports_eval_model"])
+            self.assertTrue(timechara["requires_eval_model"])
+            self.assertTrue(timechara["included_in_main_comparison"])
+            self.assertEqual(personamem["track"], "personalization_verified")
+            self.assertEqual(personamem["dataset_size"], 589)
+            self.assertEqual(personamem["split"], "benchmark:32k")
+            self.assertEqual(personamem["research_line"], "personalization")
+            self.assertEqual(personamem["personalization_category"], "user_persona")
+            self.assertFalse(personamem["supports_eval_model"])
+            self.assertTrue(personamem["included_in_main_comparison"])
+            self.assertEqual(personafeedback["track"], "personalization_verified")
+            self.assertEqual(personafeedback["dataset_size"], 8298)
+            self.assertEqual(personafeedback["task_shape"], "mcq")
+            self.assertEqual(alpsbench["track"], "personalization_verified")
+            self.assertEqual(alpsbench["dataset_size"], 577)
+            self.assertEqual(alpsbench["task_shape"], "mcq")
+            self.assertEqual(alpbench["track"], "personalization_verified")
+            self.assertEqual(alpbench["dataset_size"], 800)
+            self.assertEqual(alpbench["task_shape"], "classification")
+            self.assertEqual(socialbench["track"], "personalization_verified")
+            self.assertEqual(socialbench["dataset_size"], 7702)
+            self.assertEqual(socialbench["split"], "official:all")
+            self.assertEqual(socialbench["research_line"], "personalization")
+            self.assertEqual(socialbench["personalization_category"], "role_play")
+            self.assertEqual(socialbench["task_shape"], "dialogue_judgement")
+            self.assertFalse(socialbench["supports_eval_model"])
+            self.assertTrue(socialbench["included_in_main_comparison"])
+            self.assertEqual(len(reference_benchmarks), 8)
+            reference_ids = {entry["id"] for entry in reference_benchmarks}
+            self.assertNotIn("roleeval", reference_ids)
+            self.assertNotIn("ditto", reference_ids)
+            self.assertNotIn("incharacter-acg", reference_ids)
+            self.assertNotIn("characterbench-acg", reference_ids)
+            self.assertIn("incharacter", reference_ids)
+            self.assertIn("timechara", reference_ids)
+            self.assertNotIn("rmtbench", reference_ids)
+            self.assertNotIn("charactereval", reference_ids)
+            self.assertNotIn("coser", reference_ids)
+            self.assertIn("personafeedback", reference_ids)
+            self.assertNotIn("lifechoice", reference_ids)
+            self.assertNotIn("minimax-role-play-bench", reference_ids)
+            self.assertNotIn("personalens", reference_ids)
+            self.assertNotIn("pdr-bench", reference_ids)
+            reference_modes = {entry["interaction_mode"] for entry in reference_benchmarks}
+            self.assertIn("single_turn", reference_modes)
+            self.assertNotIn("multi_turn", reference_modes)
+            reference_categories = {entry["benchmark_category"] for entry in reference_benchmarks}
+            self.assertIn("explicit_character_persona", reference_categories)
+            self.assertIn("user_persona_personalization", reference_categories)
+            primary_categories = {entry["primary_category"] for entry in reference_benchmarks}
+            self.assertIn("character_portrayal", primary_categories)
+            self.assertIn("consistency_robustness", primary_categories)
+            self.assertIn("user_personalization", primary_categories)
+            self.assertNotIn("agentic_personalization", primary_categories)
+            incharacter_reference = next(entry for entry in reference_benchmarks if entry["id"] == "incharacter")
+            self.assertEqual(incharacter_reference["status"], "local_task")
+            self.assertEqual(incharacter_reference["interaction_mode"], "single_turn")
+            self.assertEqual(incharacter_reference["implementation_status"], "running")
+            self.assertEqual(incharacter_reference["metric_fidelity"], "official")
+            self.assertTrue(incharacter_reference["official_dimensions"])
+            self.assertTrue(incharacter_reference["protocol_summary"])
+            self.assertTrue(incharacter_reference["implementation_note"])
+            socialbench_reference = next(entry for entry in reference_benchmarks if entry["id"] == "socialbench")
+            self.assertEqual(socialbench_reference["status"], "local_task")
+            self.assertEqual(socialbench_reference["implementation_status"], "running")
+            self.assertEqual(socialbench_reference["metric_fidelity"], "official")
+            characterbench_reference = next(entry for entry in reference_benchmarks if entry["id"] == "characterbench")
+            self.assertEqual(characterbench_reference["status"], "local_task")
+            self.assertEqual(characterbench_reference["implementation_status"], "running")
+            self.assertEqual(characterbench_reference["metric_fidelity"], "official")
+            timechara_reference = next(entry for entry in reference_benchmarks if entry["id"] == "timechara")
+            self.assertEqual(timechara_reference["status"], "local_task")
+            self.assertEqual(timechara_reference["interaction_mode"], "single_turn")
+            self.assertEqual(timechara_reference["benchmark_category"], "explicit_character_persona")
+            self.assertEqual(timechara_reference["implementation_status"], "running")
+            self.assertEqual(timechara_reference["primary_category"], "consistency_robustness")
+            self.assertTrue(timechara_reference["requires_eval_model"])
+            self.assertEqual(timechara_reference["metric_fidelity"], "official")
+            personafeedback_reference = next(entry for entry in reference_benchmarks if entry["id"] == "personafeedback")
+            self.assertEqual(personafeedback_reference["status"], "local_task")
+            self.assertEqual(personafeedback_reference["implementation_status"], "running")
+            self.assertEqual(personafeedback_reference["metric_fidelity"], "official")
+            implementation_statuses = {entry["implementation_status"] for entry in reference_benchmarks}
+            self.assertEqual(implementation_statuses, {"running"})
+            self.assertEqual(
+                len([entry for entry in reference_benchmarks if entry["implementation_status"] == "running"]),
+                8,
+            )
+            self.assertEqual(
+                len([entry for entry in reference_benchmarks if entry["implementation_status"] in {"phase1", "phase2"}]),
+                0,
+            )
+            self.assertEqual(
+                len([entry for entry in reference_benchmarks if entry["implementation_status"] == "blocked"]),
+                0,
+            )
+            xstest = next(task for task in payload["tasks"] if task["id"] == "xstest-refusal-calibration")
+            harmbench = next(task for task in payload["tasks"] if task["id"] == "harmbench-text-harmful")
+            jailbreakbench = next(task for task in payload["tasks"] if task["id"] == "jailbreakbench-harmful")
+            or_bench_hard = next(task for task in payload["tasks"] if task["id"] == "or-bench-hard-1k")
+            or_bench_toxic = next(task for task in payload["tasks"] if task["id"] == "or-bench-toxic")
+            hallulens_precise = next(task for task in payload["tasks"] if task["id"] == "hallulens-precisewikiqa")
+            hallulens_mixed = next(task for task in payload["tasks"] if task["id"] == "hallulens-mixedentities")
+            hallulens_longwiki = next(task for task in payload["tasks"] if task["id"] == "hallulens-longwiki")
+            longsafety = next(task for task in payload["tasks"] if task["id"] == "longsafety")
+            self.assertEqual(xstest["track"], "safety_verified")
+            self.assertEqual(xstest["title"], "XSTest Refusal Calibration")
+            self.assertEqual(xstest["dataset_size"], 450)
+            self.assertEqual(xstest["split"], "hf:train")
+            self.assertEqual(xstest["research_line"], "safety")
+            self.assertEqual(xstest["safety_category"], "over_refusal")
+            self.assertEqual(xstest["safety_focus"], "over_refusal")
+            self.assertTrue(xstest["included_in_main_comparison"])
+            self.assertEqual(harmbench["track"], "safety_verified")
+            self.assertEqual(harmbench["dataset_size"], 240)
+            self.assertEqual(harmbench["runtime_backend"], "benchmark_adapter")
+            self.assertEqual(harmbench["interaction_mode"], "single_turn")
+            self.assertEqual(harmbench["safety_category"], "jailbreak_attack")
+            self.assertEqual(harmbench["safety_focus"], "jailbreak_attack")
+            self.assertTrue(harmbench["included_in_main_comparison"])
+            self.assertTrue(harmbench["supports_max_items"])
+            self.assertEqual(harmbench["default_max_items"], 240)
+            self.assertEqual(jailbreakbench["track"], "safety_verified")
+            self.assertEqual(jailbreakbench["dataset_size"], 100)
+            self.assertEqual(jailbreakbench["runtime_backend"], "benchmark_adapter")
+            self.assertEqual(jailbreakbench["interaction_mode"], "single_turn")
+            self.assertEqual(jailbreakbench["safety_category"], "jailbreak_attack")
+            self.assertEqual(jailbreakbench["safety_focus"], "jailbreak_attack")
+            self.assertTrue(jailbreakbench["included_in_main_comparison"])
+            self.assertTrue(jailbreakbench["supports_max_items"])
+            self.assertEqual(jailbreakbench["default_max_items"], 100)
+            self.assertEqual(or_bench_hard["track"], "safety_verified")
+            self.assertEqual(or_bench_hard["dataset_size"], 1319)
+            self.assertEqual(or_bench_hard["interaction_mode"], "single_turn")
+            self.assertEqual(or_bench_hard["safety_category"], "over_refusal")
+            self.assertEqual(or_bench_hard["safety_focus"], "over_refusal")
+            self.assertTrue(or_bench_hard["included_in_main_comparison"])
+            self.assertTrue(or_bench_hard["supports_max_items"])
+            self.assertEqual(or_bench_hard["default_max_items"], 1319)
+            self.assertEqual(or_bench_toxic["track"], "safety_verified")
+            self.assertEqual(or_bench_toxic["dataset_size"], 655)
+            self.assertEqual(or_bench_toxic["interaction_mode"], "single_turn")
+            self.assertEqual(or_bench_toxic["safety_category"], "jailbreak_attack")
+            self.assertEqual(or_bench_toxic["safety_focus"], "should_refuse")
+            self.assertTrue(or_bench_toxic["included_in_main_comparison"])
+            self.assertTrue(or_bench_toxic["supports_max_items"])
+            self.assertEqual(or_bench_toxic["default_max_items"], 655)
+            self.assertEqual(hallulens_precise["track"], "safety_verified")
+            self.assertEqual(hallulens_precise["dataset_size"], 250)
+            self.assertEqual(hallulens_precise["interaction_mode"], "single_turn")
+            self.assertEqual(hallulens_precise["safety_category"], "factuality_hallucination")
+            self.assertEqual(hallulens_precise["safety_focus"], "factuality_hallucination")
+            self.assertTrue(hallulens_precise["supports_max_items"])
+            self.assertEqual(hallulens_precise["default_max_items"], 250)
+            self.assertEqual(hallulens_mixed["track"], "safety_verified")
+            self.assertEqual(hallulens_mixed["dataset_size"], 400)
+            self.assertEqual(hallulens_mixed["interaction_mode"], "single_turn")
+            self.assertEqual(hallulens_mixed["safety_category"], "factuality_hallucination")
+            self.assertEqual(hallulens_mixed["safety_focus"], "factuality_hallucination")
+            self.assertTrue(hallulens_mixed["supports_max_items"])
+            self.assertEqual(hallulens_mixed["default_max_items"], 400)
+            self.assertEqual(hallulens_longwiki["track"], "safety_verified")
+            self.assertEqual(hallulens_longwiki["dataset_size"], 250)
+            self.assertEqual(hallulens_longwiki["interaction_mode"], "single_turn")
+            self.assertEqual(hallulens_longwiki["safety_category"], "factuality_hallucination")
+            self.assertEqual(hallulens_longwiki["safety_focus"], "factuality_hallucination")
+            self.assertTrue(hallulens_longwiki["supports_max_items"])
+            self.assertEqual(hallulens_longwiki["default_max_items"], 250)
+            self.assertEqual(longsafety["track"], "safety_verified")
+            self.assertEqual(longsafety["dataset_size"], 1543)
+            self.assertEqual(longsafety["interaction_mode"], "single_turn")
+            self.assertEqual(longsafety["safety_category"], "jailbreak_attack")
+            self.assertEqual(longsafety["safety_focus"], "safety_degradation")
+            self.assertTrue(longsafety["supports_max_items"])
+            self.assertEqual(longsafety["default_max_items"], 1543)
             self.assertEqual(sciq["track"], "science_verified")
             self.assertEqual(sciq["split"], "validation")
             self.assertEqual(sciq["dataset_size"], 1000)
@@ -255,27 +484,33 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(openbookqa["dataset_size"], 500)
             self.assertEqual(openbookqa["track"], "science_verified")
             self.assertEqual(openbookqa["split"], "validation:additional")
+            self.assertEqual(gpqa_diamond["dataset_size"], 198)
+            self.assertEqual(gpqa_diamond["track"], "science_verified")
+            self.assertEqual(gpqa_diamond["split"], "official:diamond")
+            self.assertEqual(gpqa_diamond["interaction_mode"], "single_turn")
+            self.assertTrue(gpqa_diamond["included_in_main_comparison"])
             self.assertEqual(livecodebench["dataset_size"], 1055)
             self.assertEqual(livecodebench["track"], "coding_verified")
             self.assertEqual(livecodebench["split"], "release_v6:test")
             self.assertTrue(livecodebench["local_dataset_only"])
             self.assertEqual(livecodebench["runtime_backend"], "dataset")
             self.assertEqual(livecodebench["task_mode"], "artifact")
+            self.assertEqual(livecodebench["interaction_mode"], "single_turn")
             self.assertEqual(livecodebench["optimization_scope"], "implementation")
             self.assertFalse(livecodebench["supports_runtime_config"])
             self.assertTrue(livecodebench["supports_max_items"])
             self.assertEqual(livecodebench["default_max_items"], 1055)
             self.assertEqual(co_bench["track"], "or_verified")
-            self.assertFalse(co_bench["included_in_main_comparison"])
+            self.assertTrue(co_bench["included_in_main_comparison"])
             self.assertTrue(co_bench["local_dataset_only"])
             self.assertEqual(co_bench["runtime_backend"], "dataset")
             self.assertEqual(co_bench["task_mode"], "artifact")
-            self.assertEqual(co_bench["optimization_scope"], "wrapper")
+            self.assertEqual(co_bench["optimization_scope"], "implementation")
             self.assertFalse(co_bench["supports_runtime_config"])
             self.assertTrue(co_bench["supports_max_items"])
             self.assertEqual(co_bench["default_max_items"], 36)
             self.assertFalse(co_bench["run_baseline_verifier"])
-            self.assertTrue(all(task["runtime_backend"] == "dataset" for task in payload["tasks"]))
+            self.assertFalse(hallulens_precise["run_baseline_verifier"])
             self.assertEqual([task["id"] for task in payload["tasks"][:5]], ["olymmath", "math-500", "aime-2024", "aime-2025", "aime-2026"])
         finally:
             httpd.shutdown()
@@ -390,6 +625,48 @@ class ServerApiTest(unittest.TestCase):
                     httpd.server_close()
                     thread.join(timeout=5)
 
+    def test_eval_model_is_forwarded_to_job_runner(self) -> None:
+        payload = {
+            "summary": {"generated_at": "now", "policy_model": "deepseek-chat", "eval_model": "gpt-4.1-mini"},
+            "runs": [],
+            "task_catalog": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        (
+                            f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                            "?task_id=contains-duplicates&eval_model=gpt-4.1-mini"
+                        ),
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    self.assertEqual(start_payload["policy_model"], "deepseek-chat")
+                    self.assertEqual(start_payload["eval_model"], "gpt-4.1-mini")
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["policy_model"], "deepseek-chat")
+                    self.assertEqual(completed["eval_model"], "gpt-4.1-mini")
+                    self.assertEqual(write_artifacts.call_args.kwargs["eval_model"], "gpt-4.1-mini")
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
     def test_suite_config_is_forwarded_to_job_runner(self) -> None:
         payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -459,6 +736,41 @@ class ServerApiTest(unittest.TestCase):
                     httpd.server_close()
                     thread.join(timeout=5)
 
+    def test_llm_concurrency_overrides_runtime_for_job(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        (
+                            f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                            "?task_id=math-500&llm_concurrency=7"
+                        ),
+                        method="POST",
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertEqual(completed["llm_concurrency"], 7)
+                    self.assertEqual(write_artifacts.call_args.kwargs["proposal_runtime"].config.llm_concurrency, 7)
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
     def test_max_items_is_forwarded_to_job_runner(self) -> None:
         payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -517,6 +829,56 @@ class ServerApiTest(unittest.TestCase):
                     self.assertEqual(completed["status"], "completed")
                     self.assertEqual(completed["item_ids"], ["10", "1"])
                     self.assertEqual(write_artifacts.call_args.kwargs["selected_item_ids"], ["10", "1"])
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+
+    def test_skill_options_are_forwarded_to_job_runner(self) -> None:
+        payload = {"summary": {"generated_at": "now"}, "runs": [], "task_catalog": []}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / "payload.json"
+            artifact_path.write_text(json.dumps(payload))
+            with (
+                patch.object(server.ProposalRuntime, "from_env", return_value=make_runtime([])),
+                patch.object(server, "write_discrete_artifacts", return_value=artifact_path) as write_artifacts,
+            ):
+                httpd, thread = self._serve()
+                try:
+                    status, start_payload = _fetch_json(
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task?task_id=olymmath",
+                        method="POST",
+                        body=json.dumps(
+                            {
+                                "record_skill": True,
+                                "skill_item_limit": 3,
+                                "selected_skill_id": "olymmath/olymmath-gpt-5-4-task3-20260402_120000.md",
+                            }
+                        ).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 202)
+                    job_id = start_payload["job_id"]
+                    deadline = time.time() + 5
+                    completed = {}
+                    while time.time() < deadline:
+                        _, completed = _fetch_json(f"http://127.0.0.1:{httpd.server_port}/api/job?job_id={job_id}")
+                        if completed["status"] != "running":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(completed["status"], "completed")
+                    self.assertTrue(completed["record_skill"])
+                    self.assertEqual(completed["skill_item_limit"], 3)
+                    self.assertEqual(
+                        completed["selected_skill_id"],
+                        "olymmath/olymmath-gpt-5-4-task3-20260402_120000.md",
+                    )
+                    self.assertTrue(write_artifacts.call_args.kwargs["record_skill"])
+                    self.assertEqual(write_artifacts.call_args.kwargs["skill_item_limit"], 3)
+                    self.assertEqual(
+                        write_artifacts.call_args.kwargs["selected_skill_id"],
+                        "olymmath/olymmath-gpt-5-4-task3-20260402_120000.md",
+                    )
                 finally:
                     httpd.shutdown()
                     httpd.server_close()
@@ -585,6 +947,14 @@ class ServerApiTest(unittest.TestCase):
                     (
                         f"http://127.0.0.1:{httpd.server_port}/api/run-task"
                         "?task_id=olymmath&item_workers=0"
+                    ),
+                    method="POST",
+                )
+                self.assertEqual(status, 400)
+                status, _ = _fetch_json(
+                    (
+                        f"http://127.0.0.1:{httpd.server_port}/api/run-task"
+                        "?task_id=olymmath&llm_concurrency=bad"
                     ),
                     method="POST",
                 )

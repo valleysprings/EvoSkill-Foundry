@@ -7,7 +7,7 @@ from typing import Any
 
 from math_verify import parse, verify
 
-from app.bench.benchmark_support import canonical_numeric_text, choice_answer_matches, public_question_payload
+from app.bench.benchmark_support import canonical_numeric_text, choice_answer_matches, choice_response_display, public_question_payload
 from app.codegen.verifier import load_callable_from_path
 
 VALID_MATH_ANSWER_FORMATS = {"symbolic", "numeric", "choice"}
@@ -73,7 +73,17 @@ def grade_math_answer(item: dict[str, Any], raw_actual: object) -> tuple[bool, s
     if answer_format == "numeric":
         actual = canonical_numeric_text(raw_actual) or ""
         expected = canonical_numeric_text(item["expected_answer"]) or ""
-        return bool(actual) and actual == expected, actual
+        if bool(actual) and actual == expected:
+            return True, actual
+
+        # Some datasets label algebraic closed forms as numeric even though they
+        # require symbolic-equivalence checking rather than fragment extraction.
+        symbolic_actual = _normalize_symbolic_answer(raw_actual)
+        gold = _parse_quiet(_latex_wrap(item["expected_answer"]))
+        answer = _parse_quiet(symbolic_actual)
+        if bool(gold) and bool(answer) and _verify_quiet(gold, answer):
+            return True, symbolic_actual
+        return False, actual
 
     expected = _latex_wrap(item["expected_answer"])
     actual = _normalize_symbolic_answer(raw_actual)
@@ -91,6 +101,7 @@ def evaluate_math_dataset_candidate(*, task, candidate_path, source_code, baseli
     started = time.perf_counter()
     solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
     raw_actual = solver(public_question_payload(item))
+    answer_format = math_answer_format(item)
     passed, actual = grade_math_answer(item, raw_actual)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     row = {
@@ -98,9 +109,18 @@ def evaluate_math_dataset_candidate(*, task, candidate_path, source_code, baseli
         "expected": str(item["expected_answer"]),
         "actual": actual,
         "actual_raw": str(raw_actual or ""),
-        "answer_format": math_answer_format(item),
+        "answer_format": answer_format,
         "passed": passed,
     }
+    if answer_format == "choice":
+        actual_display = choice_response_display(
+            actual,
+            raw_actual=raw_actual,
+            choices=item.get("choices") or [],
+            preferred_choice_index=item.get("metadata", {}).get("correct_choice_index") if passed else None,
+        )
+        if actual_display:
+            row["actual_display"] = actual_display
     return {
         "status": "pass" if passed else "fail",
         "verifier_status": "pass" if passed else "fail",

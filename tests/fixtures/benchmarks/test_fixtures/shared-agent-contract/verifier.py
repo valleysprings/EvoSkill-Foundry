@@ -42,6 +42,7 @@ def run_benchmark_adapter_task(
     workspace_root,
     session_id,
     max_items,
+    max_episodes,
     progress_callback,
     pace_ms,
 ):
@@ -53,6 +54,14 @@ def run_benchmark_adapter_task(
         baseline_metrics=None,
         memory_applied=False,
     )
+    if isinstance(max_episodes, int) and max_episodes > 0:
+        raw_metrics["item_runs"] = list(raw_metrics.get("item_runs") or [])[:max_episodes]
+        raw_metrics["test_results"] = list(raw_metrics.get("test_results") or [])[:max_episodes]
+        raw_metrics["passed_tests"] = sum(1 for item in raw_metrics["item_runs"] if item.get("success"))
+        raw_metrics["total_tests"] = len(raw_metrics["item_runs"])
+        raw_metrics["objective"] = raw_metrics["passed_tests"] / raw_metrics["total_tests"] if raw_metrics["total_tests"] else 0.0
+        raw_metrics["objective_score"] = raw_metrics["objective"]
+        raw_metrics["objective_signal"] = raw_metrics["objective"]
     baseline = build_benchmark_adapter_candidate(
         task=task,
         source_code=source_code,

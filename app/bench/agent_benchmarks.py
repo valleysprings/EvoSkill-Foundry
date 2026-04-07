@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -199,6 +200,26 @@ def _normalize_external_tools(tools: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _resolve_parallel_workers(
+    *,
+    task: dict[str, Any],
+    proposal_runtime: ProposalRuntime,
+    total_items: int,
+    suite_config: dict[str, Any] | None = None,
+) -> int:
+    if total_items <= 1:
+        return 1
+    raw_value = task.get("item_workers")
+    if raw_value is None and isinstance(suite_config, dict):
+        raw_value = suite_config.get("max_concurrency")
+    try:
+        configured = int(raw_value or 1)
+    except (TypeError, ValueError):
+        configured = 1
+    configured = max(1, configured)
+    return max(1, min(configured, total_items))
+
+
 def _history_message(role: str, content: str | None, *, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"role": role, "content": content}
     if tool_calls:
@@ -213,6 +234,22 @@ def _tool_result_message(call_id: str, content: str, *, error: bool = False) -> 
         "tool_call_id": call_id,
         "error": error,
     }
+
+
+def _action_summary(action: dict[str, Any]) -> str:
+    tool_calls = list(action.get("tool_calls") or [])
+    parts: list[str] = []
+    for tool_call in tool_calls:
+        name = str(tool_call.get("name") or "").strip() or "tool"
+        arguments = dict(tool_call.get("arguments") or {})
+        detail = str(arguments.get("command") or arguments.get("message") or "").strip()
+        parts.append(f"{name}({detail})" if detail else name)
+    message = str(action.get("message") or "").strip()
+    if message:
+        parts.append(message)
+    if bool(action.get("done")):
+        parts.append("done")
+    return " | ".join(part for part in parts if part)
 
 
 def _episode_record(
@@ -276,6 +313,15 @@ def _evaluate_scripted_expectations(turn: dict[str, Any], action: dict[str, Any]
     expected_tool_name = str(turn.get("expected_tool_name") or "").strip()
     if expected_tool_name:
         checks.append(any(str(call.get("name") or "") == expected_tool_name for call in action["tool_calls"]))
+    expected_tool_arguments = turn.get("expected_tool_arguments")
+    if isinstance(expected_tool_arguments, dict):
+        matched = False
+        for call in action["tool_calls"]:
+            arguments = dict(call.get("arguments") or {})
+            if all(arguments.get(key) == value for key, value in expected_tool_arguments.items()):
+                matched = True
+                break
+        checks.append(matched)
     expected_message_contains = str(turn.get("expected_message_contains") or "")
     if expected_message_contains:
         checks.append(expected_message_contains in str(action.get("message") or ""))
@@ -289,6 +335,163 @@ def _evaluate_scripted_expectations(turn: dict[str, Any], action: dict[str, Any]
     return (1.0 if success else 0.0), success
 
 
+def _run_scripted_episode(
+    *,
+    task: dict[str, Any],
+    candidate_path: Path,
+    proposal_runtime: ProposalRuntime,
+    suite_name: str,
+    domain: str,
+    suite_config: dict[str, Any],
+    scripted_episode: dict[str, Any],
+    index: int,
+    progress_callback=None,
+    pace_ms: int = 0,
+) -> tuple[int, dict[str, Any], dict[str, Any], bool]:
+    init_episode, step = load_agent_adapter(candidate_path)
+    runtime = AgentRuntime(proposal_runtime)
+    episode_id = str(scripted_episode.get("episode_id") or f"{task['id']}-episode-{index:04d}")
+    instruction = str(scripted_episode.get("instruction") or "").strip()
+    if not instruction:
+        raise ValueError(f"Scripted episode {episode_id} is missing instruction.")
+    episode = _episode_record(
+        suite=suite_name,
+        domain=domain,
+        episode_id=episode_id,
+        instruction=instruction,
+        tools=list(scripted_episode.get("tools") or suite_config.get("tools") or _default_terminal_tools()),
+        limits={"max_turns": int(scripted_episode.get("max_turns") or suite_config.get("max_turns") or 8)},
+        metadata=dict(scripted_episode.get("metadata") or {}),
+        policy=dict(scripted_episode.get("policy") or suite_config.get("policy") or {}),
+    )
+    state_result = init_episode(episode)
+    state = dict(state_result or {})
+    if state_result is not None and not isinstance(state_result, dict):
+        raise ValueError("init_episode(...) must return a dict or None.")
+
+    history: list[dict[str, Any]] = []
+    turns: list[dict[str, Any]] = []
+    scripted_turns = list(scripted_episode.get("turns") or [{"observation": {"instruction": instruction}}])
+    max_turns = int(episode.get("limits", {}).get("max_turns") or len(scripted_turns) or 1)
+    reward = 0.0
+    success = False
+    raw_artifact_path = None
+    emit_progress(
+        progress_callback,
+        task_id=str(task["id"]),
+        phase="episode_started",
+        item_id=episode_id,
+        item_name=episode_id,
+        item_brief=instruction,
+        expected_answer="Solve episode",
+        candidate_status="running",
+        message=f"[{episode_id}] {instruction}",
+        pace_ms=pace_ms,
+    )
+
+    for turn_index, scripted_turn in enumerate(scripted_turns[:max_turns]):
+        observation = dict(scripted_turn.get("observation") or {})
+        if turn_index == 0 and "instruction" not in observation:
+            observation["instruction"] = instruction
+        turn_payload = _turn_record(
+            episode=episode,
+            turn_index=turn_index,
+            history=history,
+            observation=observation,
+            state=state,
+            metadata={"scripted": True},
+        )
+        action = normalize_step_result(step(turn_payload, runtime))
+        tool_results: list[dict[str, Any]] = []
+        scripted_results = list(scripted_turn.get("tool_results") or [])
+        for call_index, tool_call in enumerate(action["tool_calls"]):
+            scripted_result = scripted_results[call_index] if call_index < len(scripted_results) else {}
+            result_content = scripted_result.get("content", scripted_result.get("result", scripted_result))
+            normalized_content = (
+                result_content
+                if isinstance(result_content, str)
+                else json.dumps(result_content, ensure_ascii=True, sort_keys=False)
+            )
+            tool_results.append(
+                {
+                    "tool_call": dict(tool_call),
+                    "content": normalized_content,
+                    "error": bool(scripted_result.get("error", False)),
+                }
+            )
+
+        if action["message"] is not None or action["tool_calls"]:
+            history.append(_history_message("assistant", action["message"], tool_calls=action["tool_calls"]))
+        for item in tool_results:
+            call_id = str(item["tool_call"].get("id") or f"{episode_id}-tool-{turn_index}-{len(turns)}")
+            history.append(_tool_result_message(call_id, str(item["content"]), error=bool(item["error"])))
+
+        expectation_reward, expectation_success = _evaluate_scripted_expectations(scripted_turn, action)
+        if expectation_reward is not None and expectation_success is not None:
+            reward, success = expectation_reward, expectation_success
+        else:
+            reward, success = _extract_turn_reward(
+                scripted_turn,
+                default_success=bool(scripted_episode.get("expected_success")),
+            )
+        raw_artifact_path = scripted_turn.get("raw_artifact_path", raw_artifact_path)
+        turns.append(
+            {
+                "turn_index": turn_index,
+                "observation": observation,
+                "action": action,
+                "tool_results": tool_results,
+            }
+        )
+        emit_progress(
+            progress_callback,
+            task_id=str(task["id"]),
+            phase="episode_turn",
+            item_id=episode_id,
+            item_name=episode_id,
+            item_brief=instruction,
+            expected_answer="Solve episode",
+            candidate_actual=_action_summary(action),
+            candidate_status="running",
+            message=f"[{episode_id}] t{turn_index}: {_action_summary(action) or 'no action'}",
+            pace_ms=pace_ms,
+        )
+        state = dict(action["state"])
+        if action["done"] or bool(scripted_turn.get("stop_after_step")):
+            break
+
+    item_run = {
+        "item_id": episode_id,
+        "item_name": episode_id,
+        "payload": episode,
+        "turns": turns,
+        "success": success,
+        "reward": reward,
+        "raw_artifact_path": raw_artifact_path,
+    }
+    test_result = {
+        "name": episode_id,
+        "expected": 1.0,
+        "actual": reward,
+        "passed": success,
+        "actual_raw": {"payload": episode, "turns": turns},
+    }
+    emit_progress(
+        progress_callback,
+        task_id=str(task["id"]),
+        phase="episode_finished",
+        item_id=episode_id,
+        item_name=episode_id,
+        item_brief=instruction,
+        expected_answer="Solve episode",
+        candidate_actual=_action_summary(dict(turns[-1].get("action") or {})) if turns else ("Episode solved" if success else "Episode not solved"),
+        candidate_status="pass" if success else "fail",
+        message=f"[{episode_id}] {'solved' if success else 'failed'} reward={reward}",
+        pace_ms=pace_ms,
+    )
+    return index, item_run, test_result, success
+
+
 def run_scripted_multi_turn_suite(
     *,
     task: dict[str, Any],
@@ -298,120 +501,61 @@ def run_scripted_multi_turn_suite(
     domain: str,
     scripted_episodes: list[dict[str, Any]],
     suite_config: dict[str, Any],
+    progress_callback=None,
+    pace_ms: int = 0,
 ) -> dict[str, Any]:
-    init_episode, step = load_agent_adapter(candidate_path)
-    runtime = AgentRuntime(proposal_runtime)
     item_runs: list[dict[str, Any]] = []
     test_results: list[dict[str, Any]] = []
     passed = 0
-
-    for index, scripted_episode in enumerate(scripted_episodes, start=1):
-        episode_id = str(scripted_episode.get("episode_id") or f"{task['id']}-episode-{index:04d}")
-        instruction = str(scripted_episode.get("instruction") or "").strip()
-        if not instruction:
-            raise ValueError(f"Scripted episode {episode_id} is missing instruction.")
-        episode = _episode_record(
-            suite=suite_name,
-            domain=domain,
-            episode_id=episode_id,
-            instruction=instruction,
-            tools=list(scripted_episode.get("tools") or suite_config.get("tools") or _default_terminal_tools()),
-            limits={"max_turns": int(scripted_episode.get("max_turns") or suite_config.get("max_turns") or 8)},
-            metadata=dict(scripted_episode.get("metadata") or {}),
-            policy=dict(scripted_episode.get("policy") or suite_config.get("policy") or {}),
-        )
-        state_result = init_episode(episode)
-        state = dict(state_result or {})
-        if state_result is not None and not isinstance(state_result, dict):
-            raise ValueError("init_episode(...) must return a dict or None.")
-
-        history: list[dict[str, Any]] = []
-        turns: list[dict[str, Any]] = []
-        scripted_turns = list(scripted_episode.get("turns") or [{"observation": {"instruction": instruction}}])
-        reward = 0.0
-        success = False
-        raw_artifact_path = None
-
-        for turn_index, scripted_turn in enumerate(scripted_turns):
-            observation = dict(scripted_turn.get("observation") or {})
-            if turn_index == 0 and "instruction" not in observation:
-                observation["instruction"] = instruction
-            turn_payload = _turn_record(
-                episode=episode,
-                turn_index=turn_index,
-                history=history,
-                observation=observation,
-                state=state,
-                metadata={"scripted": True},
+    parallel_workers = _resolve_parallel_workers(
+        task=task,
+        proposal_runtime=proposal_runtime,
+        total_items=len(scripted_episodes),
+        suite_config=suite_config,
+    )
+    ordered_rows: list[tuple[int, dict[str, Any], dict[str, Any], bool]] = []
+    if parallel_workers <= 1:
+        for index, scripted_episode in enumerate(scripted_episodes, start=1):
+            ordered_rows.append(
+                _run_scripted_episode(
+                    task=task,
+                    candidate_path=candidate_path,
+                    proposal_runtime=proposal_runtime,
+                    suite_name=suite_name,
+                    domain=domain,
+                    suite_config=suite_config,
+                    scripted_episode=scripted_episode,
+                    index=index,
+                    progress_callback=progress_callback,
+                    pace_ms=pace_ms,
+                )
             )
-            action = normalize_step_result(step(turn_payload, runtime))
-            tool_results: list[dict[str, Any]] = []
-            scripted_results = list(scripted_turn.get("tool_results") or [])
-            for call_index, tool_call in enumerate(action["tool_calls"]):
-                scripted_result = scripted_results[call_index] if call_index < len(scripted_results) else {}
-                result_content = scripted_result.get("content", scripted_result.get("result", scripted_result))
-                normalized_content = (
-                    result_content
-                    if isinstance(result_content, str)
-                    else json.dumps(result_content, ensure_ascii=True, sort_keys=False)
+    else:
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            futures = [
+                executor.submit(
+                    _run_scripted_episode,
+                    task=task,
+                    candidate_path=candidate_path,
+                    proposal_runtime=proposal_runtime,
+                    suite_name=suite_name,
+                    domain=domain,
+                    suite_config=suite_config,
+                    scripted_episode=scripted_episode,
+                    index=index,
+                    progress_callback=progress_callback,
+                    pace_ms=pace_ms,
                 )
-                tool_results.append(
-                    {
-                        "tool_call": dict(tool_call),
-                        "content": normalized_content,
-                        "error": bool(scripted_result.get("error", False)),
-                    }
-                )
+                for index, scripted_episode in enumerate(scripted_episodes, start=1)
+            ]
+            for future in as_completed(futures):
+                ordered_rows.append(future.result())
 
-            if action["message"] is not None or action["tool_calls"]:
-                history.append(_history_message("assistant", action["message"], tool_calls=action["tool_calls"]))
-            for item in tool_results:
-                call_id = str(item["tool_call"].get("id") or f"{episode_id}-tool-{turn_index}-{len(turns)}")
-                history.append(_tool_result_message(call_id, str(item["content"]), error=bool(item["error"])))
-
-            expectation_reward, expectation_success = _evaluate_scripted_expectations(scripted_turn, action)
-            if expectation_reward is not None and expectation_success is not None:
-                reward, success = expectation_reward, expectation_success
-            else:
-                reward, success = _extract_turn_reward(
-                    scripted_turn,
-                    default_success=bool(scripted_episode.get("expected_success")),
-                )
-            raw_artifact_path = scripted_turn.get("raw_artifact_path", raw_artifact_path)
-            turns.append(
-                {
-                    "turn_index": turn_index,
-                    "observation": observation,
-                    "action": action,
-                    "tool_results": tool_results,
-                }
-            )
-            state = dict(action["state"])
-            if action["done"] or bool(scripted_turn.get("stop_after_step")):
-                break
-
+    for _index, item_run, test_result, success in sorted(ordered_rows, key=lambda row: row[0]):
         if success:
             passed += 1
-        item_runs.append(
-            {
-                "item_id": episode_id,
-                "item_name": episode_id,
-                "payload": episode,
-                "turns": turns,
-                "success": success,
-                "reward": reward,
-                "raw_artifact_path": raw_artifact_path,
-            }
-        )
-        test_results.append(
-            {
-                "name": episode_id,
-                "expected": 1.0,
-                "actual": reward,
-                "passed": success,
-                "actual_raw": {"payload": episode, "turns": turns},
-            }
-        )
+        item_runs.append(item_run)
+        test_results.append(test_result)
 
     total = len(item_runs)
     objective = passed / total if total else 0.0
@@ -714,6 +858,7 @@ def evaluate_harbor_terminal_candidate(
     workspace_root: Path,
     session_id: str,
     max_items: int | None,
+    max_episodes: int | None,
     proposal_runtime: ProposalRuntime | None = None,
     progress_callback=None,
     pace_ms: int = 0,
@@ -729,8 +874,10 @@ def evaluate_harbor_terminal_candidate(
             proposal_runtime=runtime,
             suite_name="terminal-bench",
             domain="terminal",
-            scripted_episodes=scripted_episodes[: max_items or len(scripted_episodes)],
+            scripted_episodes=scripted_episodes[: max_episodes or len(scripted_episodes)],
             suite_config=config,
+            progress_callback=progress_callback,
+            pace_ms=pace_ms,
         )
 
     require_command("git")
@@ -742,8 +889,13 @@ def evaluate_harbor_terminal_candidate(
     dataset_name = str(config.get("dataset") or "terminal-bench@2.0")
     provider = str(config.get("model_provider") or "openai")
     model_name = _prefixed_model_name(str(config.get("model_name") or runtime.active_model), provider)
-    task_limit = int(max_items if isinstance(max_items, int) and max_items > 0 else config.get("task_limit") or 5)
-    max_concurrency = int(config.get("max_concurrency") or 1)
+    task_limit = int(max_episodes if isinstance(max_episodes, int) and max_episodes > 0 else config.get("task_limit") or 5)
+    max_concurrency = _resolve_parallel_workers(
+        task=task,
+        proposal_runtime=runtime,
+        total_items=task_limit,
+        suite_config=config,
+    )
     job_name = _sanitize_name(f"{task['id']}-{session_id}")
     agent_import_path = _write_harbor_agent_bridge(
         bridge_dir=bridge_dir,
@@ -809,6 +961,7 @@ def run_harbor_terminal_bench(
     workspace_root: Path,
     session_id: str,
     max_items: int | None,
+    max_episodes: int | None,
     progress_callback,
     pace_ms: int,
 ) -> dict[str, Any]:
@@ -820,6 +973,7 @@ def run_harbor_terminal_bench(
         workspace_root=workspace_root,
         session_id=session_id,
         max_items=max_items,
+        max_episodes=max_episodes,
         progress_callback=progress_callback,
         pace_ms=pace_ms,
     )
@@ -1152,6 +1306,7 @@ def evaluate_tau_bench_candidate(
     workspace_root: Path,
     session_id: str,
     max_items: int | None,
+    max_episodes: int | None,
     env_name: str,
     proposal_runtime: ProposalRuntime | None = None,
     progress_callback=None,
@@ -1168,8 +1323,10 @@ def evaluate_tau_bench_candidate(
             proposal_runtime=runtime,
             suite_name="tau-bench",
             domain=env_name,
-            scripted_episodes=scripted_episodes[: max_items or len(scripted_episodes)],
+            scripted_episodes=scripted_episodes[: max_episodes or len(scripted_episodes)],
             suite_config=config,
+            progress_callback=progress_callback,
+            pace_ms=pace_ms,
         )
     emit_progress(
         progress_callback,
@@ -1184,7 +1341,7 @@ def evaluate_tau_bench_candidate(
         proposal_runtime=runtime,
         suite_config=config,
         env_name=env_name,
-        max_items=max_items,
+        max_items=max_episodes if isinstance(max_episodes, int) and max_episodes > 0 else max_items,
     )
 
 
@@ -1197,6 +1354,7 @@ def run_tau_bench_suite(
     workspace_root: Path,
     session_id: str,
     max_items: int | None,
+    max_episodes: int | None,
     env_name: str,
     progress_callback,
     pace_ms: int,
@@ -1209,6 +1367,7 @@ def run_tau_bench_suite(
         workspace_root=workspace_root,
         session_id=session_id,
         max_items=max_items,
+        max_episodes=max_episodes,
         env_name=env_name,
         progress_callback=progress_callback,
         pace_ms=pace_ms,

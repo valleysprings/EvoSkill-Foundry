@@ -4,10 +4,15 @@ type StartJobOptions = {
   branchingFactor?: number | null;
   generationBudget?: number | null;
   candidateBudget?: number | null;
+  evalModel?: string | null;
+  llmConcurrency?: number | null;
   itemWorkers?: number | null;
   maxItems?: number | null;
+  maxEpisodes?: number | null;
   itemIds?: string[] | null;
   suiteConfig?: Record<string, unknown> | null;
+  recordSkill?: boolean;
+  selectedSkillId?: string | null;
 };
 
 type JsonOptions = RequestInit | undefined;
@@ -46,7 +51,7 @@ export async function startJob(
   taskId: string | null,
   model: string,
   options: StartJobOptions = {},
-): Promise<{ job_id: string; model: string }> {
+): Promise<{ job_id: string; model: string; policy_model?: string | null; eval_model?: string | null }> {
   const params = new URLSearchParams();
   if (model) {
     params.set("model", model);
@@ -54,8 +59,10 @@ export async function startJob(
   if (taskId) {
     params.set("task_id", taskId);
   }
-  const { branchingFactor, generationBudget, candidateBudget, itemWorkers, maxItems, itemIds } = options;
+  const { branchingFactor, generationBudget, candidateBudget, evalModel, llmConcurrency, itemWorkers, maxItems, maxEpisodes, itemIds } = options;
   const suiteConfig = options.suiteConfig;
+  const recordSkill = options.recordSkill;
+  const selectedSkillId = options.selectedSkillId;
   if (typeof branchingFactor === "number" && Number.isFinite(branchingFactor)) {
     params.set("branching_factor", String(Math.max(1, Math.floor(branchingFactor))));
   }
@@ -65,11 +72,20 @@ export async function startJob(
   if (typeof candidateBudget === "number" && Number.isFinite(candidateBudget)) {
     params.set("candidate_budget", String(Math.max(1, Math.floor(candidateBudget))));
   }
+  if (typeof evalModel === "string" && evalModel.trim()) {
+    params.set("eval_model", evalModel.trim());
+  }
+  if (typeof llmConcurrency === "number" && Number.isFinite(llmConcurrency)) {
+    params.set("llm_concurrency", String(Math.max(1, Math.floor(llmConcurrency))));
+  }
   if (typeof itemWorkers === "number" && Number.isFinite(itemWorkers)) {
     params.set("item_workers", String(Math.max(1, Math.floor(itemWorkers))));
   }
   if (typeof maxItems === "number" && Number.isFinite(maxItems)) {
     params.set("max_items", String(Math.max(1, Math.floor(maxItems))));
+  }
+  if (typeof maxEpisodes === "number" && Number.isFinite(maxEpisodes)) {
+    params.set("max_episodes", String(Math.max(1, Math.floor(maxEpisodes))));
   }
   if (Array.isArray(itemIds) && itemIds.length) {
     params.set("item_ids", itemIds.join(","));
@@ -77,11 +93,21 @@ export async function startJob(
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const url = taskId ? `/api/run-task${suffix}` : `/api/run-sequence${suffix}`;
   const request: RequestInit = { method: "POST" };
+  const requestBody: Record<string, unknown> = {};
   if (suiteConfig && taskId) {
-    request.headers = { "Content-Type": "application/json" };
-    request.body = JSON.stringify({ suite_config: suiteConfig });
+    requestBody.suite_config = suiteConfig;
   }
-  return fetchJson<{ job_id: string; model: string }>(url, request);
+  if (taskId && typeof recordSkill === "boolean") {
+    requestBody.record_skill = recordSkill;
+  }
+  if (taskId && typeof selectedSkillId === "string" && selectedSkillId.trim()) {
+    requestBody.selected_skill_id = selectedSkillId.trim();
+  }
+  if (taskId && Object.keys(requestBody).length) {
+    request.headers = { "Content-Type": "application/json" };
+    request.body = JSON.stringify(requestBody);
+  }
+  return fetchJson<{ job_id: string; model: string; policy_model?: string | null; eval_model?: string | null }>(url, request);
 }
 
 export async function loadJob(jobId: string): Promise<JobState> {

@@ -1,0 +1,79 @@
+{
+  "id": "alfworld",
+  "title": "ALFWorld Text",
+  "description": "Evaluate a multi-turn text agent against the official ALFWorld TextWorld environment on the mirrored valid_seen split.",
+  "benchmark_tier": "comparable",
+  "track": "agent_verified",
+  "dataset_id": "alfworld_text_valid_seen",
+  "dataset_size": 140,
+  "answer_metric": "success_rate",
+  "family": "agent-benchmark",
+  "runtime_backend": "benchmark_adapter",
+  "task_mode": "agent",
+  "interaction_mode": "multi_turn",
+  "included_in_main_comparison": false,
+  "optimization_scope": "wrapper",
+  "task_signature": [
+    "benchmark-adapter",
+    "agent",
+    "multi-turn",
+    "alfworld",
+    "text-environment"
+  ],
+  "editable_file": "editable.py",
+  "verifier": "verifier.py",
+  "entry_symbol": "step",
+  "prepare_ready_paths": [
+    "data/json_2.1.1",
+    "data/logic",
+    "data/detectors"
+  ],
+  "generation_budget": 2,
+  "candidate_budget": 1,
+  "branching_factor": 2,
+  "item_workers": 2,
+  "baseline_summary": "A placeholder ALFWorld adapter that never emits an action.",
+  "prompt_context": "Edit editable.py only. Preserve def step(turn, runtime) and optionally def init_episode(episode). Each turn should inspect the current observation, history, and state, then emit an `act(command)` tool call when it knows the next ALFWorld-style text action.",
+  "runtime_suite_config": {
+    "episode_split": "valid_seen",
+    "task_limit": 140,
+    "max_turns": 50,
+    "tools": [
+      {
+        "name": "act",
+        "description": "Submit one ALFWorld text action such as `take apple`, `open fridge`, or `put apple in fridge`.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "One text action to execute in the environment."
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      },
+      {
+        "name": "complete",
+        "description": "Declare the episode solved.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "objective_spec": {
+    "display_name": "Successful episode rate",
+    "direction": "max",
+    "unit": "ratio",
+    "summary_template": "Higher successful-episode rate is better across ALFWorld multi-turn episodes.",
+    "formula": "success_rate = successful_episodes / total_episodes"
+  }
+}

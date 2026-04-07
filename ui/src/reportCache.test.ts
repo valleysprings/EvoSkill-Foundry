@@ -46,12 +46,15 @@ function task(id: string): TaskSummary {
     split: "test",
     runtime_backend: "dataset",
     task_mode: "artifact",
+    interaction_mode: "single_turn",
     optimization_scope: "implementation",
     included_in_main_comparison: true,
     supports_runtime_config: false,
     suite_run_config: null,
     supports_max_items: true,
     default_max_items: 1,
+    supports_max_episodes: false,
+    default_max_episodes: null,
   };
 }
 
@@ -74,14 +77,19 @@ function payload(taskIds: string[]): Payload {
       flywheel: [],
       proposal_engine: {
         mode: "llm-required",
-        primary_model: "deepseek-chat",
+        profile: "test-profile",
+        provider: "openai",
+        transport: "openai-compatible",
+        default_model: "deepseek-chat",
         active_model: "deepseek-chat",
         available_models: ["deepseek-chat"],
-        api_base: "http://example.test/v1",
+        base_url: "http://example.test/v1",
         temperature: 0.2,
         max_tokens: 4096,
         timeout_s: 45,
         llm_concurrency: 20,
+        supports_tools: true,
+        supports_json_mode: true,
       },
     },
     formulas: {
@@ -144,6 +152,12 @@ test("prefers the latest cached task over the default first task", () => {
   assert.equal(initialTaskId(tasks, payload(["livecodebench"])), "livecodebench");
 });
 
+test("skips inactive cached tasks when choosing the default task", () => {
+  const inactive = { ...task("gaia"), included_in_main_comparison: false };
+  const active = task("olymmath");
+  assert.equal(initialTaskId([inactive, active], payload(["gaia"])), "olymmath");
+});
+
 test("returns only the selected task payload when the cached report matches", () => {
   const scoped = taskScopedPayload(payload(["livecodebench", "olymmath"]), "livecodebench");
   assert.ok(scoped);
@@ -162,21 +176,27 @@ test("prefers current task catalog metadata over stale cached task catalog entri
     included_in_main_comparison: false,
     runtime_backend: "dataset",
     task_mode: "artifact",
+    interaction_mode: "single_turn",
     optimization_scope: "wrapper",
     supports_runtime_config: false,
     local_dataset_only: true,
     dataset_size: 36,
     default_max_items: 36,
+    supports_max_episodes: false,
+    default_max_episodes: null,
   };
   const staleCached = {
     ...current,
     runtime_backend: "benchmark_adapter",
     task_mode: "agent",
+    interaction_mode: "multi_turn",
     optimization_scope: "prompt",
     supports_runtime_config: true,
     local_dataset_only: false,
     dataset_size: undefined,
     default_max_items: 3,
+    supports_max_episodes: true,
+    default_max_episodes: 3,
   };
 
   const [merged] = mergeTaskCatalogs([current], [staleCached]);

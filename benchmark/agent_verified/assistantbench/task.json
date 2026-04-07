@@ -1,0 +1,77 @@
+{
+  "id": "assistantbench",
+  "title": "AssistantBench",
+  "description": "Evaluate a multi-turn assistant agent against AssistantBench-style general tool-use tasks.",
+  "benchmark_tier": "comparable",
+  "track": "agent_verified",
+  "dataset_id": "assistantbench_public_validation",
+  "dataset_size": 214,
+  "answer_metric": "success_rate",
+  "family": "agent-benchmark",
+  "runtime_backend": "benchmark_adapter",
+  "task_mode": "agent",
+  "interaction_mode": "multi_turn",
+  "included_in_main_comparison": false,
+  "optimization_scope": "wrapper",
+  "task_signature": [
+    "benchmark-adapter",
+    "agent",
+    "multi-turn",
+    "assistantbench",
+    "tool-use"
+  ],
+  "editable_file": "editable.py",
+  "verifier": "verifier.py",
+  "entry_symbol": "step",
+  "prepare_ready_paths": [
+    "data/benchmark_info.json"
+  ],
+  "generation_budget": 2,
+  "candidate_budget": 1,
+  "branching_factor": 2,
+  "item_workers": 2,
+  "baseline_summary": "A placeholder AssistantBench adapter that never emits a tool action.",
+  "prompt_context": "Edit editable.py only. Preserve def step(turn, runtime) and optionally def init_episode(episode). Each turn should inspect the current observation, plan the next subgoal, and emit an `act(command)` tool call only when it has a concrete next action.",
+  "runtime_suite_config": {
+    "task_limit": 214,
+    "max_turns": 40,
+    "task_split": "validation",
+    "tools": [
+      {
+        "name": "act",
+        "description": "Submit one assistant action to the underlying benchmark runtime.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "One textual action for the current turn."
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      },
+      {
+        "name": "complete",
+        "description": "Declare the task complete and optionally include a final answer.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "objective_spec": {
+    "display_name": "Successful task rate",
+    "direction": "max",
+    "unit": "ratio",
+    "summary_template": "Higher successful-task rate is better across AssistantBench multi-turn tasks.",
+    "formula": "success_rate = successful_tasks / total_tasks"
+  }
+}

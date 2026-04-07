@@ -23,6 +23,8 @@ from app.codegen.errors import AutoresearchError, ConfigError
 from app.codegen.llm import ProposalRuntime
 from app.configs.prompts import MODEL_COMPLETION_MAX_ATTEMPTS
 from app.entries.runner import ROOT, load_cached_discrete_payload, write_discrete_artifacts
+from app.bench.personalization_references import load_personalization_reference_benchmarks
+from app.memory.skills import annotate_task_catalog_with_skills
 
 
 UI_DIR = ROOT / "ui" / "dist"
@@ -37,8 +39,9 @@ JOB_STALL_REASONER_EXTRA_S = 120.0
 QUIET_ACCESS_LOG_PATHS = frozenset({"/api/latest-run", "/api/job", "/api/health"})
 
 
-def _runtime_for_request(model: str | None = None) -> ProposalRuntime:
+def _runtime_for_request(model: str | None = None, llm_concurrency: int | None = None) -> ProposalRuntime:
     runtime = ProposalRuntime.from_env()
+    runtime = runtime.with_llm_concurrency(llm_concurrency)
     return runtime.with_model(model)
 
 
@@ -102,6 +105,28 @@ def _parse_item_ids(raw_value: str | None) -> list[str] | None:
     tokens = [token.strip() for token in raw_value.replace("\n", ",").split(",")]
     selected = [token for token in tokens if token]
     return selected or None
+
+
+def _parse_body_bool(raw_value: object, field: str) -> bool | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise ConfigError(f"{field} must be a boolean.")
+
+
+def _parse_body_positive_int(raw_value: object, field: str) -> int | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, bool):
+        raise ConfigError(f"{field} must be a positive integer.")
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field} must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ConfigError(f"{field} must be a positive integer.")
+    return parsed
 
 
 def _read_json_body(handler: SimpleHTTPRequestHandler) -> dict[str, object]:
@@ -336,19 +361,25 @@ def _run_job_process(
     event_queue,
     task_id: str | None,
     model: str | None,
+    eval_model: str | None,
+    llm_concurrency: int,
     branching_factor: int | None,
     generation_budget: int | None,
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    max_episodes: int | None,
     selected_item_ids: list[str] | None,
     suite_config: dict[str, object] | None,
+    record_skill: bool,
+    skill_item_limit: int | None,
+    selected_skill_id: str | None,
 ) -> None:
     def progress(event: dict) -> None:
         event_queue.put({"type": "event", "event": event})
 
     try:
-        proposal_runtime = _runtime_for_request(model)
+        proposal_runtime = _runtime_for_request(model, llm_concurrency)
         artifact = write_discrete_artifacts(
             task_id=task_id,
             progress_callback=progress,
@@ -359,8 +390,13 @@ def _run_job_process(
             branching_factor=branching_factor,
             item_workers=item_workers,
             max_items=max_items,
+            max_episodes=max_episodes,
             selected_item_ids=selected_item_ids,
             suite_config=suite_config,
+            eval_model=eval_model,
+            record_skill=record_skill,
+            skill_item_limit=skill_item_limit,
+            selected_skill_id=selected_skill_id,
         )
         event_queue.put({"type": "completed", "artifact_path": str(artifact)})
     except Exception as exc:  # noqa: BLE001
@@ -371,14 +407,20 @@ def _run_job(
     job_id: str,
     task_id: str | None,
     proposal_runtime: ProposalRuntime,
+    eval_model: str | None,
     stall_timeout_s: float,
+    llm_concurrency: int,
     branching_factor: int | None,
     generation_budget: int | None,
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
+    max_episodes: int | None,
     selected_item_ids: list[str] | None,
     suite_config: dict[str, object] | None,
+    record_skill: bool,
+    skill_item_limit: int | None,
+    selected_skill_id: str | None,
 ) -> None:
     if _should_run_job_inline():
         def progress(event: dict) -> None:
@@ -397,8 +439,13 @@ def _run_job(
                 branching_factor=branching_factor,
                 item_workers=item_workers,
                 max_items=max_items,
+                max_episodes=max_episodes,
                 selected_item_ids=selected_item_ids,
                 suite_config=suite_config,
+                eval_model=eval_model,
+                record_skill=record_skill,
+                skill_item_limit=skill_item_limit,
+                selected_skill_id=selected_skill_id,
             )
             payload = json.loads(Path(artifact).read_text())
             with JOB_LOCK:
@@ -420,13 +467,19 @@ def _run_job(
             event_queue,
             task_id,
             proposal_runtime.active_model,
+            eval_model,
+            llm_concurrency,
             branching_factor,
             generation_budget,
             candidate_budget,
             item_workers,
             max_items,
+            max_episodes,
             selected_item_ids,
             suite_config,
+            record_skill,
+            skill_item_limit,
+            selected_skill_id,
         ),
         daemon=True,
     )
@@ -512,13 +565,18 @@ def _run_job(
 def _start_job(
     task_id: str | None,
     proposal_runtime: ProposalRuntime,
+    eval_model: str | None,
     branching_factor: int | None,
     generation_budget: int | None,
     candidate_budget: int | None,
     item_workers: int | None,
     max_items: int | None,
-    selected_item_ids: list[str] | None,
-    suite_config: dict[str, object] | None,
+    max_episodes: int | None = None,
+    selected_item_ids: list[str] | None = None,
+    suite_config: dict[str, object] | None = None,
+    record_skill: bool = False,
+    skill_item_limit: int | None = None,
+    selected_skill_id: str | None = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
     stall_timeout_s = _job_stall_timeout_s(proposal_runtime)
@@ -529,16 +587,23 @@ def _start_job(
             "branching_factor": branching_factor,
             "generation_budget": generation_budget,
             "candidate_budget": candidate_budget,
+            "llm_concurrency": proposal_runtime.config.llm_concurrency,
             "item_workers": item_workers,
             "max_items": max_items,
+            "max_episodes": max_episodes,
             "item_ids": list(selected_item_ids) if selected_item_ids is not None else None,
             "suite_config": suite_config,
+            "record_skill": record_skill,
+            "skill_item_limit": skill_item_limit,
+            "selected_skill_id": selected_skill_id,
             "events": [],
             "payload": None,
             "terminal": False,
             "error_type": None,
             "error": None,
             "model": proposal_runtime.active_model,
+            "policy_model": proposal_runtime.active_model,
+            "eval_model": eval_model,
             "started_at": time.time(),
             "last_progress_at": time.time(),
             "stall_timeout_s": stall_timeout_s,
@@ -549,14 +614,20 @@ def _start_job(
             job_id,
             task_id,
             proposal_runtime,
+            eval_model,
             stall_timeout_s,
+            proposal_runtime.config.llm_concurrency,
             branching_factor,
             generation_budget,
             candidate_budget,
             item_workers,
             max_items,
+            max_episodes,
             selected_item_ids,
             suite_config,
+            record_skill,
+            skill_item_limit,
+            selected_skill_id,
         ),
         daemon=True,
     )
@@ -591,8 +662,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
             _json_response(
                 self,
                 {
-                    "tasks": list_codegen_task_summaries(),
+                    "tasks": annotate_task_catalog_with_skills(list_codegen_task_summaries()),
                     "dataset_warnings": list_missing_local_dataset_warnings(),
+                    "personalization_reference_benchmarks": load_personalization_reference_benchmarks(),
                 },
             )
             return
@@ -642,26 +714,42 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 return
             task_id = query.get("task_id", [None])[0]
             model = query.get("model", [None])[0]
+            eval_model = str(query.get("eval_model", [None])[0] or "").strip() or None
+            llm_concurrency_value = query.get("llm_concurrency", [None])[0]
             branching_value = query.get("branching_factor", [None])[0]
             generation_value = query.get("generation_budget", [None])[0]
             candidate_value = query.get("candidate_budget", [None])[0]
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
+            max_episodes_value = query.get("max_episodes", [None])[0]
             item_ids_value = query.get("item_ids", [None])[0]
             suite_config_value = request_body.get("suite_config")
+            record_skill_value = request_body.get("record_skill")
+            skill_item_limit_value = request_body.get("skill_item_limit")
+            selected_skill_id_value = request_body.get("selected_skill_id")
             if task_id is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "task_id is required")
                 return
             try:
+                llm_concurrency = _parse_positive_int(llm_concurrency_value, "llm_concurrency")
                 branching_factor = _parse_positive_int(branching_value, "branching_factor")
                 generation_budget = _parse_positive_int(generation_value, "generation_budget")
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                max_episodes = _parse_positive_int(max_episodes_value, "max_episodes")
                 selected_item_ids = _parse_item_ids(item_ids_value)
                 if suite_config_value is not None and not isinstance(suite_config_value, dict):
                     raise ConfigError("suite_config must be a JSON object.")
                 suite_config = dict(suite_config_value) if isinstance(suite_config_value, dict) else None
+                record_skill = _parse_body_bool(record_skill_value, "record_skill") or False
+                skill_item_limit = _parse_body_positive_int(skill_item_limit_value, "skill_item_limit")
+                if selected_skill_id_value is None:
+                    selected_skill_id = None
+                elif isinstance(selected_skill_id_value, str):
+                    selected_skill_id = selected_skill_id_value.strip() or None
+                else:
+                    raise ConfigError("selected_skill_id must be a string.")
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -669,7 +757,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                runtime = _runtime_for_request(model)
+                runtime = _runtime_for_request(model, llm_concurrency)
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, _error_payload(exc), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -679,15 +767,22 @@ class DemoHandler(SimpleHTTPRequestHandler):
                     "job_id": _start_job(
                         task_id,
                         runtime,
+                        eval_model,
                         branching_factor,
                         generation_budget,
                         candidate_budget,
                         item_workers,
                         max_items,
+                        max_episodes,
                         selected_item_ids,
                         suite_config,
+                        record_skill,
+                        skill_item_limit,
+                        selected_skill_id,
                     ),
                     "model": runtime.active_model,
+                    "policy_model": runtime.active_model,
+                    "eval_model": eval_model,
                 },
                 status=HTTPStatus.ACCEPTED,
             )
@@ -700,24 +795,37 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             model = query.get("model", [None])[0]
+            eval_model = str(query.get("eval_model", [None])[0] or "").strip() or None
+            llm_concurrency_value = query.get("llm_concurrency", [None])[0]
             branching_value = query.get("branching_factor", [None])[0]
             generation_value = query.get("generation_budget", [None])[0]
             candidate_value = query.get("candidate_budget", [None])[0]
             item_workers_value = query.get("item_workers", [None])[0]
             max_items_value = query.get("max_items", [None])[0]
+            max_episodes_value = query.get("max_episodes", [None])[0]
             item_ids_value = query.get("item_ids", [None])[0]
             try:
+                llm_concurrency = _parse_positive_int(llm_concurrency_value, "llm_concurrency")
                 branching_factor = _parse_positive_int(branching_value, "branching_factor")
                 generation_budget = _parse_positive_int(generation_value, "generation_budget")
                 candidate_budget = _parse_positive_int(candidate_value, "candidate_budget")
                 item_workers = _parse_positive_int(item_workers_value, "item_workers")
                 max_items = _parse_positive_int(max_items_value, "max_items")
+                max_episodes = _parse_positive_int(max_episodes_value, "max_episodes")
                 selected_item_ids = _parse_item_ids(item_ids_value)
                 suite_config_value = request_body.get("suite_config")
                 if suite_config_value is not None:
                     raise ConfigError("suite_config is only supported for /api/run-task.")
+                if request_body.get("record_skill") is not None:
+                    raise ConfigError("record_skill is only supported for /api/run-task.")
+                if request_body.get("skill_item_limit") is not None:
+                    raise ConfigError("skill_item_limit is only supported for /api/run-task.")
+                if request_body.get("selected_skill_id") is not None:
+                    raise ConfigError("selected_skill_id is only supported for /api/run-task.")
                 if selected_item_ids is not None:
                     raise ConfigError("item_ids is only supported for /api/run-task.")
+                if max_episodes is not None:
+                    raise ConfigError("max_episodes is only supported for /api/run-task.")
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -725,7 +833,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                runtime = _runtime_for_request(model)
+                runtime = _runtime_for_request(model, llm_concurrency)
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, _error_payload(exc), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -735,15 +843,22 @@ class DemoHandler(SimpleHTTPRequestHandler):
                     "job_id": _start_job(
                         None,
                         runtime,
+                        eval_model,
                         branching_factor,
                         generation_budget,
                         candidate_budget,
                         item_workers,
                         max_items,
+                        None,
                         selected_item_ids,
+                        None,
+                        False,
+                        None,
                         None,
                     ),
                     "model": runtime.active_model,
+                    "policy_model": runtime.active_model,
+                    "eval_model": eval_model,
                 },
                 status=HTTPStatus.ACCEPTED,
             )

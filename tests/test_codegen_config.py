@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,172 +10,246 @@ from unittest.mock import patch
 from app.codegen.config import load_runtime_config
 from app.codegen.errors import ConfigError
 from app.configs.runtime import (
+    ACTIVE_PROFILE_ENV_KEY,
     DEFAULT_AVAILABLE_MODELS,
+    DEFAULT_MODEL,
     DEFAULT_NON_REASONING_RUNTIME_MAX_TOKENS,
     DEFAULT_NON_REASONING_RUNTIME_TIMEOUT_S,
-    DEFAULT_PRIMARY_MODEL,
     DEFAULT_RUNTIME_MAX_TOKENS,
     DEFAULT_RUNTIME_TEMPERATURE,
     DEFAULT_RUNTIME_TIMEOUT_S,
-    default_max_tokens_for_model,
-    default_timeout_for_model,
 )
 
 
+def _write_profiles(path: Path, content: str) -> None:
+    path.write_text(textwrap.dedent(content).strip() + "\n")
+
+
 class CodegenConfigTest(unittest.TestCase):
-    def test_dotenv_loads_required_values(self) -> None:
+    def test_profile_config_loads_env_backed_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
+            root = Path(tmp_dir)
+            (root / ".env").write_text("OPENAI_API_KEY=test-key\n")
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key_env = "OPENAI_API_KEY"
+                default_model = "deepseek-chat"
+                available_models = [
+                  "deepseek-chat",
+                  "deepseek-reasoner",
+                  "gemini-3-flash-preview",
+                  "gpt-5.4",
+                  "claude-sonnet-4-6",
+                  "kimi-k2.5",
+                  "glm-5",
+                ]
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir))
+            config = load_runtime_config(root)
+            self.assertEqual(config.profile, "openai-main")
+            self.assertEqual(config.provider, "openai")
+            self.assertEqual(config.transport, "openai-compatible")
             self.assertEqual(config.api_key, "test-key")
-            self.assertEqual(config.primary_model, DEFAULT_PRIMARY_MODEL)
+            self.assertEqual(config.base_url, "https://api.example.com/v1")
+            self.assertEqual(config.default_model, DEFAULT_MODEL)
             self.assertEqual(config.available_models, DEFAULT_AVAILABLE_MODELS)
             self.assertEqual(config.temperature, DEFAULT_RUNTIME_TEMPERATURE)
-            self.assertEqual(config.max_tokens, default_max_tokens_for_model(DEFAULT_PRIMARY_MODEL))
-            self.assertEqual(config.timeout_s, default_timeout_for_model(DEFAULT_PRIMARY_MODEL))
+            self.assertEqual(config.max_tokens, DEFAULT_NON_REASONING_RUNTIME_MAX_TOKENS)
+            self.assertEqual(config.timeout_s, DEFAULT_NON_REASONING_RUNTIME_TIMEOUT_S)
             self.assertEqual(config.llm_concurrency, 20)
 
-    def test_shell_env_can_override_primary_model(self) -> None:
+    def test_active_profile_can_be_overridden_by_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
             os.environ,
-            {"AUTORESEARCH_PRIMARY_MODEL": "shell-model"},
+            {ACTIVE_PROFILE_ENV_KEY: "ollama-local"},
             clear=True,
         ):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
-            )
-            config = load_runtime_config(Path(tmp_dir))
-            self.assertEqual(config.primary_model, "shell-model")
-            self.assertEqual(config.available_models[0], "shell-model")
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
 
-    def test_missing_required_key_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+
+                [profiles.ollama-local]
+                provider = "ollama"
+                transport = "openai-compatible"
+                base_url = "http://127.0.0.1:11434/v1"
+                api_key = ""
+                default_model = "qwen3:8b"
+                available_models = ["qwen3:8b", "qwen3:14b"]
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir))
-            self.assertEqual(config.max_tokens, default_max_tokens_for_model(DEFAULT_PRIMARY_MODEL))
+            config = load_runtime_config(root)
+            self.assertEqual(config.profile, "ollama-local")
+            self.assertEqual(config.provider, "ollama")
+            self.assertIsNone(config.api_key)
+            self.assertEqual(config.default_model, "qwen3:8b")
+            self.assertEqual(config.available_models, ("qwen3:8b", "qwen3:14b"))
 
     def test_reasoning_model_defaults_expand_when_selected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                available_models = ["deepseek-chat", "deepseek-reasoner"]
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir)).with_model("deepseek-reasoner")
+            config = load_runtime_config(root).with_model("deepseek-reasoner")
             self.assertEqual(config.max_tokens, DEFAULT_RUNTIME_MAX_TOKENS)
             self.assertEqual(config.timeout_s, DEFAULT_RUNTIME_TIMEOUT_S)
 
     def test_non_reasoning_models_use_reduced_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                available_models = ["deepseek-chat", "claude-sonnet-4-6"]
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir)).with_model("claude-sonnet-4-6")
+            config = load_runtime_config(root).with_model("claude-sonnet-4-6")
             self.assertEqual(config.max_tokens, DEFAULT_NON_REASONING_RUNTIME_MAX_TOKENS)
             self.assertEqual(config.timeout_s, DEFAULT_NON_REASONING_RUNTIME_TIMEOUT_S)
 
-    def test_available_models_env_is_parsed_and_keeps_primary_first(self) -> None:
+    def test_available_models_profile_is_normalized_and_keeps_default_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                        "AUTORESEARCH_AVAILABLE_MODELS=kimi-k2.5, glm-5",
-                    ]
-                )
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                available_models = ["kimi-k2.5", "glm-5"]
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir))
+            config = load_runtime_config(root)
             self.assertEqual(config.available_models, ("deepseek-chat", "kimi-k2.5", "glm-5"))
             self.assertEqual(config.with_model("glm-5").active_model, "glm-5")
 
-    def test_invalid_url_fails(self) -> None:
+    def test_invalid_base_url_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=not-a-url",
-                    ]
-                )
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "bad-profile"
+
+                [profiles.bad-profile]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "not-a-url"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                """,
             )
             with self.assertRaises(ConfigError):
-                load_runtime_config(Path(tmp_dir))
+                load_runtime_config(root)
 
-    def test_llm_concurrency_env_is_parsed(self) -> None:
+    def test_llm_concurrency_profile_is_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                        "AUTORESEARCH_LLM_CONCURRENCY=7",
-                    ]
-                )
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                llm_concurrency = 7
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir))
+            config = load_runtime_config(root)
             self.assertEqual(config.llm_concurrency, 7)
 
-    def test_runtime_knobs_can_still_be_overridden_by_env_when_needed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
-            os.environ,
-            {
-                "AUTORESEARCH_TEMPERATURE": "0.4",
-                "AUTORESEARCH_MAX_TOKENS": "2048",
-                "AUTORESEARCH_TIMEOUT_S": "90",
-            },
-            clear=True,
-        ):
-            env_path = Path(tmp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "AUTORESEARCH_API_KEY=test-key",
-                        "AUTORESEARCH_API_BASE=https://api.example.com/v1",
-                    ]
-                )
+    def test_runtime_knobs_can_be_set_per_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key = "test-key"
+                default_model = "deepseek-chat"
+                temperature = 0.4
+                max_tokens = 2048
+                timeout_s = 90
+                supports_tools = false
+                supports_json_mode = true
+                """,
             )
-            config = load_runtime_config(Path(tmp_dir))
+            config = load_runtime_config(root)
             self.assertEqual(config.temperature, 0.4)
             self.assertEqual(config.max_tokens, 2048)
             self.assertEqual(config.timeout_s, 90)
-            self.assertEqual(config.with_model("deepseek-reasoner").max_tokens, 2048)
-            self.assertEqual(config.with_model("deepseek-reasoner").timeout_s, 90)
+            self.assertFalse(config.supports_tools)
+            self.assertTrue(config.supports_json_mode)
+            self.assertEqual(config.with_model("deepseek-chat").max_tokens, 2048)
+            self.assertEqual(config.with_model("deepseek-chat").timeout_s, 90)
+
+    def test_missing_api_key_env_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
+            root = Path(tmp_dir)
+            _write_profiles(
+                root / "llm_profiles.toml",
+                """
+                active_profile = "openai-main"
+
+                [profiles.openai-main]
+                provider = "openai"
+                transport = "openai-compatible"
+                base_url = "https://api.example.com/v1"
+                api_key_env = "MISSING_API_KEY"
+                default_model = "deepseek-chat"
+                """,
+            )
+            with self.assertRaises(ConfigError):
+                load_runtime_config(root)
 
 
 if __name__ == "__main__":

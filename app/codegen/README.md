@@ -6,7 +6,8 @@ This directory contains the active benchmark-driven codegen loop.
 
 ### Proposal runtime
 
-- loads strict runtime config from repo-root `.env` or shell env
+- loads strict runtime config from repo-root `llm_profiles.toml`
+- resolves secrets from repo-root `.env` or shell env
 - sends one-model OpenAI-compatible chat requests
 - expects strict JSON candidates with `file_body`
 

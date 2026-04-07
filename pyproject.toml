@@ -1,14 +1,26 @@
 [project]
 name = "autoresearch-foundry"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autoresearch workbench with deterministic verification and replayable memory."
 requires-python = ">=3.11"
 # This root package only covers the active app/* implementation.
 # Reference clones under External/ are not part of the runtime environment.
 dependencies = [
+  "bert-score>=0.3.13,<0.4",
+  "datasets>=3,<4",
+  "evaluate>=0.4.5,<0.5",
+  "huggingface-hub>=0.30,<1",
   "matplotlib>=3.9,<4",
   "math-verify[antlr4_13_2]>=0.9,<1",
+  "nltk>=3.9,<4",
+  "numpy>=2,<3",
+  "openai>=1.75,<2",
+  "pandas>=2.2,<3",
   "PyYAML>=6,<7",
+  "rouge-score>=0.1.2,<0.2",
+  "sacrebleu>=2.5,<3",
+  "tqdm>=4.67,<5",
+  "transformers>=4.51,<5",
 ]
 
 [build-system]

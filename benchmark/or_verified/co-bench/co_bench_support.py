@@ -10,17 +10,11 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from app.bench.benchmark_adapter_support import effective_suite_run_config, load_candidate_module, runtime_for_benchmark_adapter_task
-from app.codegen.llm import ProposalRuntime
+from app.bench.benchmark_adapter_support import effective_suite_run_config
 
 
 CO_BENCH_DATASET_ID = "CO-Bench/CO-Bench"
 CO_BENCH_SPLIT = "official:test"
-CO_BENCH_SYSTEM_PROMPT = (
-    "You are an expert in combinatorial optimization and algorithm design. "
-    "Return only a JSON object with keys algorithm_summary and python_code. "
-    "python_code must define the exact function required by the prompt, without Markdown fences."
-)
 CO_BENCH_PROBLEM_ALIASES = {
     "MIS": "Maximal independent set",
     "TSP": "Travelling salesman problem",
@@ -263,39 +257,6 @@ def _question_problem_name(item: dict[str, Any]) -> str:
     return canonical
 
 
-def _prompt_python_code(
-    proposal_runtime: ProposalRuntime,
-    *,
-    candidate_path: Path,
-    problem_description: str,
-    purpose: str,
-    queue_priority: int,
-) -> tuple[str, str, dict[str, Any]]:
-    module = load_candidate_module(candidate_path)
-    system_prompt = str(getattr(module, "SYSTEM_PROMPT", CO_BENCH_SYSTEM_PROMPT) or CO_BENCH_SYSTEM_PROMPT).strip()
-    build_user_prompt = getattr(module, "build_user_prompt", None)
-    if callable(build_user_prompt):
-        user_prompt = str(build_user_prompt(problem_description) or "").strip()
-        if not user_prompt:
-            raise ValueError("build_user_prompt(problem_description) must return a non-empty string.")
-    else:
-        user_prompt = (
-            "Solve the following CO-Bench task by writing Python code for the required solve function.\n\n"
-            f"{problem_description.strip()}\n"
-        )
-    payload, trace = proposal_runtime.complete_json(
-        purpose=purpose,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        queue_priority=queue_priority,
-    )
-    code = str(payload.get("python_code") or "").strip()
-    summary = str(payload.get("algorithm_summary") or "").strip()
-    if not code:
-        raise ValueError("Model response did not include python_code.")
-    return code, summary, trace
-
-
 def _co_bench_feedback(
     results: dict[str, tuple[list[Any], str | None]],
     avg_score: float,
@@ -359,11 +320,9 @@ def evaluate_co_bench_candidate(
     task: dict[str, Any],
     candidate_path: Path,
     source_code: str,
-    proposal_runtime: ProposalRuntime | None = None,
 ) -> dict[str, Any]:
     item = _co_bench_question_item(task)
     config = effective_suite_run_config(task, candidate_path)
-    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
     evaluation_dir = _co_bench_evaluation_dir(task, config)
     if not (evaluation_dir / "controller.py").exists():
         raise FileNotFoundError(
@@ -382,14 +341,7 @@ def evaluate_co_bench_candidate(
         controller = importlib.import_module("evaluation.controller")
         data = controller.get_data(problem_name, src_dir=str(data_dir))
         try:
-            python_code, algorithm_summary, trace = _prompt_python_code(
-                runtime,
-                candidate_path=candidate_path,
-                problem_description=str(getattr(data, "problem_description", "") or item.get("raw_context") or ""),
-                purpose=f"{task['id']}::{item_id}",
-                queue_priority=1000,
-            )
-            feedback = _evaluate_with_official_scoring(data, python_code, timeout_s=timeout_s)
+            feedback = _evaluate_with_official_scoring(data, source_code, timeout_s=timeout_s)
             test_score = float(feedback["test_score"])
             test_row = {
                 "name": item_name,
@@ -398,11 +350,9 @@ def evaluate_co_bench_candidate(
                 "passed": test_score > 0.0,
                 "actual_raw": {
                     "problem_name": problem_name,
-                    "algorithm_summary": algorithm_summary,
                     "dev_score": feedback["dev_score"],
                     "test_score": feedback["test_score"],
                     "test_feedback": feedback["test_feedback"],
-                    "llm_trace": trace,
                 },
             }
         except Exception as exc:  # noqa: BLE001

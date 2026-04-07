@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import pprint
 import re
 import shutil
@@ -11,7 +12,9 @@ from typing import Any, Callable
 
 from app.codegen.verifier import finalize_candidate_metrics
 from app.codegen.llm import ProposalRuntime
-from app.codegen.task_contracts import infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.codegen.task_contracts import infer_interaction_mode, infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.configs.codegen import ITEM_MEMORY_JSON_NAME, ITEM_MEMORY_MD_NAME
+from app.memory.store import MemoryStore
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -19,6 +22,37 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 def uses_benchmark_adapter_runtime(task: dict[str, Any]) -> bool:
     return infer_runtime_backend(task) == "benchmark_adapter"
+
+
+def _supports_max_items(task: dict[str, Any]) -> bool:
+    if bool(task.get("local_dataset_only")):
+        return True
+    return uses_benchmark_adapter_runtime(task) and infer_interaction_mode(task) == "single_turn"
+
+
+def _supports_max_episodes(task: dict[str, Any]) -> bool:
+    return uses_benchmark_adapter_runtime(task) and infer_interaction_mode(task) == "multi_turn"
+
+
+def _default_max_episodes(task: dict[str, Any]) -> int | None:
+    if not _supports_max_episodes(task):
+        return None
+    config = dict(task.get("runtime_suite_config") or {})
+    for key in ("episode_limit", "n_episodes", "max_episodes", "task_limit"):
+        value = config.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    for key in ("episode_ids", "episodes", "inline_episodes"):
+        value = config.get(key)
+        if isinstance(value, list) and value:
+            return len(value)
+    return None
 
 
 def _load_module_from_path(path: Path, module_name: str):
@@ -84,6 +118,37 @@ def runtime_for_benchmark_adapter_task(task: dict[str, Any]) -> ProposalRuntime:
     return ProposalRuntime.from_env().with_model(requested_model)
 
 
+def resolve_benchmark_adapter_memory_root(
+    task: dict[str, Any],
+    *,
+    memory_root: Path | str | None = None,
+) -> Path | None:
+    raw_value = memory_root if memory_root is not None else task.get("memory_root")
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, Path):
+        return raw_value
+    text = str(raw_value).strip()
+    return Path(text) if text else None
+
+
+def benchmark_adapter_memory_store(
+    task: dict[str, Any],
+    *,
+    item_id: str,
+    memory_root: Path | str | None = None,
+) -> MemoryStore | None:
+    root = resolve_benchmark_adapter_memory_root(task, memory_root=memory_root)
+    if root is None:
+        return None
+    item_dir = root / str(task["id"]) / str(item_id)
+    return MemoryStore(
+        item_dir / ITEM_MEMORY_JSON_NAME,
+        markdown_path=item_dir / ITEM_MEMORY_MD_NAME,
+        title=f"{task['id']}:{item_id} Strategy Memory",
+    )
+
+
 def require_command(command: str) -> str:
     resolved = shutil.which(command)
     if resolved is None:
@@ -131,9 +196,9 @@ def openai_compatible_env(runtime: ProposalRuntime) -> dict[str, str]:
     env = dict()
     if runtime.config.api_key:
         env["OPENAI_API_KEY"] = runtime.config.api_key
-    if runtime.config.api_base:
-        env["OPENAI_API_BASE"] = runtime.config.api_base
-        env["OPENAI_BASE_URL"] = runtime.config.api_base
+    if runtime.config.base_url:
+        env["OPENAI_API_BASE"] = runtime.config.base_url
+        env["OPENAI_BASE_URL"] = runtime.config.base_url
     return env
 
 
@@ -269,6 +334,7 @@ def build_benchmark_adapter_result(
             "item_workers": int(task.get("item_workers") or 0),
             "runtime_backend": infer_runtime_backend(task),
             "task_mode": infer_task_mode(task),
+            "interaction_mode": infer_interaction_mode(task),
             "optimization_scope": infer_optimization_scope(task),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
@@ -276,12 +342,19 @@ def build_benchmark_adapter_result(
             "dataset_size": task.get("dataset_size") or 0,
             "local_dataset_only": bool(task.get("local_dataset_only")),
             "split": task.get("split"),
+            "research_line": task.get("research_line"),
+            "personalization_category": task.get("personalization_category"),
+            "personalization_focus": task.get("personalization_focus"),
+            "safety_category": task.get("safety_category"),
+            "safety_focus": task.get("safety_focus"),
             "included_in_main_comparison": task["included_in_main_comparison"],
             "supports_runtime_config": isinstance(task.get("runtime_suite_config"), dict)
             or uses_benchmark_adapter_runtime(task),
             "suite_run_config": task.get("runtime_suite_config"),
-            "supports_max_items": bool(task.get("local_dataset_only") or uses_benchmark_adapter_runtime(task)),
+            "supports_max_items": _supports_max_items(task),
             "default_max_items": None,
+            "supports_max_episodes": _supports_max_episodes(task),
+            "default_max_episodes": _default_max_episodes(task),
         },
         "baseline": baseline,
         "winner": winner,
@@ -336,8 +409,10 @@ def run_benchmark_adapter_task(
     *,
     proposal_runtime: ProposalRuntime,
     workspace_root: Path,
+    memory_root: Path | None = None,
     session_id: str,
     max_items: int | None = None,
+    max_episodes: int | None = None,
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
@@ -345,14 +420,20 @@ def run_benchmark_adapter_task(
     candidate_path = Path(str(task["editable_path"]))
     source_code = candidate_path.read_text()
     workspace_root.mkdir(parents=True, exist_ok=True)
-    return runner(
-        task=task,
-        candidate_path=candidate_path,
-        source_code=source_code,
-        proposal_runtime=proposal_runtime,
-        workspace_root=workspace_root,
-        session_id=session_id,
-        max_items=max_items,
-        progress_callback=progress_callback,
-        pace_ms=pace_ms,
-    )
+    runner_kwargs = {
+        "task": task,
+        "candidate_path": candidate_path,
+        "source_code": source_code,
+        "proposal_runtime": proposal_runtime,
+        "workspace_root": workspace_root,
+        "session_id": session_id,
+        "max_items": max_items,
+        "max_episodes": max_episodes,
+        "progress_callback": progress_callback,
+        "pace_ms": pace_ms,
+    }
+    signature = inspect.signature(runner)
+    supports_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values())
+    if memory_root is not None and ("memory_root" in signature.parameters or supports_kwargs):
+        runner_kwargs["memory_root"] = memory_root
+    return runner(**runner_kwargs)

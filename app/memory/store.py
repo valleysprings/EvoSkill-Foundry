@@ -62,13 +62,14 @@ class MemoryStore:
             family_name = item.get("family", "agnostic")
             family_bonus = 2.0 if family_name == family else 1.0 if family_name == "agnostic" else 0.0
             impact_bonus = min(abs(self._delta_primary_score(item)), 1.0)
+            scope_bonus = 0.2 if str(item.get("knowledge_scope") or "") == "dataset_prior" else 0.0
             outcome = item.get("experience_outcome", "success")
             verifier_status = item.get("verifier_status", "")
             if outcome == "failure" and verifier_status == "pass":
                 # Passing-but-stagnant attempts are usually prompt noise, not reusable avoidance memory.
                 continue
             outcome_bonus = 0.25 if outcome == "success" else 0.05 if outcome == "failure" else 0.0
-            score = overlap * 3.0 + family_bonus + impact_bonus + outcome_bonus
+            score = overlap * 3.0 + family_bonus + impact_bonus + outcome_bonus + scope_bonus
             if score <= 0:
                 continue
             enriched = dict(item)
@@ -129,6 +130,13 @@ class MemoryStore:
             str(experience.get("successful_strategy", "")).strip().lower(),
             str(experience.get("prompt_fragment", "")).strip().lower(),
             str(experience.get("candidate_summary", "")).strip().lower(),
+            str(experience.get("knowledge_scope", "")).strip().lower(),
+            str(experience.get("distilled_skill", "")).strip().lower(),
+            str(experience.get("applicability_notes", "")).strip().lower(),
+            str(experience.get("process_failure_mode", "")).strip().lower(),
+            str(experience.get("process_repair_hint", "")).strip().lower(),
+            str(experience.get("process_trace_summary", "")).strip().lower(),
+            ",".join(str(item).strip().lower() for item in list(experience.get("source_dataset_ids") or [])),
         ]
         normalized = " | ".join(part for part in parts if part)
         return normalized[:640]

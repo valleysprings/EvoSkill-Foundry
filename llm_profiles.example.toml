@@ -1,0 +1,37 @@
+active_profile = "openai-main"
+
+[profiles.openai-main]
+provider = "openai"
+transport = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+default_model = "gpt-5.4"
+available_models = ["gpt-5.4", "gpt-5.4-mini"]
+temperature = 0.2
+llm_concurrency = 20
+supports_tools = true
+supports_json_mode = true
+
+[profiles.ollama-local]
+provider = "ollama"
+transport = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"
+api_key = ""
+default_model = "qwen3:8b"
+available_models = ["qwen3:8b", "qwen3:14b"]
+temperature = 0.2
+llm_concurrency = 4
+supports_tools = true
+supports_json_mode = true
+
+[profiles.vllm-local]
+provider = "vllm"
+transport = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+api_key_env = "VLLM_API_KEY"
+default_model = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+available_models = ["Qwen/Qwen3-Coder-30B-A3B-Instruct"]
+temperature = 0.2
+llm_concurrency = 8
+supports_tools = true
+supports_json_mode = true

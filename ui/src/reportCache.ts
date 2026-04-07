@@ -32,11 +32,13 @@ export function latestTaskIdFromPayload(payload: Payload | null | undefined): st
 }
 
 export function initialTaskId(tasks: TaskSummary[], latestPayload: Payload | null | undefined): string {
+  const activeTasks = tasks.filter((task) => task.included_in_main_comparison);
+  const preferredTasks = activeTasks.length ? activeTasks : tasks;
   const latestTaskId = latestTaskIdFromPayload(latestPayload);
-  if (latestTaskId && tasks.some((task) => task.id === latestTaskId)) {
+  if (latestTaskId && preferredTasks.some((task) => task.id === latestTaskId)) {
     return latestTaskId;
   }
-  return tasks[0]?.id ?? "";
+  return preferredTasks[0]?.id ?? tasks[0]?.id ?? "";
 }
 
 export function taskScopedPayload(payload: Payload, taskId: string | null | undefined): Payload | null {

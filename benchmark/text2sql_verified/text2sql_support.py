@@ -384,8 +384,22 @@ def schema_text_from_table_entry(entry: dict[str, Any]) -> str:
     table_names = list(entry.get("table_names_original") or entry.get("table_names") or [])
     column_names = list(entry.get("column_names_original") or entry.get("column_names") or [])
     column_types = list(entry.get("column_types") or [])
-    primary_keys = set(entry.get("primary_keys") or [])
+    primary_keys_raw = list(entry.get("primary_keys") or [])
     foreign_keys = list(entry.get("foreign_keys") or [])
+
+    primary_keys: set[int] = set()
+    for key in primary_keys_raw:
+        if isinstance(key, (list, tuple)):
+            for nested_key in key:
+                try:
+                    primary_keys.add(int(nested_key))
+                except Exception:
+                    continue
+            continue
+        try:
+            primary_keys.add(int(key))
+        except Exception:
+            continue
 
     columns_by_table: dict[int, list[str]] = {index: [] for index, _ in enumerate(table_names)}
     for column_index, column in enumerate(column_names):

@@ -70,6 +70,34 @@ NEW_SEED_MEMORY = {
     "supporting_memory_ids": [],
 }
 
+DATASET_PRIOR_MEMORY = {
+    "experience_id": "prior-assistantbench-tooling",
+    "experience_type": "dataset_skill_prior",
+    "experience_outcome": "success",
+    "source_task": "assistantbench",
+    "source_session_id": "distill-assistantbench-v1",
+    "family": "agent-benchmark",
+    "task_signature": ["benchmark-adapter", "agent", "multi-turn", "assistantbench"],
+    "verifier_status": "pass",
+    "rejection_reason": "",
+    "failure_pattern": "",
+    "strategy_hypothesis": "General assistant tasks improve when the agent decomposes the goal into substeps before using tools.",
+    "successful_strategy": "Extract constraints, choose the smallest useful tool, and verify each subgoal before replying.",
+    "prompt_fragment": "Plan the subgoals first, then use tools in the minimum sequence needed to satisfy the request.",
+    "tool_trace_summary": "dataset distillation over successful AssistantBench trajectories",
+    "process_failure_mode": "",
+    "process_repair_hint": "",
+    "process_trace_summary": "",
+    "knowledge_scope": "dataset_prior",
+    "distilled_skill": "goal decomposition -> tool selection -> verify result -> concise final response",
+    "applicability_notes": "Best for AssistantBench-like multi-tool assistant tasks.",
+    "source_dataset_ids": ["assistantbench_public_validation"],
+    "delta_primary_score": 0.8,
+    "proposal_model": "gpt-5.4",
+    "candidate_summary": "Dataset-level assistant workflow prior.",
+    "supporting_memory_ids": [],
+}
+
 
 class MemoryStoreTest(unittest.TestCase):
     def test_ensure_seed_records_preserves_existing_memories(self) -> None:
@@ -88,19 +116,21 @@ class MemoryStoreTest(unittest.TestCase):
     def test_retrieve_and_markdown_include_success_and_failure_experiences(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             store = MemoryStore(Path(tmp_dir) / "memory.json", markdown_path=Path(tmp_dir) / "memory.md")
-            store.seed_from_records([SUCCESS_MEMORY, FAILURE_MEMORY])
+            store.seed_from_records([SUCCESS_MEMORY, FAILURE_MEMORY, DATASET_PRIOR_MEMORY])
 
-            retrieved = store.retrieve(task_signature=["python-codegen", "set-logic"], family="set-logic", top_k=2)
+            retrieved = store.retrieve(task_signature=["python-codegen", "set-logic"], family="set-logic", top_k=3)
             markdown = store.load_markdown()
 
-            self.assertEqual(len(retrieved), 2)
+            self.assertEqual(len(retrieved), 3)
             self.assertEqual(retrieved[0]["experience_outcome"], "success")
-            self.assertEqual(retrieved[1]["experience_outcome"], "failure")
-            self.assertIn("success_memories: 1", markdown)
+            self.assertTrue(any(item["experience_outcome"] == "failure" for item in retrieved))
+            self.assertIn("success_memories: 2", markdown)
             self.assertIn("failure_memories: 1", markdown)
             self.assertIn("experience_outcome: failure", markdown)
             self.assertIn("strategy_hypothesis:", markdown)
             self.assertIn("prompt_fragment:", markdown)
+            self.assertIn("knowledge_scope: dataset_prior", markdown)
+            self.assertIn("distilled_skill:", markdown)
 
     def test_append_deduplicates_equivalent_memory_fragments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

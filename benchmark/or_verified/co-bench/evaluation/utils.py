@@ -21,6 +21,7 @@ import os
 import signal
 import multiprocessing as mp
 import fcntl
+import tempfile
 
 import cloudpickle
 from multiprocessing.reduction import ForkingPickler
@@ -78,7 +79,10 @@ def list_test_cases(path="."):
 
 
 class FileLock:
-    def __init__(self, lock_file_path='cpu.lock'):
+    def __init__(self, lock_file_path=None):
+        if lock_file_path is None:
+            # Keep the lock out of the repo root while preserving cross-process coordination.
+            lock_file_path = os.path.join(tempfile.gettempdir(), "autoresearch-foundry-cpu.lock")
         self.lock_file_path = lock_file_path
         self.lock_file = None
 
@@ -416,4 +420,3 @@ def extract_code_blocks(response):
     blocks = re.findall(pattern_backticks, response, re.DOTALL)
     blocks.extend(re.findall(pattern_dashes, response, re.DOTALL | re.MULTILINE))
     return blocks
-

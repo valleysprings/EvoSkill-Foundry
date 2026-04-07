@@ -57,9 +57,12 @@ class QueueTransport:
 def make_runtime(responses: Sequence[object], *, model: str = "deepseek-chat") -> ProposalRuntime:
     return ProposalRuntime(
         RuntimeConfig(
+            profile="test-profile",
+            provider="openai",
+            transport="openai-compatible",
             api_key="test-key",
-            api_base="https://api.test/v1",
-            primary_model=model,
+            base_url="https://api.test/v1",
+            default_model=model,
             available_models=(
                 model,
                 "deepseek-reasoner",
@@ -73,6 +76,8 @@ def make_runtime(responses: Sequence[object], *, model: str = "deepseek-chat") -
             max_tokens=4096,
             timeout_s=45,
             llm_concurrency=20,
+            supports_tools=True,
+            supports_json_mode=True,
         ),
         transport=QueueTransport(responses),
     )

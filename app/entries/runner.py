@@ -13,7 +13,7 @@ from typing import Any, Callable
 from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences, task_summary
 from app.bench.benchmark_adapter_support import uses_benchmark_adapter_runtime, run_benchmark_adapter_task
 from app.codegen.errors import ConfigError
-from app.codegen.task_contracts import optimization_scope_summary, task_mode_summary
+from app.codegen.task_contracts import interaction_mode_summary, optimization_scope_summary, task_mode_summary
 from app.configs.codegen import (
     DEFAULT_SESSION_ID,
     DELTA_FORMULA,
@@ -32,6 +32,13 @@ from app.codegen.dataset_runner import run_dataset_task
 from app.codegen.dataset_support import is_dataset_task
 from app.codegen.llm import ProposalRuntime
 from app.codegen.trainer import run_codegen_task
+from app.memory.skills import (
+    annotate_task_catalog_with_skills,
+    annotate_task_summary_with_skills,
+    append_distilled_skill_prompt_context,
+    distill_dataset_skill,
+    load_task_skill_markdown,
+)
 from app.memory.store import MemoryStore
 
 RUNS = RUNS_ROOT
@@ -109,9 +116,17 @@ def generate_discrete_payload(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    max_episodes: int | None = None,
     selected_item_ids: list[str] | None = None,
     suite_config: dict[str, Any] | None = None,
+    eval_model: str | None = None,
+    record_skill: bool = False,
+    skill_item_limit: int | None = None,
+    selected_skill_id: str | None = None,
 ) -> dict[str, Any]:
+    active_runs_root = runs_root or RUNS
+    active_workspace_root = workspace_root or (active_runs_root / "workspace" / "current")
+    active_runs_root.mkdir(parents=True, exist_ok=True)
     if task_id is not None:
         tasks = load_codegen_tasks(task_id)
         if not tasks:
@@ -143,11 +158,26 @@ def generate_discrete_payload(
             raise ConfigError("item_ids requires running exactly one task.")
         if not is_dataset_task(tasks[0]):
             raise ConfigError("item_ids is only supported for dataset tasks.")
+    if record_skill:
+        if task_id is None or len(tasks) != 1:
+            raise ConfigError("record_skill requires running exactly one task.")
+        if not is_dataset_task(tasks[0]):
+            raise ConfigError("record_skill is only supported for dataset tasks.")
+    if selected_skill_id is not None:
+        if task_id is None or len(tasks) != 1:
+            raise ConfigError("selected_skill_id requires running exactly one task.")
+        selected_skill_markdown = load_task_skill_markdown(str(tasks[0]["id"]), selected_skill_id, runs_root=active_runs_root)
+        tasks = [
+            {
+                **tasks[0],
+                "prompt_context": append_distilled_skill_prompt_context(
+                    str(tasks[0].get("prompt_context") or ""),
+                    skill_markdown=selected_skill_markdown,
+                    skill_label=selected_skill_id,
+                ),
+            }
+        ]
     _validate_runtime_dependencies(tasks)
-
-    active_runs_root = runs_root or RUNS
-    active_workspace_root = workspace_root or (active_runs_root / "workspace" / "current")
-    active_runs_root.mkdir(parents=True, exist_ok=True)
     legacy_store = MemoryStore(
         active_runs_root / WORKING_MEMORY_NAME,
         markdown_path=active_runs_root / WORKING_MEMORY_MD_NAME,
@@ -170,6 +200,9 @@ def generate_discrete_payload(
                 **task,
                 "runtime_model_override": runtime.active_model,
                 "runtime_max_items": max_items,
+                "runtime_max_episodes": max_episodes,
+                "runtime_session_id": session_id or DEFAULT_SESSION_ID,
+                "memory_root": str(active_runs_root / ITEM_MEMORY_DIR_NAME),
             }
             before_count = legacy_store.count()
             result = run_codegen_task(
@@ -187,11 +220,17 @@ def generate_discrete_payload(
         elif uses_benchmark_adapter_runtime(task):
             before_count = legacy_store.count()
             result = run_benchmark_adapter_task(
-                task,
+                {
+                    **task,
+                    "runtime_session_id": session_id or DEFAULT_SESSION_ID,
+                    "memory_root": str(active_runs_root / ITEM_MEMORY_DIR_NAME),
+                },
                 proposal_runtime=runtime,
                 workspace_root=active_workspace_root / task["id"],
+                memory_root=active_runs_root / ITEM_MEMORY_DIR_NAME,
                 session_id=session_id or DEFAULT_SESSION_ID,
                 max_items=max_items,
+                max_episodes=max_episodes,
                 progress_callback=progress_callback,
                 pace_ms=pace_ms,
             )
@@ -205,10 +244,56 @@ def generate_discrete_payload(
                 memory_root=active_runs_root / ITEM_MEMORY_DIR_NAME,
                 session_id=session_id or DEFAULT_SESSION_ID,
                 max_items=max_items,
+                eval_model=eval_model,
                 selected_item_ids=selected_item_ids,
                 progress_callback=progress_callback,
                 pace_ms=pace_ms,
             )
+            if record_skill:
+                source_count = skill_item_limit or len(result.get("item_runs", []))
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "phase": "skill_distillation_started",
+                            "task_id": task["id"],
+                            "message": f"Distilling reusable skill from the first {source_count} runtime-memory traces.",
+                        }
+                    )
+                try:
+                    generated_skill = distill_dataset_skill(
+                        runtime,
+                        task=task,
+                        item_runs=list(result.get("item_runs") or []),
+                        skill_item_limit=skill_item_limit,
+                        session_id=session_id or DEFAULT_SESSION_ID,
+                        runs_root=active_runs_root,
+                    )
+                    result["generated_skill"] = generated_skill
+                    if progress_callback is not None and generated_skill is not None:
+                        progress_callback(
+                            {
+                                "phase": "skill_distillation_completed",
+                                "task_id": task["id"],
+                                "message": (
+                                    f"Saved distilled skill {generated_skill['filename']} "
+                                    f"from {generated_skill['source_items']} items."
+                                ),
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    result["generated_skill_error"] = {
+                        "error_type": "skill_distillation_error",
+                        "error": str(exc),
+                        "model": runtime.active_model,
+                    }
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "phase": "skill_distillation_failed",
+                                "task_id": task["id"],
+                                "message": f"Skill distillation failed: {exc}",
+                            }
+                        )
             before_count = int(result.get("memory_before_count") or 0)
             after_count = int(result.get("memory_after_count") or 0)
             delta = after_count - before_count
@@ -238,6 +323,8 @@ def generate_discrete_payload(
         total_memory_after += after_count
         result["memory_before_count"] = before_count
         result["memory_after_count"] = after_count
+        result["policy_model"] = str(result.get("active_model") or runtime.active_model)
+        result["eval_model"] = eval_model
         runs.append(result)
         if progress_callback is not None:
             progress_callback(
@@ -255,9 +342,9 @@ def generate_discrete_payload(
             )
 
     winners = Counter(run["winner"]["agent"] for run in runs if run["included_in_main_comparison"])
-    task_catalog = list_codegen_task_summaries()
+    task_catalog = annotate_task_catalog_with_skills(list_codegen_task_summaries(), runs_root=active_runs_root)
     if len(tasks) == 1 and task_id is not None:
-        current_summary = task_summary(tasks[0])
+        current_summary = annotate_task_summary_with_skills(task_summary(tasks[0]), runs_root=active_runs_root)
         task_catalog = [current_summary if task["id"] == current_summary["id"] else task for task in task_catalog]
     return {
         "run_mode": "llm-required",
@@ -268,6 +355,8 @@ def generate_discrete_payload(
             "source_repo": git_remote(ROOT),
             "run_mode": "llm-required",
             "active_model": runtime.active_model,
+            "policy_model": runtime.active_model,
+            "eval_model": eval_model,
             "num_tasks": len([run for run in runs if run["included_in_main_comparison"]]),
             "total_runs": total_run_count,
             "experiment_runs": experiment_run_count,
@@ -289,7 +378,10 @@ def generate_discrete_payload(
         },
         "audit": {
             "workspace_root": _relative(active_workspace_root),
+            "policy_model": runtime.active_model,
+            "eval_model": eval_model,
             "max_items": max_items,
+            "max_episodes": max_episodes,
             "selected_item_ids": list(selected_item_ids) if selected_item_ids is not None else None,
         },
         "task_catalog": task_catalog,
@@ -303,6 +395,7 @@ def empty_discrete_payload(
     proposal_runtime: ProposalRuntime | None = None,
     runs_root: Path | None = None,
     env_root: Path | None = None,
+    eval_model: str | None = None,
 ) -> dict[str, Any]:
     active_runs_root = runs_root or RUNS
     runtime = proposal_runtime or ProposalRuntime.from_env(env_root or ROOT)
@@ -316,6 +409,8 @@ def empty_discrete_payload(
             "source_repo": git_remote(ROOT),
             "run_mode": "llm-required",
             "active_model": runtime.active_model,
+            "policy_model": runtime.active_model,
+            "eval_model": eval_model,
             "num_tasks": 0,
             "total_runs": 0,
             "experiment_runs": 0,
@@ -337,9 +432,11 @@ def empty_discrete_payload(
         },
         "audit": {
             "workspace_root": _relative(workspace_root),
+            "policy_model": runtime.active_model,
+            "eval_model": eval_model,
             "session_id": None,
         },
-        "task_catalog": list_codegen_task_summaries(),
+        "task_catalog": annotate_task_catalog_with_skills(list_codegen_task_summaries(), runs_root=active_runs_root),
         "memory_markdown": "",
         "runs": [],
     }
@@ -379,8 +476,13 @@ def write_discrete_artifacts(
     branching_factor: int | None = None,
     item_workers: int | None = None,
     max_items: int | None = None,
+    max_episodes: int | None = None,
     selected_item_ids: list[str] | None = None,
     suite_config: dict[str, Any] | None = None,
+    eval_model: str | None = None,
+    record_skill: bool = False,
+    skill_item_limit: int | None = None,
+    selected_skill_id: str | None = None,
 ) -> Path:
     active_runs_root = runs_root or RUNS
     session_id = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
@@ -410,8 +512,13 @@ def write_discrete_artifacts(
         branching_factor=branching_factor,
         item_workers=item_workers,
         max_items=max_items,
+        max_episodes=max_episodes,
         selected_item_ids=selected_item_ids,
         suite_config=suite_config,
+        eval_model=eval_model,
+        record_skill=record_skill,
+        skill_item_limit=skill_item_limit,
+        selected_skill_id=selected_skill_id,
     )
     payload["audit"]["session_id"] = session_id
     generated_at = str(payload["summary"]["generated_at"])
@@ -435,11 +542,13 @@ def _add_common_run_arguments(
     if require_task_id:
         parser.add_argument("--task-id", required=True, help="Task id from benchmark/registry.json.")
     parser.add_argument("--model", help="Override the active proposal model for this run.")
+    parser.add_argument("--llm-concurrency", type=int, help="Override in-flight LLM request concurrency for this run.")
     parser.add_argument("--generation-budget", type=int, help="Override generation budget for this run.")
     parser.add_argument("--candidate-budget", type=int, help="Override candidate budget for this run.")
     parser.add_argument("--branching-factor", type=int, help="Override branching factor for this run.")
     parser.add_argument("--item-workers", type=int, help="Override dataset item worker count for this run.")
     parser.add_argument("--max-items", type=int, help="Run only the first N items from the selected task or sequence.")
+    parser.add_argument("--max-episodes", type=int, help="Run only the first N episodes from the selected multi-turn task.")
     if allow_suite_config:
         parser.add_argument(
             "--suite-config",
@@ -526,6 +635,8 @@ def _print_task_detail(summary: dict[str, Any]) -> None:
         ("runtime_backend", summary["runtime_backend"]),
         ("task_mode", summary["task_mode"]),
         ("task_mode_summary", task_mode_summary(str(summary["task_mode"]))),
+        ("interaction_mode", summary["interaction_mode"]),
+        ("interaction_mode_summary", interaction_mode_summary(str(summary["interaction_mode"]))),
         ("optimization_scope", summary["optimization_scope"]),
         ("optimization_scope_summary", optimization_scope_summary(str(summary["optimization_scope"]))),
         ("dataset_id", summary["dataset_id"]),
@@ -546,6 +657,8 @@ def _print_task_detail(summary: dict[str, Any]) -> None:
         ("item_workers", summary["item_workers"]),
         ("supports_max_items", summary["supports_max_items"]),
         ("default_max_items", summary["default_max_items"]),
+        ("supports_max_episodes", summary.get("supports_max_episodes")),
+        ("default_max_episodes", summary.get("default_max_episodes")),
         ("supports_runtime_config", summary["supports_runtime_config"]),
     ]
     print(_render_kv_rows(rows))
@@ -564,7 +677,8 @@ def _print_cached_run_summary(payload: dict[str, Any]) -> None:
     audit = dict(payload.get("audit") or {})
     rows = [
         ("generated_at", summary.get("generated_at")),
-        ("active_model", summary.get("active_model")),
+        ("policy_model", summary.get("policy_model") or summary.get("active_model")),
+        ("eval_model", summary.get("eval_model")),
         ("num_tasks", summary.get("num_tasks")),
         ("total_runs", summary.get("total_runs")),
         ("total_generations", summary.get("total_generations")),
@@ -573,6 +687,7 @@ def _print_cached_run_summary(payload: dict[str, Any]) -> None:
         ("session_id", audit.get("session_id")),
         ("workspace_root", audit.get("workspace_root")),
         ("max_items", audit.get("max_items")),
+        ("max_episodes", audit.get("max_episodes")),
     ]
     print(_render_kv_rows(rows))
     runs = list(payload.get("runs") or [])
@@ -608,8 +723,9 @@ def _parse_suite_config_arg(raw_value: str | None) -> dict[str, Any] | None:
     return dict(parsed)
 
 
-def _runtime_for_cli(model: str | None = None) -> ProposalRuntime:
+def _runtime_for_cli(model: str | None = None, llm_concurrency: int | None = None) -> ProposalRuntime:
     runtime = ProposalRuntime.from_env()
+    runtime = runtime.with_llm_concurrency(llm_concurrency)
     return runtime.with_model(model) if model else runtime
 
 
@@ -625,10 +741,10 @@ def _handle_tasks_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/tasks surface on the CLI.")
     parser.add_argument("--task-id", help="Filter down to one task id.")
     parser.add_argument("--track", help="Filter by track such as coding_verified or science_verified.")
-    parser.add_argument("--tier", choices=["comparable", "experiment"], help="Filter by benchmark tier.")
+    parser.add_argument("--tier", choices=["comparable", "experiment"], help="Filter by benchmark tier metadata.")
     parser.add_argument("--mode", choices=["answer", "artifact", "agent"], help="Filter by task contract mode.")
     parser.add_argument("--backend", choices=["dataset", "benchmark_adapter"], help="Filter by runtime backend.")
-    parser.add_argument("--main-only", action="store_true", help="Show only comparable tasks included in the main comparison.")
+    parser.add_argument("--main-only", action="store_true", help="Show only tasks included in the active benchmark task set.")
     parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
     args = parser.parse_args(argv)
     tasks = _matching_task_summaries(
@@ -664,7 +780,7 @@ def _handle_run_task_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/run-task surface on the CLI.")
     _add_common_run_arguments(parser, require_task_id=True, allow_suite_config=True)
     args = parser.parse_args(argv)
-    runtime = _runtime_for_cli(args.model)
+    runtime = _runtime_for_cli(args.model, args.llm_concurrency)
     suite_config = _parse_suite_config_arg(args.suite_config)
     out = write_discrete_artifacts(
         task_id=args.task_id,
@@ -674,6 +790,7 @@ def _handle_run_task_command(argv: list[str]) -> None:
         branching_factor=args.branching_factor,
         item_workers=args.item_workers,
         max_items=args.max_items,
+        max_episodes=args.max_episodes,
         suite_config=suite_config,
     )
     payload = _payload_from_artifact(out)
@@ -699,7 +816,7 @@ def _handle_run_sequence_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Mirror the /api/run-sequence surface on the CLI.")
     _add_common_run_arguments(parser, require_task_id=False, allow_suite_config=False)
     args = parser.parse_args(argv)
-    runtime = _runtime_for_cli(args.model)
+    runtime = _runtime_for_cli(args.model, args.llm_concurrency)
     out = write_discrete_artifacts(
         task_id=None,
         proposal_runtime=runtime,
@@ -708,6 +825,7 @@ def _handle_run_sequence_command(argv: list[str]) -> None:
         branching_factor=args.branching_factor,
         item_workers=args.item_workers,
         max_items=args.max_items,
+        max_episodes=args.max_episodes,
     )
     payload = _payload_from_artifact(out)
     if args.pretty:

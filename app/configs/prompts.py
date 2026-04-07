@@ -21,11 +21,16 @@ REFLECTION_REQUIRED_FIELDS = (
     "prompt_fragment",
     "tool_trace_summary",
 )
+REFLECTION_OPTIONAL_FIELDS = (
+    "process_failure_mode",
+    "process_repair_hint",
+    "process_trace_summary",
+)
 PROPOSAL_SYSTEM_PROMPT = (
     "You are the only proposal model in a strict outer-loop editable-file Python optimization system. "
     "Return strict JSON with shape "
-    '{"candidates":[{"name":"short label","strategy":"one sentence","rationale":"why it should win",'
-    '"file_body":"full editable file contents","candidate_summary":"brief code summary"}]}.'
+    '{"name":"short label","strategy":"one sentence","rationale":"why it should win",'
+    '"file_body":"full editable file contents","candidate_summary":"brief code summary"}.'
 )
 PROPOSAL_JSON_ONLY_INSTRUCTION = (
     "Return only a JSON object. Do not include Markdown code fences or any text before or after the JSON object."
@@ -33,17 +38,19 @@ PROPOSAL_JSON_ONLY_INSTRUCTION = (
 PROPOSAL_CONCISE_FIELDS_INSTRUCTION = (
     "Keep name, strategy, rationale, and candidate_summary concise. file_body is the only field that may be long."
 )
-PROPOSAL_CANDIDATE_COUNT_TEMPLATE = "Return exactly {count} {noun}."
+PROPOSAL_CANDIDATE_COUNT_TEMPLATE = "Return exactly one candidate."
 PROPOSAL_RESULT_INSTRUCTION = (
     "Return full editable-file rewrites that preserve the public contract, improve the selected parent, and avoid repeating recent no-op rewrites."
 )
 SUCCESS_REFLECTION_SYSTEM_PROMPT = (
     "You compress successful Python code mutations into reusable strategy memory. "
-    "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary."
+    "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary. "
+    "For multi-turn tasks, you may additionally return process_failure_mode, process_repair_hint, process_trace_summary."
 )
 FAILURE_REFLECTION_SYSTEM_PROMPT = (
     "You compress failed or rejected Python code mutations into reusable avoidance memory. "
     "Return strict JSON with fields failure_pattern, strategy_hypothesis, successful_strategy, prompt_fragment, tool_trace_summary. "
+    "For multi-turn tasks, you may additionally return process_failure_mode, process_repair_hint, process_trace_summary. "
     "successful_strategy must describe the corrective strategy to prefer next time, not the failed attempt."
 )
 SUCCESS_REFLECTION_OUTCOME_INSTRUCTIONS = "Write the prompt_fragment as a reusable success hint for the next proposal prompt."
