@@ -24,12 +24,6 @@ The web UI is a workbench, not the platform boundary. The platform boundary is t
 
 ## Setup
 
-This repo now includes both `pyproject.toml` and `uv.lock`.
-
-- `pyproject.toml` is the source of truth for project metadata and dependency ranges
-- `uv.lock` pins the exact resolved environment for reproducible `uv sync`
-- if you want to configure `uv`, add `tool.uv` settings to `pyproject.toml`; do not merge the lockfile into it
-
 Bootstrap the environment with the team-default Conda env:
 
 ```bash
