@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from app.bench.benchmark_adapter_support import effective_suite_run_config
+from app.bench.runtime_support import effective_suite_run_config
 
 
 CO_BENCH_DATASET_ID = "CO-Bench/CO-Bench"

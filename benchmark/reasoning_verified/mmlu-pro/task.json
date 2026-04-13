@@ -1,7 +1,7 @@
 {
   "id": "mmlu-pro",
   "title": "MMLU-Pro",
-  "description": "Evolve the editable solver independently for each MMLU-Pro reasoning question in the local full default test split.",
+  "description": "Return the final answer for each MMLU-Pro reasoning question in the local full default test split.",
   "benchmark_tier": "comparable",
   "track": "reasoning_verified",
   "dataset_id": "mmlu_pro",
@@ -13,10 +13,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "reasoning",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

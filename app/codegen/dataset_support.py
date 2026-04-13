@@ -9,18 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from app.bench.benchmark_support import canonical_text
+from app.bench.personalization_support import parse_socialbench_prompt
 from app.configs.codegen import (
     DATASET_NETWORK_ACCESS_INSTRUCTION,
+    DATASET_SINGLE_EPISODE_INSTRUCTION,
     DATASET_SINGLE_QUESTION_INSTRUCTION,
     QUESTION_PREVIEW_LIMIT,
 )
-from app.codegen.task_contracts import infer_runtime_backend
 
 VALID_MATH_ANSWER_FORMATS = {"symbolic", "numeric", "choice"}
 
 
 def is_dataset_task(task: dict[str, Any]) -> bool:
-    return bool(task.get("local_dataset_only")) and infer_runtime_backend(task) == "dataset"
+    return bool(task.get("local_dataset_only"))
 
 
 def _slugify(value: str) -> str:
@@ -105,6 +106,22 @@ def _hydrate_manifest_item(raw_item: dict[str, Any], *, manifest_path: Path) -> 
     return hydrated
 
 
+def _maybe_enrich_socialbench_item(task: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("id") or "").strip().lower()
+    metadata = dict(item.get("metadata") or {})
+    dataset_name = str(metadata.get("dataset") or metadata.get("benchmark") or "").strip().lower()
+    if task_id != "socialbench" and dataset_name != "socialbench":
+        return item
+    if item.get("raw_context") is not None:
+        return item
+    parsed = parse_socialbench_prompt(item.get("raw_prompt") or item.get("prompt"), metadata=metadata)
+    if parsed is None:
+        return item
+    enriched = dict(item)
+    enriched["raw_context"] = parsed
+    return enriched
+
+
 def load_question_manifest(task: dict[str, Any], min_items: int | None = None) -> list[dict[str, Any]]:
     manifest_path_raw = task.get("item_manifest_path")
     if not isinstance(manifest_path_raw, str) or not manifest_path_raw.strip():
@@ -165,6 +182,7 @@ def load_question_manifest(task: dict[str, Any], min_items: int | None = None) -
         raw_context = raw_item.get("context")
         raw_choices = list(raw_item.get("choices") or [])
         metadata = dict(raw_item.get("metadata") or {})
+        metadata.setdefault("source_index", index - 1)
         if str(task.get("track") or "") == "math_verified":
             answer_format = str(metadata.get("answer_format") or "").strip().lower()
             if answer_format not in VALID_MATH_ANSWER_FORMATS:
@@ -177,7 +195,9 @@ def load_question_manifest(task: dict[str, Any], min_items: int | None = None) -
                     f"Choice-form math question manifest item {index} must declare metadata.correct_choice_index: {manifest_path}"
                 )
         normalized.append(
-            {
+            _maybe_enrich_socialbench_item(
+                task,
+                {
                 "id": normalized_item_id,
                 "item_id": normalized_item_id,
                 "question_id": normalized_item_id,
@@ -192,7 +212,8 @@ def load_question_manifest(task: dict[str, Any], min_items: int | None = None) -
                 "expected_answer": canonical_text(expected),
                 "raw_expected_answer": expected,
                 "metadata": metadata,
-            }
+                },
+            )
         )
     return normalized
 
@@ -239,7 +260,9 @@ def micro_task_id(dataset_task_id: str, item_id: str) -> str:
 
 def question_prompt_context(task: dict[str, Any], item: dict[str, Any]) -> str:
     sections = [str(task.get("prompt_context") or "").strip()]
-    sections.append(f"Dataset question id: {item['item_id']}")
+    interaction_mode = str(task.get("interaction_mode") or "single_turn").strip()
+    item_label = "episode" if interaction_mode == "multi_turn" else "question"
+    sections.append(f"Dataset {item_label} id: {item['item_id']}")
     raw_prompt = str(item.get("raw_prompt") or "").strip()
     prompt = str(item.get("prompt") or "").strip()
     if raw_prompt:
@@ -266,7 +289,7 @@ def question_prompt_context(task: dict[str, Any], item: dict[str, Any]) -> str:
         sections.append(f"Choices: {json.dumps(choices, ensure_ascii=True)}")
     if not bool(task.get("allow_browsing", False)):
         sections.append(DATASET_NETWORK_ACCESS_INSTRUCTION)
-    sections.append(DATASET_SINGLE_QUESTION_INSTRUCTION)
+    sections.append(DATASET_SINGLE_EPISODE_INSTRUCTION if interaction_mode == "multi_turn" else DATASET_SINGLE_QUESTION_INSTRUCTION)
     return "\n".join(section for section in sections if section)
 
 

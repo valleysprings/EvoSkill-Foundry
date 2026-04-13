@@ -21,10 +21,8 @@ REQUIRED_TASK_FIELDS = (
     "benchmark_tier",
     "track",
     "answer_metric",
-    "runtime_backend",
     "task_mode",
     "interaction_mode",
-    "optimization_scope",
     "editable_file",
     "entry_symbol",
     "verifier",
@@ -99,6 +97,9 @@ QUESTION_PREVIEW_LIMIT = 180
 DATASET_NETWORK_ACCESS_INSTRUCTION = "Do not use browsing, web search, HTTP requests, or any external network access."
 DATASET_SINGLE_QUESTION_INSTRUCTION = (
     "This run evaluates exactly one dataset question. Preserve the declared entry symbol and solve this question only."
+)
+DATASET_SINGLE_EPISODE_INSTRUCTION = (
+    "This run evaluates exactly one dataset episode. Preserve the declared entry symbol, keep the multi-turn contract intact, and solve this episode only."
 )
 
 DEFAULT_SESSION_ID = "session-current"

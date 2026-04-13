@@ -72,10 +72,8 @@ export type TaskSummary = {
   dataset_size?: number;
   local_dataset_only?: boolean;
   split?: string | null;
-  runtime_backend: string;
   task_mode: string;
   interaction_mode: string;
-  optimization_scope: string;
   task_shape?: string | null;
   scoring_mode?: string | null;
   research_line?: string;
@@ -278,10 +276,8 @@ export type RunTask = {
   local_dataset_only?: boolean;
   split?: string | null;
   included_in_main_comparison: boolean;
-  runtime_backend?: string;
   task_mode?: string;
   interaction_mode?: string;
-  optimization_scope?: string;
   task_shape?: string | null;
   scoring_mode?: string | null;
   research_line?: string;
@@ -331,6 +327,8 @@ export type QuestionRecord = {
 export type ItemRun = {
   item_id: string;
   item_name: string;
+  item_source_index?: number;
+  item_brief?: string;
   question?: QuestionRecord;
   baseline?: Candidate;
   winner?: Candidate;
@@ -444,6 +442,7 @@ export type LiveEvent = {
   question_task_id?: string;
   item_id?: string;
   item_name?: string;
+  item_source_index?: number;
   item_brief?: string;
   expected_answer?: string;
   generation?: number;

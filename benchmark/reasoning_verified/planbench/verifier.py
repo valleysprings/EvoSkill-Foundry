@@ -4,7 +4,7 @@ import time
 
 from app.bench.benchmark_support import public_question_payload
 from app.codegen.verifier import load_callable_from_path
-from benchmark.reasoning_verified.planbench.official_adapter import (
+from benchmark.reasoning_verified.planbench.official.official_adapter import (
     PlanExtractionError,
     display_plan,
     extract_plan,

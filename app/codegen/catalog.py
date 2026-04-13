@@ -13,12 +13,10 @@ from app.configs.codegen import (
     VALID_BENCHMARK_TIERS,
     speedup_objective_spec,
 )
-from app.bench.benchmark_adapter_support import uses_benchmark_adapter_runtime, load_value_from_candidate
+from app.bench.runtime_support import load_value_from_candidate
 from app.codegen.selection import selection_spec_for_task
 from app.codegen.task_contracts import (
     infer_interaction_mode,
-    infer_optimization_scope,
-    infer_runtime_backend,
     infer_scoring_mode,
     infer_task_mode,
     infer_task_shape,
@@ -70,33 +68,36 @@ TASK_ORDER = {
     "rmtbench": 16,
     "personamem-32k": 17,
     "personafeedback": 18,
-    "alpsbench": 19,
-    "alpbench": 20,
-    "xstest-refusal-calibration": 21,
-    "harmbench-text-harmful": 22,
-    "jailbreakbench-harmful": 23,
-    "or-bench-hard-1k": 24,
-    "or-bench-toxic": 25,
-    "hallulens-precisewikiqa": 26,
-    "hallulens-mixedentities": 27,
-    "hallulens-longwiki": 28,
-    "longsafety": 29,
-    "tom-gibbs-multiturn-jailbreak": 30,
-    "safemtdata-benign-utility": 31,
-    "tau-bench-retail": 32,
-    "tau-bench-airline": 33,
-    "sciq": 34,
-    "qasc": 35,
-    "scienceqa": 36,
-    "openbookqa": 37,
-    "gpqa-diamond": 38,
-    "livecodebench": 39,
-    "co-bench": 40,
-    "alfworld": 41,
-    "assistantbench": 42,
-    "gaia": 43,
-    "gaia2": 44,
-    "osworld": 45,
+    "alpsbench-extraction": 19,
+    "alpsbench-update": 20,
+    "alpsbench-retrieval": 21,
+    "alpsbench-utilization": 22,
+    "alpbench": 23,
+    "xstest-refusal-calibration": 24,
+    "harmbench-text-harmful": 25,
+    "jailbreakbench-harmful": 26,
+    "or-bench-hard-1k": 27,
+    "or-bench-toxic": 28,
+    "hallulens-precisewikiqa": 29,
+    "hallulens-mixedentities": 30,
+    "hallulens-longwiki": 31,
+    "longsafety": 32,
+    "tom-gibbs-multiturn-jailbreak": 33,
+    "tau-bench-retail": 34,
+    "tau-bench-airline": 35,
+    "sciq": 36,
+    "qasc": 37,
+    "scienceqa": 38,
+    "openbookqa": 39,
+    "gpqa-diamond": 40,
+    "livecodebench-v1": 41,
+    "livecodebench-v2": 42,
+    "livecodebench-v3": 43,
+    "livecodebench-v4": 44,
+    "livecodebench-v5": 45,
+    "livecodebench-v6": 46,
+    "co-bench": 47,
+    "alfworld": 48,
 }
 
 def _speedup_objective_spec() -> dict[str, str]:
@@ -126,7 +127,6 @@ def _infer_safety_category(task: dict[str, Any]) -> str | None:
         "hallulens-longwiki": "factuality_hallucination",
         "longsafety": "jailbreak_attack",
         "tom-gibbs-multiturn-jailbreak": "policy_drift",
-        "safemtdata-benign-utility": "benign_utility",
         "tau-bench-retail": "policy_drift",
         "tau-bench-airline": "policy_drift",
     }
@@ -183,10 +183,8 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
             f"Task {normalized.get('id') or '<unknown>'} has invalid included_in_main_comparison="
             f"{included_in_main_comparison!r}; expected a boolean when provided."
         )
-    normalized["runtime_backend"] = infer_runtime_backend(normalized)
     normalized["task_mode"] = infer_task_mode(normalized)
     normalized["interaction_mode"] = infer_interaction_mode(normalized)
-    normalized["optimization_scope"] = infer_optimization_scope(normalized)
     normalized["task_shape"] = infer_task_shape(normalized)
     normalized["scoring_mode"] = infer_scoring_mode(normalized)
     research_line = str(normalized.get("research_line") or "").strip()
@@ -268,17 +266,10 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
     normalized["prompt_context"] = str(normalized.get("prompt_context") or "")
     normalized["allow_browsing"] = bool(normalized.get("allow_browsing", False))
     raw_run_baseline_verifier = normalized.get("run_baseline_verifier")
-    if raw_run_baseline_verifier is None:
-        normalized["run_baseline_verifier"] = normalized["runtime_backend"] != "benchmark_adapter"
-    else:
-        normalized["run_baseline_verifier"] = bool(raw_run_baseline_verifier)
+    normalized["run_baseline_verifier"] = True if raw_run_baseline_verifier is None else bool(raw_run_baseline_verifier)
     normalized["verifier_path"] = str(normalized["verifier_path"])
     normalized["editable_path"] = str(normalized["editable_path"])
     normalized["selection_spec"] = selection_spec_for_task(normalized)
-    if normalized["runtime_backend"] != "dataset" and normalized["local_dataset_only"]:
-        raise ValueError(
-            f"Task {normalized['id']} declares local_dataset_only=true but runtime_backend={normalized['runtime_backend']!r}."
-        )
     if normalized["local_dataset_only"]:
         if normalized["dataset_size"] <= 0:
             raise ValueError(f"Dataset task {normalized['id']} must declare dataset_size > 0.")
@@ -288,7 +279,7 @@ def _normalize_task(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _suite_run_config(task: dict[str, Any]) -> dict[str, Any] | None:
-    if not uses_benchmark_adapter_runtime(task):
+    if not isinstance(task.get("runtime_suite_config"), dict):
         return None
     config = dict(load_value_from_candidate(Path(str(task["editable_path"])), "RUN_CONFIG", {}) or {})
     build_run_config = load_value_from_candidate(Path(str(task["editable_path"])), "build_run_config", None)
@@ -343,33 +334,33 @@ def _suite_default_max_episodes(config: dict[str, Any] | None) -> int | None:
 
 
 def _task_supports_max_items(task: dict[str, Any]) -> bool:
-    if bool(task.get("local_dataset_only")):
-        return True
-    return uses_benchmark_adapter_runtime(task) and task.get("interaction_mode") == "single_turn"
+    return bool(task.get("local_dataset_only")) and task.get("interaction_mode") != "multi_turn"
 
 
 def _task_default_max_items(task: dict[str, Any], suite_run_config: dict[str, Any] | None) -> int | None:
+    del suite_run_config
     if bool(task.get("local_dataset_only")):
+        if task.get("interaction_mode") == "multi_turn":
+            return None
         size = int(task.get("dataset_size") or 0)
         return size if size > 0 else None
-    if uses_benchmark_adapter_runtime(task) and task.get("interaction_mode") == "single_turn":
-        return _suite_default_max_items(suite_run_config)
     return None
 
 
 def _task_supports_max_episodes(task: dict[str, Any]) -> bool:
-    return uses_benchmark_adapter_runtime(task) and task.get("interaction_mode") == "multi_turn"
+    return bool(task.get("local_dataset_only")) and task.get("interaction_mode") == "multi_turn"
 
 
 def _task_default_max_episodes(task: dict[str, Any], suite_run_config: dict[str, Any] | None) -> int | None:
-    if not _task_supports_max_episodes(task):
-        return None
-    return _suite_default_max_episodes(suite_run_config)
+    del suite_run_config
+    if _task_supports_max_episodes(task):
+        size = int(task.get("dataset_size") or 0)
+        return size if size > 0 else None
+    return None
 
 
 def task_summary(task: dict[str, Any]) -> dict[str, Any]:
     suite_run_config = _suite_run_config(task)
-    default_item_workers = 0 if uses_benchmark_adapter_runtime(task) else 20
     return {
         "id": task["id"],
         "title": task["title"],
@@ -386,17 +377,15 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "generation_budget": task["generation_budget"],
         "candidate_budget": task["candidate_budget"],
         "branching_factor": task["branching_factor"],
-        "item_workers": int(task.get("item_workers") or default_item_workers),
+        "item_workers": int(task.get("item_workers") or 20),
         "benchmark_tier": task["benchmark_tier"],
         "track": task["track"],
         "dataset_id": task["dataset_id"],
         "dataset_size": task["dataset_size"],
         "local_dataset_only": task["local_dataset_only"],
         "split": task["split"],
-        "runtime_backend": task["runtime_backend"],
         "task_mode": task["task_mode"],
         "interaction_mode": task["interaction_mode"],
-        "optimization_scope": task["optimization_scope"],
         "task_shape": task["task_shape"],
         "scoring_mode": task["scoring_mode"],
         "research_line": task["research_line"],

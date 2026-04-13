@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 import json
 import threading
@@ -14,6 +15,65 @@ from app.codegen.llm import ProposalRuntime
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_BENCHMARK_ROOT = ROOT / "tests" / "fixtures" / "benchmarks"
 FIXTURE_REGISTRY_PATH = FIXTURE_BENCHMARK_ROOT / "registry.json"
+BENCHMARK_REGISTRY_PATH = ROOT / "benchmark" / "registry.json"
+PERSONALIZATION_REFERENCE_CATALOG_PATH = ROOT / "benchmark" / "personalization_verified" / "reference_benchmarks.json"
+
+
+def _read_json(path: Path) -> object:
+    return json.loads(path.read_text())
+
+
+def enabled_registry_entries() -> list[dict[str, object]]:
+    payload = _read_json(BENCHMARK_REGISTRY_PATH)
+    entries = payload.get("tasks") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(f"Expected a top-level tasks list in {BENCHMARK_REGISTRY_PATH}")
+    return [dict(entry) for entry in entries if isinstance(entry, dict) and bool(entry.get("enabled", True))]
+
+
+def enabled_registry_task_ids() -> list[str]:
+    return [str(entry["id"]) for entry in enabled_registry_entries()]
+
+
+def disabled_registry_task_ids() -> set[str]:
+    payload = _read_json(BENCHMARK_REGISTRY_PATH)
+    entries = payload.get("tasks") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(f"Expected a top-level tasks list in {BENCHMARK_REGISTRY_PATH}")
+    return {
+        str(entry["id"])
+        for entry in entries
+        if isinstance(entry, dict) and not bool(entry.get("enabled", True))
+    }
+
+
+def runnable_personalization_reference_entries() -> list[dict[str, object]]:
+    payload = _read_json(PERSONALIZATION_REFERENCE_CATALOG_PATH)
+    if not isinstance(payload, list):
+        raise ValueError(f"Expected a top-level list in {PERSONALIZATION_REFERENCE_CATALOG_PATH}")
+    entries: list[dict[str, object]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "").strip() != "local_task":
+            continue
+        if str(entry.get("implementation_status") or "").strip() != "running":
+            continue
+        entries.append(dict(entry))
+    return entries
+
+
+def runnable_personalization_reference_ids() -> set[str]:
+    return {str(entry["id"]) for entry in runnable_personalization_reference_entries()}
+
+
+def runnable_personalization_task_ids() -> set[str]:
+    task_ids: set[str] = set()
+    for entry in runnable_personalization_reference_entries():
+        task_id = str(entry.get("task_id") or entry.get("id") or "").strip()
+        if task_id:
+            task_ids.add(task_id)
+    return task_ids
 
 
 def chat_response(payload: dict, *, model: str = "deepseek-chat") -> str:
@@ -44,7 +104,8 @@ class QueueTransport:
         self.responses = list(responses)
         self._lock = threading.Lock()
 
-    def __call__(self, _request_body, _config) -> str:
+    async def __call__(self, _request_body, _config) -> str:
+        await asyncio.sleep(0)
         with self._lock:
             if not self.responses:
                 raise AssertionError("No mocked LLM responses remain.")

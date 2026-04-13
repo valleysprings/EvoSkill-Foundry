@@ -12,10 +12,8 @@
   "split": "released-seed:local",
   "answer_metric": "plan_validity",
   "family": "planning",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

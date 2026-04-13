@@ -2,7 +2,7 @@
 
 Single-turn grounded factuality benchmark built as a deterministic HalluLens-style local GoodWiki slice.
 
-- runtime backend: `benchmark_adapter`
+- runtime backend: `dataset`
 - task contract: `respond(question: dict, runtime) -> str`
 - primary metric: `hallucination_rate` (`direction=min`)
 - item aggregation: a prompt fails when the assistant abstains unnecessarily or gives an incorrect or unsupported answer relative to the provided reference

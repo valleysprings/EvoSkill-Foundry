@@ -1,7 +1,7 @@
 {
   "id": "olymmath",
   "title": "OlymMATH",
-  "description": "Evolve the editable solver independently for each OlymMATH en-hard test question in the local answer-available dataset split.",
+  "description": "Return the final answer for each OlymMATH en-hard test question in the local answer-available dataset split.",
   "benchmark_tier": "comparable",
   "track": "math_verified",
   "dataset_id": "olymmath",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

@@ -1,7 +1,7 @@
 {
   "id": "longbench-v2",
   "title": "LongBench v2",
-  "description": "Evolve the editable solver independently for each LongBench v2 long-context multiple-choice question, using a prepared local manifest and per-item cached context files.",
+  "description": "Return the final answer for each LongBench v2 long-context multiple-choice question, using a prepared local manifest and per-item cached context files.",
   "benchmark_tier": "comparable",
   "track": "longcontext_verified",
   "dataset_id": "longbench_v2",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "qa",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

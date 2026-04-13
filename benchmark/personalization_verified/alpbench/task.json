@@ -1,7 +1,7 @@
 {
   "id": "alpbench",
   "title": "ALPBench",
-  "description": "Evolve the solver against the full local ALPBench benchmark for latent user-attribute inference.",
+  "description": "Return the latent user-attribute label for each local ALPBench benchmark item.",
   "benchmark_tier": "comparable",
   "included_in_main_comparison": true,
   "track": "personalization_verified",
@@ -17,10 +17,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "personalization",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_shape": "classification",
   "scoring_mode": "label_match",
   "task_signature": [

@@ -13,10 +13,8 @@
   "allow_browsing": false,
   "answer_metric": "avg_test_score",
   "family": "operations-research",
-  "runtime_backend": "dataset",
   "task_mode": "artifact",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

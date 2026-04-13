@@ -42,15 +42,7 @@ The current personalization stack depends on project-managed Hugging Face datase
 
 ## Current Catalog State
 
-The tracked catalog currently contains `11` benchmarks:
-
-- `8` single-turn tracked benchmarks
-- `3` multi-turn tracked benchmarks
-- `8` official runnable local tasks
-- `3` planned tracked benchmarks
-- `0` blocked tracked benchmarks
-
-Current official runnable set:
+The reference catalog currently tracks `11` running local tasks, all single-turn:
 
 - `InCharacter`
 - `CharacterBench`
@@ -58,36 +50,35 @@ Current official runnable set:
 - `TimeChara`
 - `PersonaFeedback`
 - `PersonaMem`
-- `AlpsBench`
+- `AlpsBench Task 1 (Extraction)`
+- `AlpsBench Task 2 (Update)`
+- `AlpsBench Task 3 (Retrieval)`
+- `AlpsBench Task 4 (Utilization)`
 - `ALPBench`
 
-Planned tracked benchmarks:
+The registry-enabled preparation set is narrower and currently includes:
 
-- `RMTBench`
-- `CharacterEval`
-- `CoSER`
-
-Removed from the formal benchmark lane in this cleanup:
-
-- `RoleEval`
-- `Ditto`
-- `InCharacter ACG Slice`
-- `CharacterBench ACG Slice`
-- `LifeChoice`
-- `MiniMax Role-Play Bench`
-- `PersonaLens`
-- `PDR-Bench`
+- `incharacter`
+- `characterbench`
+- `socialbench`
+- `personafeedback`
+- `personamem-32k`
+- `alpsbench-extraction`
+- `alpsbench-update`
+- `alpsbench-retrieval`
+- `alpsbench-utilization`
+- `alpbench`
 
 ## Official-Fidelity Policy
 
-Only benchmarks that satisfy all of the following can remain `local_task + running`:
+Benchmarks can remain `local_task + running` in two cases:
 
-- the local input format matches the released benchmark contract
-- the generation flow matches the published protocol
-- evaluator / judge / reward-model usage matches the published protocol
-- score aggregation matches the published protocol
+- `metric_fidelity=official`
+  the local runnable path matches the published protocol closely enough to benchmark directly
+- `metric_fidelity=proxy_local`
+  the local runnable path follows the released public contract and scorer, but the benchmark-side judge or hidden aggregation is not fully public
 
-If any of those conditions are known to fail, the benchmark is downgraded to `planned_task` or `external_reference` and removed from the runnable picker.
+If the public release is incomplete and no honest runnable proxy exists, the benchmark is downgraded to `planned_task` or `external_reference`.
 
 `metric_fidelity` is interpreted strictly:
 
@@ -96,7 +87,7 @@ If any of those conditions are known to fail, the benchmark is downgraded to `pl
 - `adapted_local`
   kept for schema compatibility, but not used by the current tracked catalog after this reset
 - `proxy_local`
-  kept for schema compatibility, but no longer used by the tracked personalization catalog
+  the local runnable path matches the public release but not the hidden benchmark-side judge stack
 - `reference_only`
   tracked in catalog metadata only; not considered an official runnable implementation
 
@@ -146,7 +137,9 @@ Each task README should state:
 - required models / evaluator assets
 - known deviations
 
-If a local wrapper is not protocol-faithful, the README must say:
+If a local wrapper is only a public-release proxy, the README must say so explicitly.
+
+If a local wrapper is not runnable and not protocol-faithful, the README must say:
 
 - `Not official; hidden from runnable picker until rewritten.`
 
@@ -159,10 +152,12 @@ python benchmark/prepare_datasets.py \
   --task-id incharacter \
   --task-id characterbench \
   --task-id socialbench \
-  --task-id timechara \
   --task-id personafeedback \
   --task-id personamem-32k \
-  --task-id alpsbench \
+  --task-id alpsbench-extraction \
+  --task-id alpsbench-update \
+  --task-id alpsbench-retrieval \
+  --task-id alpsbench-utilization \
   --task-id alpbench
 ```
 

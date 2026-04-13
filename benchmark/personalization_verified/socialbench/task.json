@@ -1,7 +1,7 @@
 {
   "id": "socialbench",
   "title": "SocialBench",
-  "description": "Evolve the solver against SocialBench for role-play sociality, memory, self-awareness, and group preference judgments.",
+  "description": "Return the task answer or reply for each SocialBench item covering role-play sociality, memory, self-awareness, and group preference judgments.",
   "benchmark_tier": "comparable",
   "included_in_main_comparison": true,
   "track": "personalization_verified",
@@ -17,10 +17,8 @@
   "allow_browsing": false,
   "answer_metric": "socialbench_score",
   "family": "personalization",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_shape": "dialogue_judgement",
   "scoring_mode": "hybrid",
   "task_signature": [

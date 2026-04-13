@@ -44,10 +44,8 @@ function task(id: string): TaskSummary {
     dataset_size: 1,
     local_dataset_only: true,
     split: "test",
-    runtime_backend: "dataset",
     task_mode: "artifact",
     interaction_mode: "single_turn",
-    optimization_scope: "implementation",
     included_in_main_comparison: true,
     supports_runtime_config: false,
     suite_run_config: null,
@@ -113,7 +111,6 @@ function payload(taskIds: string[]): Payload {
       included_in_main_comparison: true,
       task: {
         ...task(id),
-        runtime_backend: "dataset",
       },
       baseline: {
         agent: "baseline",
@@ -144,28 +141,28 @@ function payload(taskIds: string[]): Payload {
 }
 
 test("extracts the latest task id from the first cached run", () => {
-  assert.equal(latestTaskIdFromPayload(payload(["livecodebench", "olymmath"])), "livecodebench");
+  assert.equal(latestTaskIdFromPayload(payload(["livecodebench-v6", "olymmath"])), "livecodebench-v6");
 });
 
 test("prefers the latest cached task over the default first task", () => {
-  const tasks = [task("olymmath"), task("livecodebench")];
-  assert.equal(initialTaskId(tasks, payload(["livecodebench"])), "livecodebench");
+  const tasks = [task("olymmath"), task("livecodebench-v6")];
+  assert.equal(initialTaskId(tasks, payload(["livecodebench-v6"])), "livecodebench-v6");
 });
 
 test("skips inactive cached tasks when choosing the default task", () => {
-  const inactive = { ...task("gaia"), included_in_main_comparison: false };
+  const inactive = { ...task("rmtbench"), included_in_main_comparison: false };
   const active = task("olymmath");
-  assert.equal(initialTaskId([inactive, active], payload(["gaia"])), "olymmath");
+  assert.equal(initialTaskId([inactive, active], payload(["rmtbench"])), "olymmath");
 });
 
 test("returns only the selected task payload when the cached report matches", () => {
-  const scoped = taskScopedPayload(payload(["livecodebench", "olymmath"]), "livecodebench");
+  const scoped = taskScopedPayload(payload(["livecodebench-v6", "olymmath"]), "livecodebench-v6");
   assert.ok(scoped);
-  assert.deepEqual(scoped?.runs.map((run) => run.task.id), ["livecodebench"]);
+  assert.deepEqual(scoped?.runs.map((run) => run.task.id), ["livecodebench-v6"]);
 });
 
 test("returns null when the cached report belongs to another task", () => {
-  assert.equal(taskScopedPayload(payload(["olymmath"]), "livecodebench"), null);
+  assert.equal(taskScopedPayload(payload(["olymmath"]), "livecodebench-v6"), null);
 });
 
 test("prefers current task catalog metadata over stale cached task catalog entries", () => {
@@ -174,10 +171,8 @@ test("prefers current task catalog metadata over stale cached task catalog entri
     track: "or_verified",
     benchmark_tier: "experiment",
     included_in_main_comparison: false,
-    runtime_backend: "dataset",
     task_mode: "artifact",
     interaction_mode: "single_turn",
-    optimization_scope: "wrapper",
     supports_runtime_config: false,
     local_dataset_only: true,
     dataset_size: 36,
@@ -187,9 +182,9 @@ test("prefers current task catalog metadata over stale cached task catalog entri
   };
   const staleCached = {
     ...current,
-    runtime_backend: "benchmark_adapter",
-    task_mode: "agent",
-    interaction_mode: "multi_turn",
+    runtime_backend: "dataset",
+    task_mode: "answer",
+    interaction_mode: "single_turn",
     optimization_scope: "prompt",
     supports_runtime_config: true,
     local_dataset_only: false,
@@ -200,9 +195,7 @@ test("prefers current task catalog metadata over stale cached task catalog entri
   };
 
   const [merged] = mergeTaskCatalogs([current], [staleCached]);
-  assert.equal(merged.runtime_backend, "dataset");
   assert.equal(merged.task_mode, "artifact");
-  assert.equal(merged.optimization_scope, "wrapper");
   assert.equal(merged.supports_runtime_config, false);
   assert.equal(merged.local_dataset_only, true);
   assert.equal(merged.dataset_size, 36);

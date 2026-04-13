@@ -1,7 +1,7 @@
 {
   "id": "aime-2025",
   "title": "AIME 2025",
-  "description": "Evolve the editable solver independently for each AIME 2025 short-answer question from the combined I and II local public splits.",
+  "description": "Return the final answer for each AIME 2025 short-answer question from the combined I and II local public splits.",
   "benchmark_tier": "comparable",
   "track": "math_verified",
   "dataset_id": "aime_2025_full",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

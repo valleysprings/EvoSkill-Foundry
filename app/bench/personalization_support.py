@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -105,6 +106,126 @@ def serialize_dialogue_history(history: Sequence[dict[str, Any] | tuple[str, str
             continue
         lines.append(f"{speaker_text}: {message_text}")
     return "\n\n".join(lines)
+
+
+_SOCIALBENCH_SECTION_PATTERN = re.compile(r"(?m)^==\s*([^=\n]+?)\s*==\s*$")
+_SOCIALBENCH_DIALOGUE_LINE_PATTERN = re.compile(r"^\s*([^:\n]+):\s*(.+?)\s*$")
+_SOCIALBENCH_OPTION_LINE_PATTERN = re.compile(r"^\s*([A-H])\.\s*(.+?)\s*$")
+
+
+def _socialbench_sections(text: str) -> dict[str, str]:
+    matches = list(_SOCIALBENCH_SECTION_PATTERN.finditer(text))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[match.group(1).strip()] = text[start:end].strip()
+    return sections
+
+
+def _socialbench_split_dialogue_block(block: str) -> tuple[list[str], list[str]]:
+    dialogue_lines: list[str] = []
+    tail_lines: list[str] = []
+    seen_dialogue = False
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_option = _SOCIALBENCH_OPTION_LINE_PATTERN.match(stripped) is not None
+        is_dialogue = _SOCIALBENCH_DIALOGUE_LINE_PATTERN.match(stripped) is not None and not is_option
+        if is_dialogue and not tail_lines:
+            dialogue_lines.append(stripped)
+            seen_dialogue = True
+            continue
+        if seen_dialogue:
+            tail_lines = [line, *lines[index + 1 :]]
+            break
+        tail_lines = lines[index:]
+        break
+    return dialogue_lines, tail_lines
+
+
+def _socialbench_dialogue_history(lines: Sequence[str]) -> list[dict[str, str]]:
+    history: list[dict[str, str]] = []
+    for line in lines:
+        match = _SOCIALBENCH_DIALOGUE_LINE_PATTERN.match(line.strip())
+        if match is None:
+            continue
+        history.append({"speaker": match.group(1).strip(), "text": match.group(2).strip()})
+    return history
+
+
+def _socialbench_options(lines: Sequence[str]) -> list[dict[str, str]]:
+    parsed: list[dict[str, str]] = []
+    for line in lines:
+        match = _SOCIALBENCH_OPTION_LINE_PATTERN.match(line.strip())
+        if match is None:
+            continue
+        parsed.append({"label": match.group(1), "text": match.group(2).strip()})
+    return parsed
+
+
+def _socialbench_instruction(lines: Sequence[str]) -> str:
+    fragments: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or _SOCIALBENCH_OPTION_LINE_PATTERN.match(line):
+            continue
+        normalized = line.rstrip(":：").strip().lower()
+        if normalized in {"your selection", "你的选择", "assistant"}:
+            continue
+        fragments.append(line)
+    return " ".join(fragments).strip()
+
+
+def _socialbench_latest_user_message(history: Sequence[dict[str, str]]) -> str:
+    for turn in reversed(history):
+        speaker = str(turn.get("speaker") or "").strip().lower()
+        if speaker in {"user", "用户"}:
+            return str(turn.get("text") or "").strip()
+    return ""
+
+
+def parse_socialbench_prompt(prompt: object, *, metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    text = str(prompt or "").strip()
+    if not text:
+        return None
+
+    metadata_map = dict(metadata or {})
+    sections = _socialbench_sections(text)
+    conversation_block = sections.get("Conversations") or sections.get("对话历史") or text
+    dialogue_lines, tail_lines = _socialbench_split_dialogue_block(conversation_block)
+    history = _socialbench_dialogue_history(dialogue_lines)
+    options = _socialbench_options(tail_lines)
+    instruction = _socialbench_instruction(tail_lines)
+
+    target_utterance = ""
+    utterance_match = re.search(r'utterance\s+"([^"]+)"', instruction, flags=re.IGNORECASE)
+    if utterance_match is None:
+        utterance_match = re.search(r'最符合"([^"]+)"说话者', instruction)
+    if utterance_match is not None:
+        target_utterance = utterance_match.group(1).strip()
+
+    latest_user_message = _socialbench_latest_user_message(history)
+    question_text = target_utterance or latest_user_message or instruction
+    role_name = str(metadata_map.get("role_name") or metadata_map.get("name") or "").strip()
+
+    payload = {
+        "benchmark": "socialbench",
+        "category": str(metadata_map.get("category") or "").strip(),
+        "lang": str(metadata_map.get("lang") or "").strip(),
+        "role_name": role_name,
+        "profile": sections.get("Profile") or sections.get("角色描述") or "",
+        "profiles": sections.get("Profiles") or "",
+        "dialogue_history": history,
+        "latest_user_message": latest_user_message,
+        "target_utterance": target_utterance,
+        "instruction": instruction,
+        "question_text": question_text,
+        "options": options,
+    }
+    return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
 
 def format_rubric_input(item: dict[str, Any], response: object) -> str:

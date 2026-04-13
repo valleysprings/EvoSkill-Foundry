@@ -3,36 +3,27 @@ from __future__ import annotations
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from app.bench.agent_benchmarks import (
-    _action_summary,
-    _episode_record,
-    _history_message,
-    _resolve_parallel_workers,
-    _tool_result_message,
-    _turn_record,
+from app.bench.multi_turn_agent import (
+    AgentRuntime,
+    MULTI_TURN_AGENT_CONTRACT,
+    load_agent_adapter,
+    normalize_step_result,
+    validate_episode_payload,
+    validate_turn_payload,
 )
-from app.bench.benchmark_adapter_support import (
-    build_benchmark_adapter_candidate,
-    build_benchmark_adapter_result,
-    effective_suite_run_config,
-    emit_progress,
-    runtime_for_benchmark_adapter_task,
-)
-from app.bench.multi_turn_agent import AgentRuntime, load_agent_adapter, normalize_step_result
+from app.bench.runtime_support import effective_suite_run_config, runtime_for_task
 
 
 ROOT = Path(__file__).resolve().parents[3]
 TASK_ROOT = Path(__file__).resolve().parent
 ALFWORLD_REPO_ROOT = ROOT / "external" / "alfworld"
 ALFWORLD_DATA_ROOT = TASK_ROOT / "data"
-ALFWORLD_JSON_ROOT = ALFWORLD_DATA_ROOT / "json_2.1.1"
 DEFAULT_SPLIT = "valid_seen"
-DEFAULT_TASK_LIMIT = 140
 DEFAULT_MAX_TURNS = 50
 VALID_SPLITS = {"train", "valid_seen", "valid_unseen"}
 
@@ -49,82 +40,42 @@ def _repo_on_sys_path(repo_root: Path):
             pass
 
 
-def _configured_split(config: dict[str, Any]) -> str:
-    split = str(config.get("episode_split") or DEFAULT_SPLIT).strip() or DEFAULT_SPLIT
-    if split not in VALID_SPLITS:
-        raise ValueError(f"Unsupported ALFWorld split {split!r}. Expected one of {sorted(VALID_SPLITS)}.")
-    return split
+def _require_question_item(task: dict[str, Any]) -> dict[str, Any]:
+    item = task.get("question_item")
+    if not isinstance(item, dict):
+        raise ValueError("Dataset question task must provide question_item.")
+    return item
 
 
-def _task_limit(config: dict[str, Any], requested_limit: int | None) -> int:
-    if isinstance(requested_limit, int) and requested_limit > 0:
-        return requested_limit
-    raw_value = config.get("task_limit")
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_TASK_LIMIT
-    return parsed if parsed > 0 else DEFAULT_TASK_LIMIT
+def _history_message(role: str, content: str | None, *, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"role": role, "content": content}
+    if tool_calls:
+        payload["tool_calls"] = list(tool_calls)
+    return payload
 
 
-def _max_turns(config: dict[str, Any]) -> int:
-    raw_value = config.get("max_turns")
-    try:
-        parsed = int(raw_value)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_MAX_TURNS
-    return parsed if parsed > 0 else DEFAULT_MAX_TURNS
+def _tool_result_message(call_id: str, content: str, *, error: bool = False) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "content": content,
+        "tool_call_id": call_id,
+        "error": error,
+    }
 
 
-def _instruction_from_traj(traj_payload: dict[str, Any]) -> str:
-    anns = list((traj_payload.get("turk_annotations") or {}).get("anns") or [])
-    for ann in anns:
-        if not isinstance(ann, dict):
-            continue
-        task_desc = str(ann.get("task_desc") or "").strip()
-        if task_desc:
-            return task_desc
-    task_type = str(traj_payload.get("task_type") or "alfworld task").replace("_", " ").strip()
-    return task_type.capitalize()
-
-
-def _episode_specs_for_run(config: dict[str, Any], requested_limit: int | None) -> list[dict[str, Any]]:
-    split = _configured_split(config)
-    split_root = ALFWORLD_JSON_ROOT / split
-    if not split_root.exists():
-        raise FileNotFoundError(f"ALFWorld split directory not found: {split_root}")
-    rows: list[dict[str, Any]] = []
-    for game_path in sorted(split_root.rglob("game.tw-pddl")):
-        root_text = str(game_path.parent)
-        if "movable" in root_text or "Sliced" in root_text:
-            continue
-        traj_path = game_path.with_name("traj_data.json")
-        if not traj_path.exists():
-            continue
-        game_payload = json.loads(game_path.read_text())
-        if not bool(game_payload.get("solvable")):
-            continue
-        traj_payload = json.loads(traj_path.read_text())
-        episode_id = "/".join(game_path.relative_to(split_root).parts[:-1])
-        rows.append(
-            {
-                "episode_id": episode_id,
-                "instruction": _instruction_from_traj(traj_payload),
-                "game_file": str(game_path),
-                "traj_file": str(traj_path),
-                "split": split,
-            }
-        )
-    if not rows:
-        raise ValueError(f"No solvable ALFWorld episodes found under {split_root}")
-    return rows[: _task_limit(config, requested_limit)]
-
-
-def _extract_task_desc(observation_text: str, fallback: str) -> str:
-    marker = "Your task is to: "
-    if marker in observation_text:
-        return observation_text.partition(marker)[-1].strip() or fallback
-    return fallback
+def _action_summary(action: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for tool_call in list(action.get("tool_calls") or []):
+        name = str(tool_call.get("name") or "").strip() or "tool"
+        arguments = dict(tool_call.get("arguments") or {})
+        detail = str(arguments.get("command") or arguments.get("message") or "").strip()
+        parts.append(f"{name}({detail})" if detail else name)
+    message = str(action.get("message") or "").strip()
+    if message:
+        parts.append(message)
+    if bool(action.get("done")):
+        parts.append("done")
+    return " | ".join(part for part in parts if part)
 
 
 def _batched_value(payload: Any) -> Any:
@@ -142,18 +93,73 @@ def _batched_info(payload: Any, key: str, default: Any) -> Any:
     return default
 
 
+def _configured_split(config: dict[str, Any], item: dict[str, Any]) -> str:
+    metadata = dict(item.get("metadata") or {})
+    split = str(metadata.get("split") or config.get("episode_split") or DEFAULT_SPLIT).strip() or DEFAULT_SPLIT
+    if split not in VALID_SPLITS:
+        raise ValueError(f"Unsupported ALFWorld split {split!r}. Expected one of {sorted(VALID_SPLITS)}.")
+    return split
+
+
+def _max_turns(config: dict[str, Any]) -> int:
+    raw_value = config.get("max_turns")
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_TURNS
+    return parsed if parsed > 0 else DEFAULT_MAX_TURNS
+
+
+def _extract_task_desc(observation_text: str, fallback: str) -> str:
+    marker = "Your task is to: "
+    if marker in observation_text:
+        return observation_text.partition(marker)[-1].strip() or fallback
+    return fallback
+
+
+def _resolve_episode_spec(item: dict[str, Any], split: str) -> dict[str, str]:
+    metadata = dict(item.get("metadata") or {})
+    episode_id = str(metadata.get("episode_id") or item.get("item_id") or "").strip()
+    instruction = str(metadata.get("instruction") or item.get("prompt") or "").strip()
+    game_file = str(metadata.get("game_file") or "").strip()
+    traj_file = str(metadata.get("traj_file") or "").strip()
+    if not episode_id:
+        raise ValueError("ALFWorld item is missing metadata.episode_id.")
+    if not instruction:
+        raise ValueError(f"ALFWorld item {episode_id!r} is missing instruction.")
+    if not game_file:
+        raise ValueError(f"ALFWorld item {episode_id!r} is missing metadata.game_file.")
+    if not traj_file:
+        raise ValueError(f"ALFWorld item {episode_id!r} is missing metadata.traj_file.")
+
+    game_path = (TASK_ROOT / game_file).resolve()
+    traj_path = (TASK_ROOT / traj_file).resolve()
+    if not game_path.exists():
+        raise FileNotFoundError(f"ALFWorld game file not found: {game_path}")
+    if not traj_path.exists():
+        raise FileNotFoundError(f"ALFWorld trajectory file not found: {traj_path}")
+    return {
+        "episode_id": episode_id,
+        "instruction": instruction,
+        "split": split,
+        "game_file": str(game_path),
+        "traj_file": str(traj_path),
+    }
+
+
 def _make_alfworld_env(game_file: str, max_turns: int):
     with _repo_on_sys_path(ALFWORLD_REPO_ROOT):
         try:
             import textworld  # type: ignore[import-not-found]
             import textworld.gym  # type: ignore[import-not-found]
             from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos  # type: ignore[import-not-found]
-        except ModuleNotFoundError as exc:  # pragma: no cover - exercised through runtime only
+        except ModuleNotFoundError as exc:  # pragma: no cover
             missing = getattr(exc, "name", None) or "official ALFWorld dependencies"
             raise RuntimeError(
                 "ALFWorld official evaluation requires the external repo dependencies. "
                 f"Missing module: {missing}. Install the ALFWorld text environment requirements first."
             ) from exc
+
         os.environ["ALFWORLD_DATA"] = str(ALFWORLD_DATA_ROOT)
         request_infos = textworld.EnvInfos(won=True, admissible_commands=True, extras=["gamefile"])
         env_id = textworld.gym.register_games(
@@ -167,45 +173,49 @@ def _make_alfworld_env(game_file: str, max_turns: int):
         return textworld.gym.make(env_id)
 
 
-def _run_episode(
-    *,
-    task: dict[str, Any],
-    candidate_path: Path,
-    proposal_runtime,
-    suite_name: str,
-    domain: str,
-    suite_config: dict[str, Any],
-    episode_spec: dict[str, Any],
-    index: int,
-    progress_callback=None,
-    pace_ms: int = 0,
-) -> tuple[int, dict[str, Any], dict[str, Any], bool, float]:
-    init_episode, step = load_agent_adapter(candidate_path)
-    runtime = AgentRuntime(proposal_runtime)
+def evaluate_candidate(*, task, candidate_path, source_code, baseline_metrics, memory_applied):
+    del source_code, baseline_metrics, memory_applied
+
+    item = _require_question_item(task)
+    suite_config = effective_suite_run_config(task, Path(candidate_path))
+    split = _configured_split(suite_config, item)
+    episode_spec = _resolve_episode_spec(item, split)
     max_turns = _max_turns(suite_config)
-    env = _make_alfworld_env(str(episode_spec["game_file"]), max_turns)
+    init_episode, step = load_agent_adapter(Path(candidate_path))
+    runtime = AgentRuntime(runtime_for_task(task))
+
+    started = time.perf_counter()
+    env = _make_alfworld_env(episode_spec["game_file"], max_turns)
     try:
         initial_obs, initial_infos = env.reset()
         observation_text = str(_batched_value(initial_obs) or "")
-        instruction = _extract_task_desc(observation_text, str(episode_spec["instruction"]))
+        instruction = _extract_task_desc(observation_text, episode_spec["instruction"])
         admissible_commands = list(_batched_info(initial_infos, "admissible_commands", []) or [])
-        episode = _episode_record(
-            suite=suite_name,
-            domain=domain,
-            episode_id=str(episode_spec["episode_id"]),
-            instruction=instruction,
-            tools=list(suite_config.get("tools") or []),
-            limits={"max_turns": max_turns},
-            metadata={
-                "split": episode_spec["split"],
-                "game_file": str(episode_spec["game_file"]),
-                "traj_file": str(episode_spec["traj_file"]),
-            },
-            policy={},
+        episode = validate_episode_payload(
+            {
+                "contract": MULTI_TURN_AGENT_CONTRACT,
+                "suite": "alfworld-text",
+                "domain": "alfworld",
+                "episode_id": episode_spec["episode_id"],
+                "instruction": instruction,
+                "policy": {},
+                "tools": list(suite_config.get("tools") or []),
+                "limits": {"max_turns": max_turns},
+                "metadata": {
+                    "split": episode_spec["split"],
+                    "game_file": episode_spec["game_file"],
+                    "traj_file": episode_spec["traj_file"],
+                    "official_env": True,
+                },
+            }
         )
+
         state_result = init_episode(episode)
-        state = dict(state_result or {})
-        if state_result is not None and not isinstance(state_result, dict):
+        if state_result is None:
+            state: dict[str, Any] = {}
+        elif isinstance(state_result, dict):
+            state = dict(state_result)
+        else:
             raise ValueError("init_episode(...) must return a dict or None.")
 
         history: list[dict[str, Any]] = []
@@ -213,19 +223,6 @@ def _run_episode(
         success = False
         reward = 0.0
         goal_condition_success_rate = 0.0
-
-        emit_progress(
-            progress_callback,
-            task_id=str(task["id"]),
-            phase="episode_started",
-            item_id=str(episode_spec["episode_id"]),
-            item_name=str(episode_spec["episode_id"]),
-            item_brief=instruction,
-            expected_answer="Solve episode",
-            candidate_status="running",
-            message=f"[{episode_spec['episode_id']}] {instruction}",
-            pace_ms=pace_ms,
-        )
 
         for turn_index in range(max_turns):
             observation = {
@@ -235,13 +232,16 @@ def _run_episode(
                 "won": success,
                 "goal_condition_success_rate": goal_condition_success_rate,
             }
-            turn_payload = _turn_record(
-                episode=episode,
-                turn_index=turn_index,
-                history=history,
-                observation=observation,
-                state=state,
-                metadata={"official_env": True},
+            turn_payload = validate_turn_payload(
+                {
+                    "contract": MULTI_TURN_AGENT_CONTRACT,
+                    "episode": episode,
+                    "turn_index": turn_index,
+                    "history": history,
+                    "observation": observation,
+                    "state": state,
+                    "metadata": {"official_env": True},
+                }
             )
             action = normalize_step_result(step(turn_payload, runtime))
             tool_results: list[dict[str, Any]] = []
@@ -251,9 +251,11 @@ def _run_episode(
                 history.append(_history_message("assistant", action["message"], tool_calls=action["tool_calls"]))
 
             for call_index, tool_call in enumerate(action["tool_calls"]):
-                tool_name = str(tool_call.get("name") or "")
+                tool_name = str(tool_call.get("name") or "").strip()
                 arguments = dict(tool_call.get("arguments") or {})
                 call_id = str(tool_call.get("id") or f"{episode_spec['episode_id']}-tool-{turn_index}-{call_index}")
+                error = False
+
                 if tool_name == "act":
                     command = str(arguments.get("command") or "").strip()
                     next_obs, _scores, dones, infos = env.step([command])
@@ -273,18 +275,28 @@ def _run_episode(
                         },
                         ensure_ascii=True,
                     )
-                    tool_results.append({"tool_call": {**tool_call, "id": call_id}, "content": content, "error": False})
-                    history.append(_tool_result_message(call_id, content))
-                    continue
-                if tool_name == "complete":
+                elif tool_name == "complete":
                     episode_done = True
-                    content = json.dumps({"status": "completed", "message": str(arguments.get("message") or "")}, ensure_ascii=True)
-                    tool_results.append({"tool_call": {**tool_call, "id": call_id}, "content": content, "error": False})
-                    history.append(_tool_result_message(call_id, content))
-                    continue
-                content = json.dumps({"error": f"Unknown tool {tool_name!r}"}, ensure_ascii=True)
-                tool_results.append({"tool_call": {**tool_call, "id": call_id}, "content": content, "error": True})
-                history.append(_tool_result_message(call_id, content, error=True))
+                    content = json.dumps(
+                        {
+                            "status": "completed",
+                            "message": str(arguments.get("message") or ""),
+                        },
+                        ensure_ascii=True,
+                    )
+                else:
+                    error = True
+                    content = json.dumps({"error": f"Unknown tool {tool_name!r}"}, ensure_ascii=True)
+
+                tool_call_with_id = {**tool_call, "id": call_id}
+                tool_results.append(
+                    {
+                        "tool_call": tool_call_with_id,
+                        "content": content,
+                        "error": error,
+                    }
+                )
+                history.append(_tool_result_message(call_id, content, error=error))
 
             turns.append(
                 {
@@ -294,244 +306,59 @@ def _run_episode(
                     "tool_results": tool_results,
                 }
             )
-            emit_progress(
-                progress_callback,
-                task_id=str(task["id"]),
-                phase="episode_turn",
-                item_id=str(episode_spec["episode_id"]),
-                item_name=str(episode_spec["episode_id"]),
-                item_brief=instruction,
-                expected_answer="Solve episode",
-                candidate_actual=_action_summary(action),
-                candidate_status="running",
-                message=f"[{episode_spec['episode_id']}] t{turn_index}: {_action_summary(action) or 'no action'}",
-                pace_ms=pace_ms,
-            )
             state = dict(action["state"])
             if action["done"] or episode_done:
                 break
 
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         item_run = {
-            "item_id": str(episode_spec["episode_id"]),
-            "item_name": str(episode_spec["episode_id"]),
+            "item_id": episode_spec["episode_id"],
+            "item_name": episode_spec["episode_id"],
             "payload": episode,
             "turns": turns,
             "success": success,
             "reward": reward,
             "annotations": {"goal_condition_success_rate": goal_condition_success_rate},
-            "raw_artifact_path": str(episode_spec["game_file"]),
+            "raw_artifact_path": episode_spec["game_file"],
         }
         test_result = {
-            "name": str(episode_spec["episode_id"]),
+            "name": episode_spec["episode_id"],
             "expected": 1.0,
             "actual": reward,
-            "passed": success,
             "actual_raw": {
                 "payload": episode,
                 "turns": turns,
                 "goal_condition_success_rate": goal_condition_success_rate,
+                "action_summary": _action_summary(dict(turns[-1]["action"])) if turns else "",
+            },
+            "passed": success,
+        }
+        return {
+            "status": "pass" if success else "fail",
+            "verifier_status": "pass" if success else "fail",
+            "correctness": reward,
+            "passed_tests": 1 if success else 0,
+            "total_tests": 1,
+            "benchmark_ms": round(elapsed_ms, 3),
+            "benchmark_samples_ms": [round(elapsed_ms, 3)],
+            "objective": reward,
+            "objective_score": reward,
+            "objective_signal": reward,
+            "error": None,
+            "test_results": [test_result],
+            "item_runs": [item_run],
+            "suite_summary": {
+                "suite": "alfworld-text",
+                "domain": "alfworld",
+                "source": "official_alfworld_text_env",
+                "split": episode_spec["split"],
+                "passed": 1 if success else 0,
+                "total": 1,
+                "average_goal_condition_success_rate": goal_condition_success_rate,
+                "average_steps": float(len(turns)),
             },
         }
-        emit_progress(
-            progress_callback,
-            task_id=str(task["id"]),
-            phase="episode_finished",
-            item_id=str(episode_spec["episode_id"]),
-            item_name=str(episode_spec["episode_id"]),
-            item_brief=instruction,
-            expected_answer="Solve episode",
-            candidate_actual=_action_summary(dict(turns[-1].get("action") or {})) if turns else ("Episode solved" if success else "Episode not solved"),
-            candidate_status="pass" if success else "fail",
-            message=f"[{episode_spec['episode_id']}] {'solved' if success else 'failed'} reward={reward}",
-            pace_ms=pace_ms,
-        )
-        return index, item_run, test_result, success, goal_condition_success_rate
     finally:
         close = getattr(env, "close", None)
         if callable(close):
             close()
-
-
-def _run_official_alfworld_suite(
-    *,
-    task: dict[str, Any],
-    candidate_path: Path,
-    proposal_runtime,
-    suite_name: str,
-    domain: str,
-    suite_config: dict[str, Any],
-    requested_limit: int | None,
-    progress_callback=None,
-    pace_ms: int = 0,
-) -> dict[str, Any]:
-    episode_specs = _episode_specs_for_run(suite_config, requested_limit)
-    ordered_rows: list[tuple[int, dict[str, Any], dict[str, Any], bool, float]] = []
-    parallel_workers = _resolve_parallel_workers(
-        task=task,
-        proposal_runtime=proposal_runtime,
-        total_items=len(episode_specs),
-        suite_config=suite_config,
-    )
-    if parallel_workers <= 1:
-        for index, episode_spec in enumerate(episode_specs, start=1):
-            ordered_rows.append(
-                _run_episode(
-                    task=task,
-                    candidate_path=candidate_path,
-                    proposal_runtime=proposal_runtime,
-                    suite_name=suite_name,
-                    domain=domain,
-                    suite_config=suite_config,
-                    episode_spec=episode_spec,
-                    index=index,
-                    progress_callback=progress_callback,
-                    pace_ms=pace_ms,
-                )
-            )
-    else:
-        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-            futures = [
-                executor.submit(
-                    _run_episode,
-                    task=task,
-                    candidate_path=candidate_path,
-                    proposal_runtime=proposal_runtime,
-                    suite_name=suite_name,
-                    domain=domain,
-                    suite_config=suite_config,
-                    episode_spec=episode_spec,
-                    index=index,
-                    progress_callback=progress_callback,
-                    pace_ms=pace_ms,
-                )
-                for index, episode_spec in enumerate(episode_specs, start=1)
-            ]
-            for future in as_completed(futures):
-                ordered_rows.append(future.result())
-
-    item_runs: list[dict[str, Any]] = []
-    test_results: list[dict[str, Any]] = []
-    passed = 0
-    goal_condition_total = 0.0
-    for _index, item_run, test_result, success, goal_condition_success_rate in sorted(ordered_rows, key=lambda row: row[0]):
-        if success:
-            passed += 1
-        goal_condition_total += goal_condition_success_rate
-        item_runs.append(item_run)
-        test_results.append(test_result)
-
-    total = len(item_runs)
-    objective = passed / total if total else 0.0
-    average_goal_condition = goal_condition_total / total if total else 0.0
-    average_steps = (sum(len(item.get("turns") or []) for item in item_runs) / total) if total else 0.0
-    return {
-        "status": "pass",
-        "verifier_status": "pass",
-        "correctness": objective,
-        "passed_tests": passed,
-        "total_tests": total,
-        "benchmark_ms": None,
-        "benchmark_samples_ms": [],
-        "objective": objective,
-        "objective_score": objective,
-        "objective_signal": objective,
-        "test_results": test_results,
-        "item_runs": item_runs,
-        "suite_summary": {
-            "suite": suite_name,
-            "domain": domain,
-            "source": "official_alfworld_text_env",
-            "split": _configured_split(suite_config),
-            "passed": passed,
-            "total": total,
-            "average_goal_condition_success_rate": average_goal_condition,
-            "average_steps": average_steps,
-        },
-    }
-
-
-def evaluate_candidate(
-    *,
-    task,
-    candidate_path,
-    source_code,
-    baseline_metrics,
-    memory_applied,
-):
-    del source_code, baseline_metrics, memory_applied
-    config = effective_suite_run_config(task, Path(candidate_path))
-    runtime = runtime_for_benchmark_adapter_task(task)
-    requested_limit = task.get("runtime_max_episodes")
-    return _run_official_alfworld_suite(
-        task=task,
-        candidate_path=Path(candidate_path),
-        proposal_runtime=runtime,
-        suite_name="alfworld-text",
-        domain="alfworld",
-        suite_config=config,
-        requested_limit=requested_limit,
-    )
-
-
-def run_benchmark_adapter_task(
-    *,
-    task,
-    candidate_path,
-    source_code,
-    proposal_runtime,
-    workspace_root,
-    session_id,
-    max_items,
-    max_episodes,
-    progress_callback,
-    pace_ms,
-):
-    del workspace_root, session_id, max_items
-    config = effective_suite_run_config(task, Path(candidate_path))
-    raw_metrics = _run_official_alfworld_suite(
-        task=task,
-        candidate_path=Path(candidate_path),
-        proposal_runtime=proposal_runtime,
-        suite_name="alfworld-text",
-        domain="alfworld",
-        suite_config=config,
-        requested_limit=max_episodes,
-        progress_callback=progress_callback,
-        pace_ms=pace_ms,
-    )
-    baseline = build_benchmark_adapter_candidate(
-        task=task,
-        source_code=source_code,
-        agent="checked-in-adapter",
-        label="checked-in-adapter",
-        strategy="Use the checked-in ALFWorld official text-environment adapter.",
-        rationale="The checked-in file is the baseline multi-turn adapter for the official ALFWorld TextWorld environment.",
-        candidate_summary="Checked-in ALFWorld official text adapter.",
-        raw_metrics={"status": "not-run", "verifier_status": "not-run"},
-        workspace_path=str(candidate_path),
-    )
-    winner = build_benchmark_adapter_candidate(
-        task=task,
-        source_code=source_code,
-        agent="candidate-adapter",
-        label="candidate-adapter",
-        strategy="Run the candidate adapter against the official ALFWorld text environment.",
-        rationale="The official ALFWorld environment owns admissible commands, task dynamics, and success scoring; the candidate owns turn-by-turn action selection.",
-        candidate_summary="ALFWorld official text benchmark run.",
-        raw_metrics=raw_metrics,
-        workspace_path=str(candidate_path),
-        proposal_model=proposal_runtime.active_model,
-    )
-    passed = int(raw_metrics.get("passed_tests") or 0)
-    total = int(raw_metrics.get("total_tests") or 0)
-    return build_benchmark_adapter_result(
-        task=task,
-        proposal_runtime=proposal_runtime,
-        baseline=baseline,
-        winner=winner,
-        selection_reason=f"ALFWorld official text environment finished with {passed}/{total} solved episodes.",
-        extra_fields={
-            "suite_summary": dict(raw_metrics.get("suite_summary") or {}),
-            "item_runs": list(raw_metrics.get("item_runs") or []),
-        },
-    )

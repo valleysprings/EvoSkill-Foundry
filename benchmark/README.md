@@ -13,14 +13,10 @@ The active tasks live in `benchmark/registry.json`. Each task directory includes
 
 Each task is expected to declare a clear contract:
 
-- `runtime_backend`
-  use `dataset` or `benchmark_adapter`; runtime-managed assets belong under `runs/`, not `External/`
 - `task_mode`
-  what the editable file represents: `answer` or `artifact`
+  what the candidate entrypoint represents: `answer` or `artifact`
 - `interaction_mode`
   whether the task is `single_turn` or `multi_turn`
-- `optimization_scope`
-  what is allowed to change: `prompt`, `wrapper`, or `implementation`
 - `answer_metric`
   the task-native headline metric name
 - `objective_spec`
@@ -48,14 +44,14 @@ That personalization catalog keeps three different layers on purpose:
 
 See [benchmark/personalization_verified/README.md](./personalization_verified/README.md) for the current full tracked benchmark slate, runnable subset, and category mapping.
 
-For `task_mode=answer`, also make the verifier style explicit in task-local docs and prompt context:
+For `task_mode=answer`, treat `editable.py` as the repo's internal candidate entrypoint, not as evidence that the benchmark itself is a coding or implementation task. Also make the verifier style explicit in task-local docs and prompt context:
 
 - `exact_match`
   the returned answer is compared directly against a reference answer or label set
 - `adapter` / `semantic`
   the returned answer is first parsed, normalized, or adapted by the verifier and then judged by a semantic checker or task-native evaluator
 
-Read [references/evaluation-contract.md](../references/evaluation-contract.md) for the metric and selection semantics behind these fields.
+Read [references/evaluation-contract.md](../references/evaluation-contract.md) for the metric and selection semantics behind these fields. Legacy fields such as `runtime_backend` and `optimization_scope` are no longer part of the active task contract.
 
 Only `benchmark/registry.json` is intended to sync by default. Dataset directories under `benchmark/` stay local.
 
@@ -74,24 +70,46 @@ Useful variants:
 ```bash
 python benchmark/prepare_datasets.py --list
 python benchmark/prepare_datasets.py --task-id co-bench
+python -m app prepare-datasets --task-id co-bench
 ```
 
 The shared script just dispatches each task's own `prepare.py`, so task-specific customization still lives beside the task itself. When a task is missing local assets, runtime errors should point back to this README for the matching source location.
+
+## Smoke Test All Datasets
+
+There is now a shared CLI smoke-test flow for dataset tasks:
+
+```bash
+python -m app plan-dataset-smoke --pretty
+python -m app audit-datasets --pretty
+python -m app smoke-test-datasets --model <policy-model> --eval-model <judge-model>
+```
+
+The smoke policy is:
+
+- datasets with `dataset_size > 100` run with `--max-items 100`
+- datasets with `dataset_size <= 100` run in full
+- small hidden placeholder or proxy datasets are skipped by default; pass `--include-placeholders` to force them in
+
+Use `python -m app audit-datasets --pretty` to check whether enabled dataset tasks are locally complete and whether their verifiers compile/import cleanly.
+
+This gives one consistent path for local prep plus non-full benchmark validation.
+
+`python -m app smoke-test-datasets ...` is the only real smoke-test executor. It iterates all enabled dataset tasks matched by the current filters; with no filters today that means all `33` enabled dataset tasks. The separate planning and audit commands are read-only helpers, not extra executors.
 
 ## Prepare Coverage
 
 `benchmark/prepare_datasets.py` dispatches only enabled tasks from `benchmark/registry.json`.
 
-- current registry size: `49` tasks
+- current registry size: `40` tasks
+- current enabled official-fidelity set: `27` tasks
+- current disabled/pending set: `13` tasks
 - current prepare coverage: every registered task ships a task-local `prepare.py`
-- current implementation-track split:
-  - `11` `personalization_verified` tasks
-  - `13` `safety_verified` tasks
-  - `25` tasks across `math_verified`, `reasoning_verified`, `science_verified`, `text2sql_verified`, `longcontext_verified`, `coding_verified`, `or_verified`, and `agent_verified`
-- current README grouping:
-  - `11` `Personalization` tasks
-  - `11` `Safety` tasks
-  - `27` `General Intelligence` tasks
+Enabled grouping after this cleanup:
+
+- `7` `Personalization` tasks
+- `1` `Safety` task
+- `19` `General Intelligence` tasks
 
 Two directories under `benchmark/safety_verified/` are intentionally excluded from the registry and shared prepare flow:
 
@@ -108,9 +126,9 @@ If `python benchmark/prepare_datasets.py` reports missing assets, use the matchi
 
 | Group | Tasks In This README Grouping | Notes |
 | --- | --- | --- |
-| `Personalization` | `11` | Matches `personalization_verified`. |
-| `Safety` | `9` | Safety-focused tasks from `safety_verified`. |
-| `General Intelligence` | `20` | All tasks from `math_verified`, `reasoning_verified`, `science_verified`, `text2sql_verified`, `longcontext_verified`, `coding_verified`, and `or_verified`. |
+| `Personalization` | `7` | Current enabled official-fidelity personalization tasks. |
+| `Safety` | `1` | Current enabled official-fidelity safety task. |
+| `General Intelligence` | `20` | Current enabled official-fidelity tasks across `math_verified`, `reasoning_verified`, `text2sql_verified`, `science_verified`, `longcontext_verified`, `coding_verified`, and `or_verified`. |
 
 ### Personalization
 
@@ -120,12 +138,14 @@ If `python benchmark/prepare_datasets.py` reports missing assets, use the matchi
 | `characterbench` | `personalization_verified` | [GitHub: `thu-coai/CharacterBench`](https://github.com/thu-coai/CharacterBench) | Prepare from the mirrored `external/personalization/characterbench/` checkout. The local task now uses the released CharacterJudge prompt construction over the full evaluation subsets and requires an `eval_model`. |
 | `personamem-32k` | `personalization_verified` | [Hugging Face: `bowen-upenn/PersonaMem`](https://huggingface.co/datasets/bowen-upenn/PersonaMem) | `prepare.py` downloads `questions_32k.csv` and `shared_contexts_32k.jsonl` from the public dataset repo and materializes a local question manifest with sliced conversation history. |
 | `socialbench` | `personalization_verified` | [GitHub: `X-PLUG/SocialBench`](https://github.com/X-PLUG/SocialBench) | Prepare from the mirrored `external/personalization/socialbench/` checkout. The local task reuses the released JSON benchmark with deterministic local scoring for choice and keyword-memory items. |
-| `timechara` | `personalization_verified` | [GitHub: `ahnjaewoo/timechara`](https://github.com/ahnjaewoo/timechara) | `prepare.py` pulls the full public test split from Hugging Face (`10895` rows). The local task follows the released spatiotemporal judge protocol and requires an `eval_model`. |
 | `rmtbench` | `personalization_verified` | [arXiv: `RMTBench`](https://arxiv.org/abs/2507.20352) | Hidden planned task only. The current local assets are a phase-1 proxy scaffold kept out of the runnable lane until the full official multi-turn release contract is aligned. |
 | `charactereval` | `personalization_verified` | [GitHub: `morecry/CharacterEval`](https://github.com/morecry/CharacterEval) | Hidden planned task only. The local scaffold prepares the public contexts (`4564` items) while the benchmark remains blocked on faithful `BaichuanCharRM` reward-model execution. |
 | `coser` | `personalization_verified` | [GitHub: `Neph0s/CoSER`](https://github.com/Neph0s/CoSER) | Hidden planned task only. The current local scaffold fans out the public literary dialogue set, but official runnable recovery still needs the full multi-role GCA runtime. |
 | `personafeedback` | `personalization_verified` | [arXiv: `PersonaFeedback`](https://arxiv.org/abs/2506.12915) | The local task wraps the published persona-conditioned preference benchmark as deterministic MCQ selection. |
-| `alpsbench` | `personalization_verified` | [arXiv: `AlpsBench`](https://arxiv.org/abs/2603.26680) | The local task wraps the long-horizon personalization benchmark as deterministic MCQ selection over pre-materialized memory contexts. |
+| `alpsbench-extraction` | `personalization_verified` | [arXiv: `AlpsBench`](https://arxiv.org/abs/2603.26680) | Public-release wrapper for AlpsBench Task 1. The local task preserves the public structured output contract and scores with the released Task 1 scorer (`F1` over memory items), not the hidden benchmark-side judge stack. |
+| `alpsbench-update` | `personalization_verified` | [arXiv: `AlpsBench`](https://arxiv.org/abs/2603.26680) | Public-release wrapper for AlpsBench Task 2. The local task preserves the public structured output contract and scores with the released Task 2 scorer (`F1` over updated memory items). |
+| `alpsbench-retrieval` | `personalization_verified` | [arXiv: `AlpsBench`](https://arxiv.org/abs/2603.26680) | Public-release wrapper for AlpsBench Task 3 across `d100`/`d300`/`d500`/`d700`/`d1000`. The local scorer matches the released selected-memory proxy rather than the unreleased benchmark-side memory-usage judge. |
+| `alpsbench-utilization` | `personalization_verified` | [arXiv: `AlpsBench`](https://arxiv.org/abs/2603.26680) | Public-release wrapper for AlpsBench Task 4 across abilities `1..5`. The local scorer matches the released grounding proxy rather than the hidden ability-specific structured judges. |
 | `alpbench` | `personalization_verified` | [Hugging Face: `OpenOneRec/ALPBench`](https://huggingface.co/datasets/OpenOneRec/ALPBench) | `prepare.py` pulls the public train rows through the dataset server and converts them into latent-trait classification items (`800` rows). |
 
 ### Safety
@@ -133,14 +153,6 @@ If `python benchmark/prepare_datasets.py` reports missing assets, use the matchi
 | Task | Track | Source | Notes |
 | --- | --- | --- | --- |
 | `xstest-refusal-calibration` | `safety_verified` | [Hugging Face: `Paul/XSTest`](https://huggingface.co/datasets/Paul/XSTest) | `interaction_mode=single_turn`, `safety_category=over_refusal`. `prepare.py` downloads the public XSTest prompt set and turns it into a local refusal-boundary benchmark for answer-vs-refuse calibration. |
-| `harmbench-text-harmful` | `safety_verified` | [GitHub: `centerforaisafety/HarmBench`](https://github.com/centerforaisafety/HarmBench) and [Zenodo: HarmBench Results 1.0](https://zenodo.org/records/10714577) | `interaction_mode=single_turn`, `safety_category=jailbreak_attack`. `prepare.py` mirrors the public harmful text behaviors into task-local data, then selects fixed attack prompts from the public results archive when available and falls back to deterministic local prompt templates otherwise. |
-| `jailbreakbench-harmful` | `safety_verified` | [Hugging Face: `JailbreakBench/JBB-Behaviors`](https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors) and [GitHub: `JailbreakBench/artifacts`](https://github.com/JailbreakBench/artifacts) | `interaction_mode=single_turn`, `safety_category=jailbreak_attack`. `prepare.py` materializes the harmful split into task-local data and groups successful published attack artifacts by behavior, with deterministic fallback prompts when no public artifact is available. |
-| `or-bench-hard-1k` | `safety_verified` | [Hugging Face: `bench-llm/or-bench`](https://huggingface.co/datasets/bench-llm/or-bench) | `interaction_mode=single_turn`, `safety_category=over_refusal`. Uses subset `or-bench-hard-1k` and scores whether the model answers benign but refusal-sensitive prompts. |
-| `or-bench-toxic` | `safety_verified` | [Hugging Face: `bench-llm/or-bench`](https://huggingface.co/datasets/bench-llm/or-bench) | `interaction_mode=single_turn`, `safety_category=jailbreak_attack`, `safety_focus=should_refuse`. Uses subset `or-bench-toxic` and scores whether the model refuses prompts that should be blocked. |
-| `hallulens-precisewikiqa` | `safety_verified` | [GitHub: `facebookresearch/HalluLens`](https://github.com/facebookresearch/HalluLens) and [Hugging Face: `euirim/goodwiki`](https://huggingface.co/datasets/euirim/goodwiki) | `interaction_mode=single_turn`, `safety_category=factuality_hallucination`. This is a deterministic local GoodWiki slice aligned to the HalluLens `PreciseWikiQA` task so it stays runnable without dynamic upstream generation services. |
-| `hallulens-mixedentities` | `safety_verified` | [GitHub: `facebookresearch/HalluLens`](https://github.com/facebookresearch/HalluLens), [ITIS public taxonomy dump](https://www.itis.gov/downloads/index.html), and bundled medicine seeds | `interaction_mode=single_turn`, `safety_category=factuality_hallucination`. This local runnable slice mirrors HalluLens `MixedEntities` by generating nonexistent public-data entities that calibrated assistants should decline to fabricate. |
-| `hallulens-longwiki` | `safety_verified` | [GitHub: `facebookresearch/HalluLens`](https://github.com/facebookresearch/HalluLens) and [Hugging Face: `euirim/goodwiki`](https://huggingface.co/datasets/euirim/goodwiki) | `interaction_mode=single_turn`, `safety_category=factuality_hallucination`. This is a deterministic long-context GoodWiki slice aligned to HalluLens `LongWiki`, evaluated with local groundedness judging only. |
-| `longsafety` | `safety_verified` | [GitHub: `thu-coai/longsafety`](https://github.com/thu-coai/longsafety) and [Hugging Face: `thu-coai/LongSafety`](https://huggingface.co/datasets/thu-coai/LongSafety) | `interaction_mode=single_turn`, `safety_category=jailbreak_attack`, `safety_focus=safety_degradation`. `prepare.py` downloads the public long-context harmful prompts and merges instruction/context metadata into a local manifest for refusal-style judging. |
 
 ### General Intelligence
 
@@ -151,10 +163,10 @@ If `python benchmark/prepare_datasets.py` reports missing assets, use the matchi
 | `aime-2024` | `math_verified` | [Hugging Face: `HuggingFaceH4/aime_2024`](https://huggingface.co/datasets/HuggingFaceH4/aime_2024) | Uses split `train`. |
 | `aime-2025` | `math_verified` | [Hugging Face: `opencompass/AIME2025`](https://huggingface.co/datasets/opencompass/AIME2025) | Uses configs `AIME2025-I` and `AIME2025-II`, split `test`. |
 | `aime-2026` | `math_verified` | [Hugging Face: `math-ai/aime26`](https://huggingface.co/datasets/math-ai/aime26) | Uses split `test`. |
-| `planbench` | `reasoning_verified` | [Hugging Face: `tasksource/planbench`](https://huggingface.co/datasets/tasksource/planbench) | Uses config `task_1_plan_generation`, split `train`. |
+| `planbench` | `reasoning_verified` | [Hugging Face: `tasksource/planbench`](https://huggingface.co/datasets/tasksource/planbench) | Uses config `task_1_plan_generation`, split `train`. Validator assets live under `benchmark/reasoning_verified/planbench/official/`. |
 | `arc-challenge` | `reasoning_verified` | [Hugging Face: `allenai/ai2_arc`](https://huggingface.co/datasets/allenai/ai2_arc) | Uses config `ARC-Challenge`, split `validation`. |
 | `bbh` | `reasoning_verified` | [Hugging Face: `maveriq/bigbenchhard`](https://huggingface.co/datasets/maveriq/bigbenchhard) and [upstream raw BBH JSON](https://github.com/suzgunmirac/BIG-Bench-Hard/tree/main/bbh) | Aggregates all `27` official BBH configs (`6511` items total). `prepare.py` downloads the upstream raw JSON files directly because the HF dataset currently uses a legacy dataset script. |
-| `mmlu-pro` | `reasoning_verified` | [Hugging Face: `TIGER-Lab/MMLU-Pro`](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) | Uses config `default`, split `test`. The local task preserves variable-length choice lists and accepts either the final answer text or the official option label. |
+| `mmlu-pro` | `reasoning_verified` | [Hugging Face: `TIGER-Lab/MMLU-Pro`](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) | Uses config `default`, split `test`. The verifier now follows the official option-letter judgment path. |
 | `spider` | `text2sql_verified` | [Google Drive archive](https://drive.google.com/file/d/1403EGqzIDoHMdQF4c9Bkyl7dZLZ5Wt6J/view) | Extract locally under `benchmark/text2sql_verified/spider/data/`. Expected files include `dev.json`, `tables.json`, and `database/`. |
 | `bird` | `text2sql_verified` | [Official `dev.zip`](https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip) | `prepare.py` prefers local `data/dev.json`, `data/dev_tables.json`, and `data/dev_databases/` when present. |
 | `chase` | `text2sql_verified` | [CHASE questions zip](https://raw.githubusercontent.com/xjtu-intsoft/chase/page/data/Chase.zip) and [CHASE database zip](https://raw.githubusercontent.com/xjtu-intsoft/chase/page/data/database.zip) | Extracted into `benchmark/text2sql_verified/chase/data/` by `prepare.py` if missing. |
@@ -164,8 +176,16 @@ If `python benchmark/prepare_datasets.py` reports missing assets, use the matchi
 | `scienceqa` | `science_verified` | [Hugging Face: `derek-thomas/ScienceQA`](https://huggingface.co/datasets/derek-thomas/ScienceQA) | Uses split `validation`, then filters to text-only natural-science rows. |
 | `openbookqa` | `science_verified` | [Hugging Face: `allenai/openbookqa`](https://huggingface.co/datasets/allenai/openbookqa) | Uses config `additional`, split `validation`. |
 | `gpqa-diamond` | `science_verified` | [GitHub: `idavidrein/gpqa`](https://github.com/idavidrein/gpqa) | Reads `dataset/gpqa_diamond.csv` from the official password-protected `dataset.zip` release and applies a stable per-item choice shuffle based on `Record ID`. |
-| `livecodebench` | `coding_verified` | [Hugging Face: `livecodebench/code_generation_lite`](https://huggingface.co/datasets/livecodebench/code_generation_lite) | Script reads `test.jsonl` through `test6.jsonl` from the dataset's raw file URLs. |
+| `livecodebench-v1` to `livecodebench-v6` | `coding_verified` | [Hugging Face: `livecodebench/code_generation_lite`](https://huggingface.co/datasets/livecodebench/code_generation_lite) and [GitHub: `LiveCodeBench/LiveCodeBench`](https://github.com/LiveCodeBench/LiveCodeBench) | Six non-overlapping tasks mapped to official `v1` through `v6` shards (`400`, `111`, `101`, `101`, `167`, `175` items; `1055` total). `prepare.py` streams the official JSONL shards directly, and `verifier.py` follows the official `lcb_runner/evaluation/testing_util.py` semantics with problem-level Pass@1 scoring. |
 | `co-bench` | `or_verified` | [Hugging Face: `CO-Bench/CO-Bench`](https://huggingface.co/datasets/CO-Bench/CO-Bench) | Pulled via `huggingface_hub.snapshot_download`. |
+
+## Disabled After Official-Fidelity Cleanup
+
+These tasks remain disabled after the official-fidelity cleanup:
+
+- `hallulens-precisewikiqa`
+- `hallulens-mixedentities`
+- `hallulens-longwiki`
 ## Add A New Benchmark Dataset
 
 1. add a task directory under the appropriate research track such as `math_verified/`, `science_verified/`, `reasoning_verified/`, `text2sql_verified/`, `longcontext_verified/`, `personalization_verified/`, or `safety_verified/`
@@ -185,10 +205,8 @@ Required `task.json` fields for dataset tasks:
 - `dataset_size`
 - `local_dataset_only`
 - `item_manifest`
-- `runtime_backend`
 - `task_mode`
 - `interaction_mode`
-- `optimization_scope`
 - `answer_metric`
 - `objective_spec`
 - `editable_file`
@@ -200,6 +218,7 @@ Recommended conventions:
 - declare `interaction_mode` explicitly for every task; do not rely on implicit defaults
 - put subset details like `validation`, `test`, `numeric_verified`, or `local_eval` in `split`
 - keep one dataset-native headline metric; do not make `tie_break_score` or code-shape preferences the headline claim
+- for answer tasks, describe the benchmark as returning an answer/output for one item rather than as "editing a solver"
 - for answer tasks, state whether the verifier is `exact_match` or `adapter/semantic`; this belongs in the task README and prompt context even if it is not a dedicated schema field
 - normalize raw dataset rows into the shared question schema:
   - `item_id`

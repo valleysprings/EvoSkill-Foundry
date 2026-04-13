@@ -7,7 +7,7 @@ This task keeps the repo-local benchmark contract:
 - input: one BIRD dev question plus its schema summary, evidence, and local database assets
 - output: one SQL query string
 - scoring: official-style execution accuracy against the local SQLite database
-- unified repo contract: `runtime_backend=dataset`, `task_mode=answer`, `optimization_scope=implementation`
+- unified repo contract: `task_mode=answer`, `interaction_mode=single_turn`
 - verifier style: adapter, because the verifier extracts SQL text before executing predicted and gold SQL
 
 Prepare locally with:

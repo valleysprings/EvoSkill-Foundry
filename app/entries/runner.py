@@ -11,9 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.codegen.catalog import list_codegen_task_summaries, load_codegen_tasks, seed_strategy_experiences, task_summary
-from app.bench.benchmark_adapter_support import uses_benchmark_adapter_runtime, run_benchmark_adapter_task
 from app.codegen.errors import ConfigError
-from app.codegen.task_contracts import interaction_mode_summary, optimization_scope_summary, task_mode_summary
+from app.codegen.task_contracts import interaction_mode_summary, task_mode_summary
 from app.configs.codegen import (
     DEFAULT_SESSION_ID,
     DELTA_FORMULA,
@@ -43,14 +42,27 @@ from app.memory.store import MemoryStore
 
 RUNS = RUNS_ROOT
 ProgressCallback = Callable[[dict[str, Any]], None]
-CLI_COMMANDS = frozenset({"tasks", "runtime", "latest-run", "run-task", "run-sequence"})
-
-
-def _benchmark_adapter_task_uses_codegen_loop(task: dict[str, Any]) -> bool:
-    if not uses_benchmark_adapter_runtime(task):
-        return False
-    return int(task.get("generation_budget") or 0) > 0 and int(task.get("candidate_budget") or 0) > 0
-
+CLI_COMMANDS = frozenset(
+    {
+        "tasks",
+        "runtime",
+        "latest-run",
+        "run-task",
+        "run-sequence",
+        "prepare-datasets",
+        "audit-datasets",
+        "plan-dataset-smoke",
+        "smoke-test-datasets",
+    }
+)
+DATASET_SMOKE_PLACEHOLDER_HINTS = (
+    "placeholder",
+    "proxy",
+    "scaffold",
+    "hidden",
+    "gated",
+    "planned task",
+)
 
 def _relative(path: Path) -> str:
     try:
@@ -150,8 +162,8 @@ def generate_discrete_payload(
     if suite_config is not None:
         if task_id is None or len(tasks) != 1:
             raise ConfigError("suite_config requires running exactly one task.")
-        if not uses_benchmark_adapter_runtime(tasks[0]):
-            raise ConfigError("suite_config is only supported for benchmark-adapter tasks.")
+        if not isinstance(tasks[0].get("runtime_suite_config"), dict):
+            raise ConfigError("suite_config is only supported for tasks that declare runtime_suite_config.")
         tasks = [{**tasks[0], "runtime_suite_config": dict(suite_config)}]
     if selected_item_ids is not None:
         if task_id is None or len(tasks) != 1:
@@ -195,48 +207,7 @@ def generate_discrete_payload(
     total_memory_before = 0
     total_memory_after = 0
     for task in tasks:
-        if _benchmark_adapter_task_uses_codegen_loop(task):
-            task = {
-                **task,
-                "runtime_model_override": runtime.active_model,
-                "runtime_max_items": max_items,
-                "runtime_max_episodes": max_episodes,
-                "runtime_session_id": session_id or DEFAULT_SESSION_ID,
-                "memory_root": str(active_runs_root / ITEM_MEMORY_DIR_NAME),
-            }
-            before_count = legacy_store.count()
-            result = run_codegen_task(
-                task,
-                legacy_store,
-                proposal_runtime=runtime,
-                workspace_root=active_workspace_root,
-                session_id=session_id or DEFAULT_SESSION_ID,
-                progress_callback=progress_callback,
-                pace_ms=pace_ms,
-            )
-            after_count = legacy_store.count()
-            delta = after_count - before_count
-            result["memory_markdown"] = legacy_store.load_markdown()
-        elif uses_benchmark_adapter_runtime(task):
-            before_count = legacy_store.count()
-            result = run_benchmark_adapter_task(
-                {
-                    **task,
-                    "runtime_session_id": session_id or DEFAULT_SESSION_ID,
-                    "memory_root": str(active_runs_root / ITEM_MEMORY_DIR_NAME),
-                },
-                proposal_runtime=runtime,
-                workspace_root=active_workspace_root / task["id"],
-                memory_root=active_runs_root / ITEM_MEMORY_DIR_NAME,
-                session_id=session_id or DEFAULT_SESSION_ID,
-                max_items=max_items,
-                max_episodes=max_episodes,
-                progress_callback=progress_callback,
-                pace_ms=pace_ms,
-            )
-            after_count = legacy_store.count()
-            delta = after_count - before_count
-        elif is_dataset_task(task):
+        if is_dataset_task(task):
             result = run_dataset_task(
                 task,
                 proposal_runtime=runtime,
@@ -244,6 +215,7 @@ def generate_discrete_payload(
                 memory_root=active_runs_root / ITEM_MEMORY_DIR_NAME,
                 session_id=session_id or DEFAULT_SESSION_ID,
                 max_items=max_items,
+                max_episodes=max_episodes,
                 eval_model=eval_model,
                 selected_item_ids=selected_item_ids,
                 progress_callback=progress_callback,
@@ -549,6 +521,7 @@ def _add_common_run_arguments(
     parser.add_argument("--item-workers", type=int, help="Override dataset item worker count for this run.")
     parser.add_argument("--max-items", type=int, help="Run only the first N items from the selected task or sequence.")
     parser.add_argument("--max-episodes", type=int, help="Run only the first N episodes from the selected multi-turn task.")
+    parser.add_argument("--eval-model", help="Optional judge/eval model passed through to dataset verifiers that support it.")
     if allow_suite_config:
         parser.add_argument(
             "--suite-config",
@@ -563,7 +536,6 @@ def _matching_task_summaries(
     track: str | None = None,
     tier: str | None = None,
     mode: str | None = None,
-    backend: str | None = None,
     main_only: bool = False,
 ) -> list[dict[str, Any]]:
     tasks = list_codegen_task_summaries()
@@ -575,8 +547,6 @@ def _matching_task_summaries(
         tasks = [task for task in tasks if task["benchmark_tier"] == tier]
     if mode:
         tasks = [task for task in tasks if task["task_mode"] == mode]
-    if backend:
-        tasks = [task for task in tasks if task["runtime_backend"] == backend]
     if main_only:
         tasks = [task for task in tasks if task["included_in_main_comparison"]]
     return tasks
@@ -607,7 +577,6 @@ def _print_task_table(tasks: list[dict[str, Any]]) -> None:
         ("id", "id"),
         ("tier", "benchmark_tier"),
         ("mode", "task_mode"),
-        ("backend", "runtime_backend"),
         ("track", "track"),
         ("metric", "answer_metric"),
     ]
@@ -632,13 +601,10 @@ def _print_task_detail(summary: dict[str, Any]) -> None:
         ("benchmark_tier", summary["benchmark_tier"]),
         ("included_in_main_comparison", summary["included_in_main_comparison"]),
         ("track", summary["track"]),
-        ("runtime_backend", summary["runtime_backend"]),
         ("task_mode", summary["task_mode"]),
         ("task_mode_summary", task_mode_summary(str(summary["task_mode"]))),
         ("interaction_mode", summary["interaction_mode"]),
         ("interaction_mode_summary", interaction_mode_summary(str(summary["interaction_mode"]))),
-        ("optimization_scope", summary["optimization_scope"]),
-        ("optimization_scope_summary", optimization_scope_summary(str(summary["optimization_scope"]))),
         ("dataset_id", summary["dataset_id"]),
         ("dataset_size", summary["dataset_size"]),
         ("split", summary["split"]),
@@ -711,6 +677,261 @@ def _print_cached_run_summary(payload: dict[str, Any]) -> None:
         print(line)
 
 
+def _load_prepare_datasets_module() -> Any:
+    script_path = ROOT / "benchmark" / "prepare_datasets.py"
+    spec = importlib.util.spec_from_file_location("benchmark_prepare_datasets", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to import benchmark prepare helper: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _dataset_tasks_for_smoke(
+    *,
+    task_ids: list[str] | None = None,
+    tracks: list[str] | None = None,
+    main_only: bool = False,
+) -> list[dict[str, Any]]:
+    tasks = [task for task in load_codegen_tasks() if bool(task.get("local_dataset_only"))]
+    if task_ids:
+        allowed = set(task_ids)
+        tasks = [task for task in tasks if str(task["id"]) in allowed]
+    if tracks:
+        allowed_tracks = set(tracks)
+        tasks = [task for task in tasks if str(task.get("track") or "") in allowed_tracks]
+    if main_only:
+        tasks = [task for task in tasks if bool(task.get("included_in_main_comparison"))]
+    return tasks
+
+
+def _is_placeholder_dataset_task(task: dict[str, Any]) -> bool:
+    dataset_size = int(task.get("dataset_size") or task.get("prepared_item_count") or 0)
+    if dataset_size >= 100:
+        return False
+    searchable = " ".join(
+        str(task.get(field) or "").lower()
+        for field in ("description", "baseline_summary", "split", "dataset_id", "title")
+    )
+    if not any(token in searchable for token in DATASET_SMOKE_PLACEHOLDER_HINTS):
+        return False
+    return not bool(task.get("included_in_main_comparison", True))
+
+
+def _dataset_size_for_smoke(task: dict[str, Any]) -> int:
+    return int(task.get("dataset_size") or 0)
+
+
+def _dataset_prepared_count(task: dict[str, Any]) -> int:
+    return int(task.get("prepared_item_count") or 0)
+
+
+def _dataset_smoke_row(
+    task: dict[str, Any],
+    *,
+    max_items_cap: int,
+    skip_placeholders: bool,
+) -> dict[str, Any]:
+    dataset_size = _dataset_size_for_smoke(task)
+    prepared_count = _dataset_prepared_count(task)
+    placeholder = _is_placeholder_dataset_task(task)
+    action = "run"
+    reason = f"dataset_size<={max_items_cap}; using full dataset"
+    max_items = dataset_size
+    if dataset_size <= 0:
+        action = "skip"
+        reason = "dataset_size is missing or zero"
+        max_items = 0
+    elif prepared_count > 0 and prepared_count < dataset_size:
+        reason = f"local manifest incomplete ({prepared_count}/{dataset_size}); capping to prepared rows"
+        max_items = min(prepared_count, max_items_cap)
+    elif placeholder and skip_placeholders:
+        action = "skip"
+        reason = "placeholder/proxy dataset under smoke threshold"
+        max_items = 0
+    elif dataset_size > max_items_cap:
+        reason = f"dataset_size>{max_items_cap}; capping smoke run"
+        max_items = max_items_cap
+    return {
+        "task_id": str(task["id"]),
+        "title": str(task.get("title") or task["id"]),
+        "track": str(task.get("track") or ""),
+        "dataset_size": dataset_size,
+        "prepared_count": prepared_count if prepared_count > 0 else None,
+        "max_items": max_items,
+        "action": action,
+        "reason": reason,
+        "requires_eval_model": bool(task.get("requires_eval_model")),
+        "default_eval_model": task.get("default_eval_model"),
+        "included_in_main_comparison": bool(task.get("included_in_main_comparison")),
+        "placeholder": placeholder,
+    }
+
+
+def _build_dataset_smoke_plan(
+    *,
+    task_ids: list[str] | None = None,
+    tracks: list[str] | None = None,
+    main_only: bool = False,
+    max_items_cap: int = 100,
+    skip_placeholders: bool = True,
+) -> dict[str, Any]:
+    tasks = _dataset_tasks_for_smoke(task_ids=task_ids, tracks=tracks, main_only=main_only)
+    rows = [
+        _dataset_smoke_row(task, max_items_cap=max_items_cap, skip_placeholders=skip_placeholders)
+        for task in tasks
+    ]
+    return {
+        "max_items_cap": max_items_cap,
+        "skip_placeholders": skip_placeholders,
+        "rows": rows,
+    }
+
+
+def _print_dataset_smoke_plan(plan: dict[str, Any]) -> None:
+    rows = list(plan.get("rows") or [])
+    if not rows:
+        print("No dataset tasks matched the requested smoke-test filters.")
+        return
+    columns = [
+        ("task_id", "task_id"),
+        ("track", "track"),
+        ("size", "dataset_size"),
+        ("prepared", "prepared_count"),
+        ("max_items", "max_items"),
+        ("action", "action"),
+        ("eval", "requires_eval_model"),
+    ]
+    widths = {
+        header: max(len(header), *(len(_stringify_cli_value(row[key])) for row in rows))
+        for header, key in columns
+    }
+    header = "  ".join(column.ljust(widths[column]) for column, _ in columns)
+    divider = "  ".join("-" * widths[column] for column, _ in columns)
+    print(header)
+    print(divider)
+    for row in rows:
+        print("  ".join(_stringify_cli_value(row[key]).ljust(widths[column]) for column, key in columns))
+        print(f"reason={row['reason']}")
+
+
+def _add_dataset_smoke_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--task-id", action="append", dest="task_ids", default=[], help="Limit smoke testing to one or more dataset task ids.")
+    parser.add_argument("--track", action="append", dest="tracks", default=[], help="Limit smoke testing to one or more tracks.")
+    parser.add_argument("--main-only", action="store_true", help="Include only tasks in the main comparison set.")
+    parser.add_argument("--max-items-cap", type=int, default=100, help="Smoke-test cap for larger datasets. Smaller real datasets run in full.")
+    parser.add_argument(
+        "--include-placeholders",
+        action="store_true",
+        help="Run small placeholder/proxy datasets too instead of skipping them.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
+
+
+def _audit_dataset_tasks(
+    *,
+    task_ids: list[str] | None = None,
+    tracks: list[str] | None = None,
+    main_only: bool = False,
+) -> dict[str, Any]:
+    tasks = _dataset_tasks_for_smoke(task_ids=task_ids, tracks=tracks, main_only=main_only)
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        task_dir = Path(str(task["task_dir"]))
+        verifier_path = Path(str(task["verifier_path"]))
+        item_manifest = str(task.get("item_manifest") or "").strip()
+        manifest_path = task_dir / item_manifest if item_manifest else None
+        manifest_exists = manifest_path.exists() if manifest_path is not None else False
+        prepared_count = _dataset_prepared_count(task)
+        declared_size = _dataset_size_for_smoke(task)
+        size_status = "ok"
+        if declared_size <= 0:
+            size_status = "missing_dataset_size"
+        elif not manifest_exists:
+            size_status = "missing_manifest"
+        elif prepared_count != declared_size:
+            size_status = "count_mismatch"
+        verifier_compile = True
+        verifier_import = True
+        verifier_error: str | None = None
+        try:
+            importlib.util.cache_from_source(str(verifier_path))
+            import py_compile
+
+            py_compile.compile(str(verifier_path), doraise=True)
+        except Exception as exc:  # noqa: BLE001
+            verifier_compile = False
+            verifier_error = f"{type(exc).__name__}: {exc}"
+        try:
+            spec = importlib.util.spec_from_file_location(f"audit_{task['id'].replace('-', '_')}", verifier_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"Unable to create import spec for {verifier_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001
+            verifier_import = False
+            verifier_error = f"{type(exc).__name__}: {exc}"
+        rows.append(
+            {
+                "task_id": str(task["id"]),
+                "track": str(task.get("track") or ""),
+                "manifest_path": str(manifest_path) if manifest_path is not None else None,
+                "manifest_exists": manifest_exists,
+                "dataset_size": declared_size,
+                "prepared_count": prepared_count if prepared_count > 0 else None,
+                "size_status": size_status,
+                "task_json_exists": Path(str(task["task_path"])).exists(),
+                "readme_exists": bool(task.get("readme_path")) and Path(str(task["readme_path"])).exists(),
+                "prepare_exists": (task_dir / "prepare.py").exists(),
+                "editable_exists": Path(str(task["editable_path"])).exists(),
+                "verifier_exists": verifier_path.exists(),
+                "verifier_compile": verifier_compile,
+                "verifier_import": verifier_import,
+                "verifier_error": verifier_error,
+            }
+        )
+    return {
+        "summary": {
+            "dataset_tasks": len(rows),
+            "missing_manifests": [row["task_id"] for row in rows if not row["manifest_exists"]],
+            "count_mismatches": [row["task_id"] for row in rows if row["size_status"] == "count_mismatch"],
+            "verifier_compile_failures": [row["task_id"] for row in rows if not row["verifier_compile"]],
+            "verifier_import_failures": [row["task_id"] for row in rows if not row["verifier_import"]],
+        },
+        "rows": rows,
+    }
+
+
+def _print_dataset_audit(payload: dict[str, Any]) -> None:
+    summary = dict(payload.get("summary") or {})
+    print(_render_kv_rows(list(summary.items())))
+    rows = list(payload.get("rows") or [])
+    if not rows:
+        return
+    print()
+    columns = [
+        ("task_id", "task_id"),
+        ("track", "track"),
+        ("size", "dataset_size"),
+        ("prepared", "prepared_count"),
+        ("size_status", "size_status"),
+        ("compile", "verifier_compile"),
+        ("import", "verifier_import"),
+    ]
+    widths = {
+        header: max(len(header), *(len(_stringify_cli_value(row[key])) for row in rows))
+        for header, key in columns
+    }
+    print("  ".join(column.ljust(widths[column]) for column, _ in columns))
+    print("  ".join("-" * widths[column] for column, _ in columns))
+    for row in rows:
+        print("  ".join(_stringify_cli_value(row[key]).ljust(widths[column]) for column, key in columns))
+        if row["size_status"] != "ok":
+            print(f"note=manifest={row['manifest_path']}")
+        if row.get("verifier_error"):
+            print(f"verifier_error={row['verifier_error']}")
+
+
 def _parse_suite_config_arg(raw_value: str | None) -> dict[str, Any] | None:
     if raw_value is None:
         return None
@@ -723,9 +944,13 @@ def _parse_suite_config_arg(raw_value: str | None) -> dict[str, Any] | None:
     return dict(parsed)
 
 
-def _runtime_for_cli(model: str | None = None, llm_concurrency: int | None = None) -> ProposalRuntime:
+def _runtime_for_cli(
+    model: str | None = None,
+    llm_concurrency: int | None = None,
+    item_workers: int | None = None,
+) -> ProposalRuntime:
     runtime = ProposalRuntime.from_env()
-    runtime = runtime.with_llm_concurrency(llm_concurrency)
+    runtime = runtime.with_llm_concurrency(llm_concurrency if llm_concurrency is not None else item_workers)
     return runtime.with_model(model) if model else runtime
 
 
@@ -737,22 +962,12 @@ def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def _handle_tasks_command(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Mirror the /api/tasks surface on the CLI.")
-    parser.add_argument("--task-id", help="Filter down to one task id.")
-    parser.add_argument("--track", help="Filter by track such as coding_verified or science_verified.")
-    parser.add_argument("--tier", choices=["comparable", "experiment"], help="Filter by benchmark tier metadata.")
-    parser.add_argument("--mode", choices=["answer", "artifact", "agent"], help="Filter by task contract mode.")
-    parser.add_argument("--backend", choices=["dataset", "benchmark_adapter"], help="Filter by runtime backend.")
-    parser.add_argument("--main-only", action="store_true", help="Show only tasks included in the active benchmark task set.")
-    parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
-    args = parser.parse_args(argv)
+def _handle_tasks_command(args: argparse.Namespace) -> None:
     tasks = _matching_task_summaries(
         task_id=args.task_id,
         track=args.track,
         tier=args.tier,
         mode=args.mode,
-        backend=args.backend,
         main_only=args.main_only,
     )
     if args.pretty:
@@ -764,10 +979,7 @@ def _handle_tasks_command(argv: list[str]) -> None:
     _print_json({"tasks": tasks})
 
 
-def _handle_runtime_command(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Mirror the /api/runtime surface on the CLI.")
-    parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
-    args = parser.parse_args(argv)
+def _handle_runtime_command(args: argparse.Namespace) -> None:
     runtime = _runtime_for_cli()
     payload = runtime.describe()
     if args.pretty:
@@ -776,11 +988,8 @@ def _handle_runtime_command(argv: list[str]) -> None:
     _print_json(payload)
 
 
-def _handle_run_task_command(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Mirror the /api/run-task surface on the CLI.")
-    _add_common_run_arguments(parser, require_task_id=True, allow_suite_config=True)
-    args = parser.parse_args(argv)
-    runtime = _runtime_for_cli(args.model, args.llm_concurrency)
+def _handle_run_task_command(args: argparse.Namespace) -> None:
+    runtime = _runtime_for_cli(args.model, args.llm_concurrency, args.item_workers)
     suite_config = _parse_suite_config_arg(args.suite_config)
     out = write_discrete_artifacts(
         task_id=args.task_id,
@@ -792,6 +1001,7 @@ def _handle_run_task_command(argv: list[str]) -> None:
         max_items=args.max_items,
         max_episodes=args.max_episodes,
         suite_config=suite_config,
+        eval_model=args.eval_model,
     )
     payload = _payload_from_artifact(out)
     if args.pretty:
@@ -800,11 +1010,7 @@ def _handle_run_task_command(argv: list[str]) -> None:
     _print_json(payload)
 
 
-def _handle_latest_run_command(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Mirror the /api/latest-run surface on the CLI.")
-    parser.add_argument("--task-id", help="Prefer the cached payload for a single task.")
-    parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
-    args = parser.parse_args(argv)
+def _handle_latest_run_command(args: argparse.Namespace) -> None:
     payload = load_cached_discrete_payload(task_id=args.task_id)
     if args.pretty:
         _print_cached_run_summary(payload)
@@ -812,11 +1018,8 @@ def _handle_latest_run_command(argv: list[str]) -> None:
     _print_json(payload)
 
 
-def _handle_run_sequence_command(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Mirror the /api/run-sequence surface on the CLI.")
-    _add_common_run_arguments(parser, require_task_id=False, allow_suite_config=False)
-    args = parser.parse_args(argv)
-    runtime = _runtime_for_cli(args.model, args.llm_concurrency)
+def _handle_run_sequence_command(args: argparse.Namespace) -> None:
+    runtime = _runtime_for_cli(args.model, args.llm_concurrency, args.item_workers)
     out = write_discrete_artifacts(
         task_id=None,
         proposal_runtime=runtime,
@@ -826,6 +1029,7 @@ def _handle_run_sequence_command(argv: list[str]) -> None:
         item_workers=args.item_workers,
         max_items=args.max_items,
         max_episodes=args.max_episodes,
+        eval_model=args.eval_model,
     )
     payload = _payload_from_artifact(out)
     if args.pretty:
@@ -834,17 +1038,213 @@ def _handle_run_sequence_command(argv: list[str]) -> None:
     _print_json(payload)
 
 
+def _handle_prepare_datasets_command(args: argparse.Namespace) -> None:
+    module = _load_prepare_datasets_module()
+    forwarded_argv: list[str] = []
+    if args.benchmark_root:
+        forwarded_argv.extend(["--benchmark-root", args.benchmark_root])
+    if args.registry:
+        forwarded_argv.extend(["--registry", args.registry])
+    for task_id in args.task_ids:
+        forwarded_argv.extend(["--task-id", task_id])
+    if args.python:
+        forwarded_argv.extend(["--python", args.python])
+    if args.list:
+        forwarded_argv.append("--list")
+    if args.debug:
+        forwarded_argv.append("--debug")
+    if args.dry_run:
+        forwarded_argv.append("--dry-run")
+    if args.continue_on_error:
+        forwarded_argv.append("--continue-on-error")
+    raise SystemExit(int(module.main(forwarded_argv)))
+
+
+def _handle_audit_datasets_command(args: argparse.Namespace) -> None:
+    payload = _audit_dataset_tasks(
+        task_ids=list(args.task_ids),
+        tracks=list(args.tracks),
+        main_only=bool(args.main_only),
+    )
+    if args.pretty:
+        _print_dataset_audit(payload)
+        return
+    _print_json(payload)
+
+
+def _handle_plan_dataset_smoke_command(args: argparse.Namespace) -> None:
+    plan = _build_dataset_smoke_plan(
+        task_ids=list(args.task_ids),
+        tracks=list(args.tracks),
+        main_only=bool(args.main_only),
+        max_items_cap=args.max_items_cap,
+        skip_placeholders=not bool(args.include_placeholders),
+    )
+    if args.pretty:
+        _print_dataset_smoke_plan(plan)
+        return
+    _print_json(plan)
+
+
+def _handle_smoke_test_datasets_command(args: argparse.Namespace) -> None:
+    plan = _build_dataset_smoke_plan(
+        task_ids=list(args.task_ids),
+        tracks=list(args.tracks),
+        main_only=bool(args.main_only),
+        max_items_cap=args.max_items_cap,
+        skip_placeholders=not bool(args.include_placeholders),
+    )
+    runtime = _runtime_for_cli(args.model, args.llm_concurrency)
+    results: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for row in plan["rows"]:
+        if row["action"] != "run":
+            results.append({**row, "status": "skipped"})
+            continue
+        eval_model = args.eval_model or row.get("default_eval_model")
+        if row["requires_eval_model"] and not eval_model:
+            message = f"{row['task_id']}: requires --eval-model for smoke testing"
+            failures.append(message)
+            results.append({**row, "status": "failed", "error": message})
+            if not args.continue_on_error:
+                break
+            continue
+        if args.dry_run:
+            results.append({**row, "status": "planned", "eval_model": eval_model})
+            continue
+        try:
+            artifact_path = write_discrete_artifacts(
+                task_id=row["task_id"],
+                proposal_runtime=runtime,
+                generation_budget=args.generation_budget,
+                candidate_budget=args.candidate_budget,
+                branching_factor=args.branching_factor,
+                item_workers=args.item_workers,
+                max_items=int(row["max_items"]),
+                max_episodes=args.max_episodes,
+                eval_model=eval_model,
+            )
+            payload = _payload_from_artifact(artifact_path)
+            results.append(
+                {
+                    **row,
+                    "status": "ok",
+                    "eval_model": eval_model,
+                    "artifact_path": str(artifact_path),
+                    "generated_at": payload.get("summary", {}).get("generated_at"),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = f"{row['task_id']}: {exc}"
+            failures.append(message)
+            results.append({**row, "status": "failed", "error": str(exc), "eval_model": eval_model})
+            if not args.continue_on_error:
+                break
+    payload = {
+        "plan": plan,
+        "summary": {
+            "planned": len(plan["rows"]),
+            "ran": sum(1 for row in results if row.get("status") == "ok"),
+            "skipped": sum(1 for row in results if row.get("status") == "skipped"),
+            "failed": len(failures),
+            "dry_run": bool(args.dry_run),
+        },
+        "results": results,
+    }
+    if args.pretty:
+        print(_render_kv_rows(list(payload["summary"].items())))
+        print()
+        for row in results:
+            line = f"- {row['task_id']}: status={row['status']}, max_items={row['max_items']}, reason={row['reason']}"
+            if row.get("error"):
+                line = f"{line}, error={row['error']}"
+            print(line)
+        return
+    _print_json(payload)
+    if failures:
+        raise SystemExit(1)
+
+
 def _build_main_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app",
-        description="CLI surfaces that mirror the workbench API: tasks, runtime, latest-run, run-task, and run-sequence.",
+        description=(
+            "Workbench CLI for task discovery, single-task/sequence runs, and benchmark-local dataset "
+            "preparation or smoke testing."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("tasks", help="Mirror /api/tasks.")
-    subparsers.add_parser("runtime", help="Mirror /api/runtime.")
-    subparsers.add_parser("latest-run", help="Mirror /api/latest-run.")
-    subparsers.add_parser("run-task", help="Mirror /api/run-task.")
-    subparsers.add_parser("run-sequence", help="Mirror /api/run-sequence.")
+
+    tasks_parser = subparsers.add_parser("tasks", help="Mirror /api/tasks.")
+    tasks_parser.add_argument("--task-id", help="Filter down to one task id.")
+    tasks_parser.add_argument("--track", help="Filter by track such as coding_verified or science_verified.")
+    tasks_parser.add_argument("--tier", choices=["comparable", "experiment"], help="Filter by benchmark tier metadata.")
+    tasks_parser.add_argument("--mode", choices=["answer", "artifact"], help="Filter by task contract mode.")
+    tasks_parser.add_argument("--main-only", action="store_true", help="Show only tasks included in the active benchmark task set.")
+    tasks_parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
+    tasks_parser.set_defaults(handler=_handle_tasks_command)
+
+    runtime_parser = subparsers.add_parser("runtime", help="Mirror /api/runtime.")
+    runtime_parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
+    runtime_parser.set_defaults(handler=_handle_runtime_command)
+
+    latest_run_parser = subparsers.add_parser("latest-run", help="Mirror /api/latest-run.")
+    latest_run_parser.add_argument("--task-id", help="Prefer the cached payload for a single task.")
+    latest_run_parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
+    latest_run_parser.set_defaults(handler=_handle_latest_run_command)
+
+    run_task_parser = subparsers.add_parser("run-task", help="Mirror /api/run-task.")
+    _add_common_run_arguments(run_task_parser, require_task_id=True, allow_suite_config=True)
+    run_task_parser.set_defaults(handler=_handle_run_task_command)
+
+    run_sequence_parser = subparsers.add_parser("run-sequence", help="Mirror /api/run-sequence.")
+    _add_common_run_arguments(run_sequence_parser, require_task_id=False, allow_suite_config=False)
+    run_sequence_parser.set_defaults(handler=_handle_run_sequence_command)
+
+    prepare_parser = subparsers.add_parser("prepare-datasets", help="Run benchmark/prepare_datasets.py through the main CLI.")
+    prepare_parser.add_argument("--benchmark-root", help="Override benchmark root; mainly useful for tests.")
+    prepare_parser.add_argument("--registry", help="Override registry path; mainly useful for tests.")
+    prepare_parser.add_argument("--task-id", action="append", dest="task_ids", default=[], help="Prepare one or more task ids.")
+    prepare_parser.add_argument("--python", default=sys.executable, help="Python executable used for task-local prepare.py scripts.")
+    prepare_parser.add_argument("--list", action="store_true", help="List dataset prepare readiness without executing prepare.py.")
+    prepare_parser.add_argument("--debug", action="store_true", help="Print detailed local dataset readiness information.")
+    prepare_parser.add_argument("--dry-run", action="store_true", help="Print prepare commands without executing them.")
+    prepare_parser.add_argument("--continue-on-error", action="store_true", help="Keep preparing later datasets after a failure.")
+    prepare_parser.set_defaults(handler=_handle_prepare_datasets_command)
+
+    audit_parser = subparsers.add_parser(
+        "audit-datasets",
+        help="Audit enabled dataset tasks for manifest completeness and verifier health.",
+    )
+    audit_parser.add_argument("--task-id", action="append", dest="task_ids", default=[], help="Audit one or more task ids.")
+    audit_parser.add_argument("--track", action="append", dest="tracks", default=[], help="Audit one or more tracks.")
+    audit_parser.add_argument("--main-only", action="store_true", help="Audit only dataset tasks in the main comparison set.")
+    audit_parser.add_argument("--pretty", action="store_true", help="Render a human-readable summary instead of JSON.")
+    audit_parser.set_defaults(handler=_handle_audit_datasets_command)
+
+    smoke_plan_parser = subparsers.add_parser(
+        "plan-dataset-smoke",
+        help="Plan smoke-test coverage across dataset tasks with the limit-100 policy.",
+    )
+    _add_dataset_smoke_arguments(smoke_plan_parser)
+    smoke_plan_parser.set_defaults(handler=_handle_plan_dataset_smoke_command)
+
+    smoke_run_parser = subparsers.add_parser(
+        "smoke-test-datasets",
+        help="Run dataset tasks with the shared smoke-test policy.",
+    )
+    _add_dataset_smoke_arguments(smoke_run_parser)
+    smoke_run_parser.add_argument("--model", help="Override the active proposal model for this smoke run.")
+    smoke_run_parser.add_argument("--llm-concurrency", type=int, help="Override in-flight LLM request concurrency.")
+    smoke_run_parser.add_argument("--generation-budget", type=int, help="Override generation budget for each smoke-tested task.")
+    smoke_run_parser.add_argument("--candidate-budget", type=int, help="Override candidate budget for each smoke-tested task.")
+    smoke_run_parser.add_argument("--branching-factor", type=int, help="Override branching factor for each smoke-tested task.")
+    smoke_run_parser.add_argument("--item-workers", type=int, help="Override item worker count for each smoke-tested task.")
+    smoke_run_parser.add_argument("--max-episodes", type=int, help="Optional episode cap forwarded to multi-turn smoke-tested tasks.")
+    smoke_run_parser.add_argument("--eval-model", help="Judge/eval model passed to tasks that support or require eval_model.")
+    smoke_run_parser.add_argument("--dry-run", action="store_true", help="Plan smoke runs without executing them.")
+    smoke_run_parser.add_argument("--continue-on-error", action="store_true", help="Keep running later smoke tests after a failure.")
+    smoke_run_parser.set_defaults(handler=_handle_smoke_test_datasets_command)
     return parser
 
 
@@ -857,24 +1257,12 @@ def main(argv: list[str] | None = None) -> None:
     if args[0] not in CLI_COMMANDS:
         parser.parse_args(args)
         return
-
-    command = args[0]
-    command_argv = args[1:]
-    if command == "tasks":
-        _handle_tasks_command(command_argv)
+    parsed = parser.parse_args(args)
+    handler = getattr(parsed, "handler", None)
+    if handler is None:
+        parser.print_help()
         return
-    if command == "runtime":
-        _handle_runtime_command(command_argv)
-        return
-    if command == "latest-run":
-        _handle_latest_run_command(command_argv)
-        return
-    if command == "run-task":
-        _handle_run_task_command(command_argv)
-        return
-    if command == "run-sequence":
-        _handle_run_sequence_command(command_argv)
-        return
+    handler(parsed)
 
 
 if __name__ == "__main__":

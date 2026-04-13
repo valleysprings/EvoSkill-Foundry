@@ -1,31 +1,23 @@
 # Evaluation Contract
 
-This note defines how the repo evaluates tasks. It is meant to keep task-facing metrics clear across `answer`, `artifact`, and `agent` modes.
+This note defines how the repo evaluates tasks. It keeps task-facing semantics clear across `answer` and `artifact` task modes plus `single_turn` and `multi_turn` interaction modes.
 
 ## 1. Core Contract
 
-Every benchmark task should declare three orthogonal dimensions in `task.json`:
+Every active benchmark task should declare two task-kind dimensions in `task.json`:
 
 - `task_mode`
-  what the editable file represents at evaluation time:
-  - `answer`: candidate code returns the final answer for one item
-  - `artifact`: candidate code defines or produces an executable artifact that the verifier runs
-  - `agent`: candidate code defines a policy, wrapper, or harness config for a multi-step environment
-- `optimization_scope`
-  what is allowed to change:
-  - `prompt`: mutate prompt templates only
-  - `wrapper`: mutate the wrapper, policy shell, prompting, and run config
-  - `implementation`: mutate the solver or program itself
-- `runtime_backend`
-  where the task is executed:
-  - `dataset`: local runtime; `local_dataset_only=true` means dataset fan-out with per-item runs
-  - `external`: legacy custom benchmark harness execution, currently disabled in `benchmark/registry.json`
+  what the candidate entrypoint represents at evaluation time:
+  - `answer`: the candidate entrypoint returns the final answer or output for one evaluated item
+  - `artifact`: the returned or generated program, policy, script, or other artifact is itself what the verifier runs or consumes; multi-turn policies also live here
 - `interaction_mode`
   how interaction unfolds at evaluation time:
   - `single_turn`: one candidate invocation returns the final result for each item
   - `multi_turn`: candidate code interacts over repeated observations, actions, and state updates inside an episode
 
-These fields say what is being optimized. They do not define the headline metric by themselves.
+For the active local benchmark lane, `local_dataset_only=true` means the repo fans evaluation out across local dataset items or episodes. Legacy fields such as `runtime_backend` and `optimization_scope` are no longer active contract surface.
+
+These fields say what kind of task is being evaluated. They do not define the headline metric by themselves.
 
 ## 2. Primary Metric
 
@@ -71,7 +63,7 @@ Current examples:
 
 ### `answer`
 
-Use `answer` when `editable.py` returns the final answer for a single item.
+Use `answer` when the candidate entrypoint returns the final answer or output for a single item.
 
 Typical repo examples:
 
@@ -79,6 +71,12 @@ Typical repo examples:
 - science QA
 - reasoning tasks such as `planbench` and `arc-challenge`
 - long-context QA
+
+Important repo detail:
+
+- `editable.py` is only the repo's compatibility entrypoint for search/eval
+- it does not mean the benchmark itself is an implementation or coding task
+- the verifier judges the returned answer/output, not the existence of a standalone program artifact
 
 Expected metric pattern:
 
@@ -88,12 +86,12 @@ Expected metric pattern:
 
 ### `artifact`
 
-Use `artifact` when `editable.py` defines executable code or another artifact that is itself evaluated.
+Use `artifact` when the candidate defines or produces executable code or another artifact that is itself evaluated.
 
 Typical repo examples:
 
 - `livecodebench`
-  editable Python program artifact
+  returned Python program artifact
 - `co-bench`
   generated `solve(**kwargs)` artifact scored by the checked-in official evaluator
 
@@ -103,26 +101,12 @@ Expected metric pattern:
 - primary: pass rate, exact optimal-value match rate, normalized benchmark score, or another artifact-level result metric
 - tie-break: only weak preferences such as artifact simplicity or stability, if needed
 
-### `agent`
-
-Use `agent` when `editable.py` defines a policy or harness wrapper that is evaluated over a multi-step environment.
-
-Typical repo example:
-
-- `tests/fixtures/benchmarks/test_fixtures/shared-agent-contract`
-
-Expected metric pattern:
-
-- gate: harness run is valid and produces usable task results
-- primary: task success rate or reward-like benchmark metric
-- tie-break: only secondary operational preferences, and only when they do not distort the benchmark's purpose
-
 ## 5. Active Benchmark Task Set
 
 Enabled registry entries now form one active benchmark task set.
 
 - dataset-backed tasks span math, reasoning, text-to-SQL, long-context, personalization, safety, science QA, coding, and OR
-- benchmark-adapter tasks currently cover the agent benchmarks
+- active multi-turn environment tasks should also be dataset-backed item fan-outs rather than a separate benchmark-adapter lane
 
 `benchmark_tier` is retained as compatibility metadata, but the active catalog is no longer split into separate comparable and experiment lanes. If a task should stay out of the active benchmark set, mark it explicitly with `included_in_main_comparison: false`.
 

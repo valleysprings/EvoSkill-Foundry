@@ -1,7 +1,7 @@
 {
   "id": "bbh",
   "title": "BIG-Bench Hard",
-  "description": "Evolve the editable solver independently for each BIG-Bench Hard reasoning item across the official BBH task collection.",
+  "description": "Return the final answer for each BIG-Bench Hard reasoning item across the official BBH task collection.",
   "benchmark_tier": "comparable",
   "track": "reasoning_verified",
   "dataset_id": "bigbenchhard_all",
@@ -13,10 +13,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "reasoning",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

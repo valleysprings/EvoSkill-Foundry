@@ -86,8 +86,23 @@
       "enabled": true
     },
     {
-      "id": "alpsbench",
-      "path": "personalization_verified/alpsbench",
+      "id": "alpsbench-extraction",
+      "path": "personalization_verified/alpsbench-extraction",
+      "enabled": true
+    },
+    {
+      "id": "alpsbench-update",
+      "path": "personalization_verified/alpsbench-update",
+      "enabled": true
+    },
+    {
+      "id": "alpsbench-retrieval",
+      "path": "personalization_verified/alpsbench-retrieval",
+      "enabled": true
+    },
+    {
+      "id": "alpsbench-utilization",
+      "path": "personalization_verified/alpsbench-utilization",
       "enabled": true
     },
     {
@@ -103,7 +118,7 @@
     {
       "id": "timechara",
       "path": "personalization_verified/timechara",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "rmtbench",
@@ -148,17 +163,17 @@
     {
       "id": "hallulens-precisewikiqa",
       "path": "safety_verified/hallulens-precisewikiqa",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "hallulens-mixedentities",
       "path": "safety_verified/hallulens-mixedentities",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "hallulens-longwiki",
       "path": "safety_verified/hallulens-longwiki",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "longsafety",
@@ -191,13 +206,43 @@
       "enabled": true
     },
     {
-      "id": "livecodebench",
-      "path": "coding_verified/livecodebench",
+      "id": "livecodebench-v1",
+      "path": "coding_verified/livecodebench-v1",
+      "enabled": true
+    },
+    {
+      "id": "livecodebench-v2",
+      "path": "coding_verified/livecodebench-v2",
+      "enabled": true
+    },
+    {
+      "id": "livecodebench-v3",
+      "path": "coding_verified/livecodebench-v3",
+      "enabled": true
+    },
+    {
+      "id": "livecodebench-v4",
+      "path": "coding_verified/livecodebench-v4",
+      "enabled": true
+    },
+    {
+      "id": "livecodebench-v5",
+      "path": "coding_verified/livecodebench-v5",
+      "enabled": true
+    },
+    {
+      "id": "livecodebench-v6",
+      "path": "coding_verified/livecodebench-v6",
       "enabled": true
     },
     {
       "id": "co-bench",
       "path": "or_verified/co-bench",
+      "enabled": true
+    },
+    {
+      "id": "alfworld",
+      "path": "agent_verified/alfworld",
       "enabled": true
     }
   ]

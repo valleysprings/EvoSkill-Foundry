@@ -8,7 +8,7 @@ This local task treats MMLU-Pro as a single reasoning dataset under the unified 
 - evolution unit: one question per independent question-run
 - current normalization target: config `default`, split `test`, `12032` items total
 - prompt/eval style: direct-answer only
-- verifier accepts either the correct answer text or the official option label for the prepared choice order
+- verifier now follows the official option-letter judgment path and scores only the extracted final option label
 - variable-length `choices` are preserved exactly as shipped by the dataset
 
 Prepare locally with:

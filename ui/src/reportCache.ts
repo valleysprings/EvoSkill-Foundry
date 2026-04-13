@@ -11,9 +11,8 @@ export function mergeTaskCatalogs(fallbackCatalog: TaskSummary[], cachedCatalog:
       return task;
     }
     return {
-      ...cachedTask,
       ...task,
-      id: task.id,
+      available_skills: task.available_skills ?? cachedTask.available_skills,
     };
   });
 }

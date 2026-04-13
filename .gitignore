@@ -214,6 +214,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 .DS_Store
+AGENTS.md
 external/
 runs/
 docs/

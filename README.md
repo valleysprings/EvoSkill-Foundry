@@ -39,54 +39,50 @@ After `uv sync --active`, you can run commands directly from the active Conda en
 
 ## Task Contract
 
-Each task declares three orthogonal dimensions in `task.json`:
+Each active task declares two orthogonal dimensions in `task.json`:
 
 - `task_mode`
-  what the editable file represents:
+  what the candidate entrypoint represents at evaluation time:
   - `answer`
   - `artifact`
-- `optimization_scope`
-  what is allowed to change:
-  - `prompt`
-  - `wrapper`
-  - `implementation`
-- `runtime_backend`
-  active registry tasks currently execute under `dataset`
-  `external` remains a legacy disabled path in the codebase; direct local tasks and dataset fan-out both use `dataset`
+- `interaction_mode`
+  how interaction unfolds at evaluation time:
+  - `single_turn`
+  - `multi_turn`
 
 The task-facing metric is dataset-specific.
 
 - `answer_metric` names the benchmark-native metric
 - `objective_spec` defines its display name, direction, unit, and formula
-- `primary_score` is just the normalized comparison scalar used by selection
+- `primary_score` is the normalized comparison scalar used by selection
 - `tie_break_score` is optional and should only break near-ties
 
-Read [references/evaluation-contract.md](references/evaluation-contract.md) before changing metric semantics, adding tie-break logic, or writing new benchmark wrappers.
+For `answer` tasks, `editable.py` is only the repo's internal candidate entrypoint for the search/eval harness. It does not mean the benchmark itself is an implementation or coding task.
+
+Read [references/evaluation-contract.md](references/evaluation-contract.md) before changing metric semantics, adding tie-break logic, or changing benchmark task contracts.
 
 ## Benchmark Tiers
 
 The benchmark source of truth lives under [benchmark/](benchmark/), with active registration in [benchmark/registry.json](benchmark/registry.json).
 
-Enabled registry entries now form one active benchmark task set:
+Enabled registry entries now form the current maintained runnable benchmark task set:
 
 - math: `olymmath`, `math-500`, `aime-2024`, `aime-2025`, `aime-2026`
 - reasoning: `planbench`, `arc-challenge`, `bbh`, `mmlu-pro`
-- text-to-SQL: `spider`, `bird`, `chase`
 - long-context: `longbench-v2`
-- personalization: `incharacter`, `characterbench`, `socialbench`, `timechara`, `personafeedback`, `personamem-32k`, `alpsbench`, `alpbench`
-- safety: `xstest-refusal-calibration`, `harmbench-text-harmful`, `jailbreakbench-harmful`, `or-bench-hard-1k`, `or-bench-toxic`, `hallulens-precisewikiqa`, `hallulens-mixedentities`, `hallulens-longwiki`, `longsafety`
 - science QA: `sciq`, `qasc`, `scienceqa`, `openbookqa`, `gpqa-diamond`
-- coding: `livecodebench`
-- OR and optimization: `co-bench`
+- coding: `livecodebench-v1` to `livecodebench-v6`
+- text-to-SQL: `spider`, `bird`, `chase`
+- Optimization: `co-bench`
+- personalization: `incharacter`, `characterbench`, `socialbench`, `personafeedback`, `personamem-32k`, `alpsbench-extraction`, `alpsbench-update`, `alpsbench-retrieval`, `alpsbench-utilization`, `alpbench`
+- safety: `xstest-refusal-calibration`, `harmbench-text-harmful`, `jailbreakbench-harmful`, `or-bench-hard-1k`, `or-bench-toxic`, `longsafety`
 
-`benchmark_tier` is still present in task specs for compatibility, but active benchmark tasks are no longer split into a separate experiment lane. Local fixtures or intentionally excluded tasks should opt out explicitly with `included_in_main_comparison: false`.
+Active benchmark membership is defined by `benchmark/registry.json`. Tasks that should stay out of the main set should set `enabled: false` in the registry or `included_in_main_comparison: false` in their task spec.
 
 Current setup notes:
 
-- `co-bench` uses dataset fan-out with the checked-in official evaluator plus local dataset assets
-- the personalization tasks use local manifests prepared from mirrored or public benchmark assets
-- the safety track uses `interaction_mode` for turn shape and `safety_category` for the safety sub-direction taxonomy
-- HalluLens safety tasks intentionally use deterministic local GoodWiki/public-data slices so they stay runnable without extra search APIs or gated services
+- `planbench` keeps task-local verifier code under `benchmark/reasoning_verified/planbench/utils/` and task-local validator assets under `benchmark/reasoning_verified/planbench/official/`
+- all enabled tasks above are the current maintained benchmark set
 
 ## Dataset Preparation
 
@@ -95,7 +91,7 @@ Preparing benchmark-local datasets is a prerequisite after clone.
 Run:
 
 ```bash
-uv run python benchmark/prepare_datasets.py
+conda run -n autoresearch python benchmark/prepare_datasets.py
 ```
 
 If a benchmark is missing local assets, the runtime should now point you at the matching `python benchmark/prepare_datasets.py --task-id ...` command, and OR benchmark setup is materialized under each task's own `benchmark/.../data/` directory.
@@ -108,12 +104,14 @@ The CLI is JSON-first and mirrors the workbench API surfaces.
   mirrors `/api/tasks`
 - `python -m app runtime`
   mirrors `/api/runtime`
-- `python -m app latest-run --task-id livecodebench`
-  mirrors `/api/latest-run?task_id=livecodebench`
-- `python -m app run-task --task-id livecodebench --max-items 1`
-  mirrors `/api/run-task?task_id=livecodebench&max_items=1`, but runs synchronously and prints the final payload
+- `python -m app latest-run --task-id livecodebench-v6`
+  mirrors `/api/latest-run?task_id=livecodebench-v6`
+- `python -m app run-task --task-id livecodebench-v6 --max-items 1`
+  mirrors `/api/run-task?task_id=livecodebench-v6&max_items=1`, but runs synchronously and prints the final payload
 - `python -m app run-sequence --max-items 25`
   mirrors `/api/run-sequence?max_items=25`, but runs synchronously and prints the final payload
+
+If you are not already inside `conda activate autoresearch`, prefix those commands with `conda run -n autoresearch`.
 
 Useful flags:
 
@@ -133,10 +131,10 @@ Examples:
 
 ```bash
 uv run python -m app tasks --pretty
-uv run python -m app tasks --task-id livecodebench --pretty
+uv run python -m app tasks --task-id livecodebench-v6 --pretty
 uv run python -m app runtime
-uv run python -m app run-task --task-id livecodebench --max-items 3 --pretty
-uv run python -m app latest-run --task-id livecodebench --pretty
+uv run python -m app run-task --task-id livecodebench-v6 --max-items 3 --pretty
+uv run python -m app latest-run --task-id livecodebench-v6 --pretty
 ```
 
 ## Web Workbench

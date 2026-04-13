@@ -8,10 +8,8 @@
   "dataset_id": "contains-duplicates-v1",
   "answer_metric": "speedup_vs_baseline",
   "family": "set-logic",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

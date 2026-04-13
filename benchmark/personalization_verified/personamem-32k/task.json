@@ -1,7 +1,7 @@
 {
   "id": "personamem-32k",
   "title": "PersonaMem 32k",
-  "description": "Evolve the solver against PersonaMem's 32k user-persona benchmark for preference tracking and personalized response selection.",
+  "description": "Return the personalized answer for each PersonaMem 32k benchmark item.",
   "benchmark_tier": "comparable",
   "included_in_main_comparison": true,
   "track": "personalization_verified",
@@ -17,10 +17,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "personalization",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_shape": "mcq",
   "scoring_mode": "exact_match",
   "task_signature": [

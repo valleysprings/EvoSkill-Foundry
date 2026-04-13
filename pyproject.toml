@@ -10,6 +10,7 @@ dependencies = [
   "datasets>=3,<4",
   "evaluate>=0.4.5,<0.5",
   "huggingface-hub>=0.30,<1",
+  "httpx>=0.27,<1",
   "matplotlib>=3.9,<4",
   "math-verify[antlr4_13_2]>=0.9,<1",
   "nltk>=3.9,<4",
@@ -29,3 +30,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

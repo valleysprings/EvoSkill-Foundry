@@ -14,11 +14,6 @@
       "id": "planbench-lite",
       "path": "test_fixtures/planbench-lite",
       "enabled": true
-    },
-    {
-      "id": "shared-agent-contract",
-      "path": "test_fixtures/shared-agent-contract",
-      "enabled": true
     }
   ]
 }

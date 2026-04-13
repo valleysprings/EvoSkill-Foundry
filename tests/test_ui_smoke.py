@@ -38,7 +38,7 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("Current Search State", source)
         self.assertIn("round ${summary.generation} avg ${formatObjectiveValueFromUnit(summary.averageObjective, task.objectiveUnit)}", source)
         self.assertIn("Episode trace", source)
-        self.assertIn("Latest Event", source)
+        self.assertIn("Latest Candidate", source)
         self.assertIn("Winner", source)
         self.assertIn("actual_display", source)
         self.assertIn("fail -> pass", source)

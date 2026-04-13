@@ -6,8 +6,8 @@ This task keeps the repo-local benchmark contract:
 
 - input: one Spider question plus its schema summary and local SQLite path
 - output: one SQL query string
-- scoring: normalized SQL exact match only
-- unified repo contract: `runtime_backend=dataset`, `task_mode=answer`, `optimization_scope=implementation`
+- scoring: Spider official exact-match evaluation via the released parser/evaluator modules
+- unified repo contract: `task_mode=answer`, `interaction_mode=single_turn`
 - verifier style: adapter, because the verifier extracts SQL text before matching
 
 Prepare locally with:

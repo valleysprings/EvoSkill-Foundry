@@ -1,7 +1,7 @@
 {
   "id": "arc-challenge",
   "title": "ARC-Challenge",
-  "description": "Evolve the editable solver independently for each ARC-Challenge validation multiple-choice reasoning question.",
+  "description": "Return the final answer for each ARC-Challenge validation multiple-choice reasoning question.",
   "benchmark_tier": "comparable",
   "track": "reasoning_verified",
   "dataset_id": "ai2_arc_arc_challenge",
@@ -13,10 +13,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "science",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

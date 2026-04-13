@@ -474,6 +474,95 @@ def evaluate_sql_candidate(*, task, candidate_path):
     }
 
 
+@functools.lru_cache(maxsize=8)
+def _load_spider_tables(table_path: str) -> dict[str, dict[str, Any]]:
+    tables = json.loads(Path(table_path).read_text())
+    return {
+        str(entry.get("db_id") or ""): dict(entry)
+        for entry in tables
+        if isinstance(entry, dict) and str(entry.get("db_id") or "").strip()
+    }
+
+
+def evaluate_spider_exact_candidate(*, task, candidate_path):
+    item = task.get("question_item")
+    if not isinstance(item, dict):
+        raise ValueError("Dataset question task must provide question_item.")
+
+    metadata = dict(item.get("metadata") or {})
+    db_id = str(metadata.get("db_id") or "").strip()
+    if not db_id:
+        raise ValueError("Spider evaluation requires metadata.db_id.")
+
+    task_root = _task_root(task)
+    spider_root = external_root(task_root) / "spider"
+    process_module, evaluation_module = _load_spider_evaluation_modules(str(spider_root))
+
+    table_path = task_root / "data" / "tables.json"
+    if not table_path.exists():
+        raise FileNotFoundError(f"Spider tables.json not found: {table_path}")
+    tables_by_db = _load_spider_tables(str(table_path))
+    table_entry = tables_by_db.get(db_id)
+    if table_entry is None:
+        raise KeyError(f"Spider tables.json is missing db_id={db_id!r}.")
+
+    schema = process_module.Schema(_schema_dict_from_table_entry(table_entry))
+
+    started = time.perf_counter()
+    solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
+    raw_actual = solver(public_question_payload(item))
+    actual_sql = extract_sql_text(raw_actual)
+    gold_sql = extract_sql_text(item.get("raw_expected_answer") or item["expected_answer"])
+
+    gold_parsed, _ = _normalize_spider_sql(
+        sql_text=gold_sql,
+        schema=schema,
+        table_entry=table_entry,
+        process_module=process_module,
+        evaluation_module=evaluation_module,
+        allow_empty_on_error=False,
+    )
+    predicted_parsed, parse_error = _normalize_spider_sql(
+        sql_text=actual_sql,
+        schema=schema,
+        table_entry=table_entry,
+        process_module=process_module,
+        evaluation_module=evaluation_module,
+        allow_empty_on_error=True,
+    )
+    evaluator = evaluation_module.Evaluator()
+    passed = bool(evaluator.eval_exact_match(predicted_parsed, gold_parsed))
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    row = {
+        "name": item.get("name") or item["item_id"],
+        "expected": gold_sql,
+        "actual": actual_sql,
+        "actual_raw": str(raw_actual or ""),
+        "passed": passed,
+        "comparison_mode": "spider_exact_match",
+        "db_id": db_id,
+        "partial_scores": evaluator.partial_scores,
+    }
+    if parse_error:
+        row["parse_error"] = parse_error
+
+    return {
+        "status": "pass" if passed else "fail",
+        "verifier_status": "pass" if passed else "fail",
+        "correctness": 1.0 if passed else 0.0,
+        "passed_tests": 1 if passed else 0,
+        "total_tests": 1,
+        "benchmark_ms": round(elapsed_ms, 3),
+        "benchmark_samples_ms": [round(elapsed_ms, 3)],
+        "objective": 1.0 if passed else 0.0,
+        "objective_score": 1.0 if passed else 0.0,
+        "objective_signal": 1.0 if passed else 0.0,
+        "error": parse_error,
+        "test_results": [row],
+    }
+
+
 def evaluate_bird_execution_candidate(*, task, candidate_path):
     item = task.get("question_item")
     if not isinstance(item, dict):

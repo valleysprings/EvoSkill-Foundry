@@ -1,5 +1,9 @@
 import type { ErrorPayload } from "./types.ts";
 
+const ERROR_TYPE_LABELS: Record<string, string> = {
+  llm_transport_error: "connection error",
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === "object") {
     return value as Record<string, unknown>;
@@ -26,6 +30,13 @@ export function stringifyUnknown(value: unknown): string {
     return String(value);
   }
   return String(value);
+}
+
+export function displayErrorType(errorType: string | null | undefined): string {
+  if (!errorType) {
+    return "runtime error";
+  }
+  return ERROR_TYPE_LABELS[errorType] ?? errorType.replaceAll("_", " ");
 }
 
 function buildPayload(candidate: Record<string, unknown>, fallbackMessage: string): ErrorPayload {

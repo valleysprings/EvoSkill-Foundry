@@ -647,6 +647,11 @@ input.control[type="number"]::-webkit-inner-spin-button {
   background: linear-gradient(180deg, var(--panel-strong), rgba(164, 106, 33, 0.1));
 }
 
+.response-panel.bad {
+  border-color: rgba(166, 63, 63, 0.3);
+  background: linear-gradient(180deg, var(--panel-strong), rgba(166, 63, 63, 0.1));
+}
+
 .response-value {
   min-height: 84px;
   display: grid;
@@ -675,6 +680,11 @@ input.control[type="number"]::-webkit-inner-spin-button {
 .response-value.warn {
   border-color: rgba(164, 106, 33, 0.26);
   color: var(--warn);
+}
+
+.response-value.bad {
+  border-color: rgba(166, 63, 63, 0.26);
+  color: var(--bad);
 }
 
 .metric-card {

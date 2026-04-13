@@ -1,4 +1,5 @@
 import type { JobState, Payload, RuntimeInfo, TaskCatalogPayload } from "./types";
+import { displayErrorType } from "./errorPayload";
 
 type StartJobOptions = {
   branchingFactor?: number | null;
@@ -24,7 +25,7 @@ async function fetchJson<T>(url: string, options?: JsonOptions): Promise<T> {
   if (!response.ok) {
     const message =
       typeof payload.error_type === "string"
-        ? `${payload.error_type}: ${payload.error ?? ""}`.trim()
+        ? `${displayErrorType(payload.error_type)}: ${payload.error ?? ""}`.trim()
         : `request failed with status ${response.status}`;
     const error = new Error(message) as Error & { payload?: unknown };
     error.payload = payload;

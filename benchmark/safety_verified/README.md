@@ -15,29 +15,26 @@ Current runnable local tasks:
 
 - `xstest-refusal-calibration`
   `over_refusal`
-- `harmbench-text-harmful`
-  `jailbreak_attack`
-- `jailbreakbench-harmful`
-  `jailbreak_attack`
-- `or-bench-hard-1k`
-  `over_refusal`
-- `or-bench-toxic`
-  `jailbreak_attack` with focus `should_refuse`
-- `hallulens-precisewikiqa`
-  `factuality_hallucination`
-- `hallulens-mixedentities`
-  `factuality_hallucination`
-- `hallulens-longwiki`
-  `factuality_hallucination`
-- `longsafety`
-  `jailbreak_attack` with focus `safety_degradation`
 
-This list is the registered task set currently stored under `safety_verified/` and used by `benchmark/registry.json` and `benchmark/prepare_datasets.py`.
+Disabled pending official recovery:
+
+- `harmbench-text-harmful`
+- `jailbreakbench-harmful`
+- `or-bench-hard-1k`
+- `or-bench-toxic`
+- `longsafety`
+
+Disabled under the stricter official-only policy because they are local slices or substitutes:
+
+- `hallulens-precisewikiqa`
+- `hallulens-mixedentities`
+- `hallulens-longwiki`
+
+This track still stores both enabled and disabled wrappers under `safety_verified/`, but only the enabled set from `benchmark/registry.json` is used by `benchmark/prepare_datasets.py`.
 
 Directories such as `bloom-self-preferential-bias/` and `bloom-trait-examples/` are auxiliary local data folders only; they are intentionally not exposed as standalone benchmark tasks.
 
 Notes on runnable fidelity:
 
 - public downloads happen automatically during `prepare.py`
-- HalluLens tasks intentionally use deterministic local runnable slices built from public GoodWiki and ITIS-style sources rather than the full upstream dynamic generation stack
-- `hallulens-mixedentities` deliberately avoids extra search/API dependencies by pairing public taxonomy data with a bundled medicine seed list
+- shared generic safety judges are no longer treated as official benchmark implementations by default

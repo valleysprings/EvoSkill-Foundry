@@ -3,19 +3,22 @@
   "title": "ALFWorld Text",
   "description": "Evaluate a multi-turn text agent against the official ALFWorld TextWorld environment on the mirrored valid_seen split.",
   "benchmark_tier": "comparable",
+  "included_in_main_comparison": false,
   "track": "agent_verified",
   "dataset_id": "alfworld_text_valid_seen",
   "dataset_size": 140,
+  "local_dataset_only": true,
+  "lazy_item_manifest": true,
+  "item_manifest": "data/questions.json",
+  "split": "valid_seen",
+  "allow_browsing": false,
   "answer_metric": "success_rate",
   "family": "agent-benchmark",
-  "runtime_backend": "benchmark_adapter",
-  "task_mode": "agent",
+  "task_mode": "artifact",
   "interaction_mode": "multi_turn",
-  "included_in_main_comparison": false,
-  "optimization_scope": "wrapper",
   "task_signature": [
-    "benchmark-adapter",
-    "agent",
+    "dataset-task",
+    "interactive-policy",
     "multi-turn",
     "alfworld",
     "text-environment"
@@ -23,7 +26,10 @@
   "editable_file": "editable.py",
   "verifier": "verifier.py",
   "entry_symbol": "step",
+  "function_name": "step",
   "prepare_ready_paths": [
+    "data/questions.json",
+    "data/source_info.json",
     "data/json_2.1.1",
     "data/logic",
     "data/detectors"
@@ -32,8 +38,8 @@
   "candidate_budget": 1,
   "branching_factor": 2,
   "item_workers": 2,
-  "baseline_summary": "A placeholder ALFWorld adapter that never emits an action.",
-  "prompt_context": "Edit editable.py only. Preserve def step(turn, runtime) and optionally def init_episode(episode). Each turn should inspect the current observation, history, and state, then emit an `act(command)` tool call when it knows the next ALFWorld-style text action.",
+  "baseline_summary": "A placeholder ALFWorld adapter that tracks state but never emits an action.",
+  "prompt_context": "Edit editable.py only. Preserve def step(turn, runtime) and optionally def init_episode(episode). Each run evaluates exactly one ALFWorld episode. Read turn.observation, turn.history, and turn.state, then emit an `act(command)` tool call when you know the next ALFWorld-style text action. Use `complete(message)` only when you intend to stop the episode.",
   "runtime_suite_config": {
     "episode_split": "valid_seen",
     "task_limit": 140,
@@ -57,7 +63,7 @@
       },
       {
         "name": "complete",
-        "description": "Declare the episode solved.",
+        "description": "Declare the episode solved or intentionally stop.",
         "parameters": {
           "type": "object",
           "properties": {

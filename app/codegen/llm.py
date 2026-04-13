@@ -1,18 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import queue
 import re
 import threading
 import time
 import textwrap
-import urllib.error
-import urllib.request
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
+import httpx
 from app.configs.prompts import (
     CANDIDATE_LABEL_LIMIT,
     PROPOSAL_CANDIDATE_COUNT_TEMPLATE,
@@ -37,10 +36,8 @@ from app.configs.prompts import (
 from app.codegen.selection import prompt_summary
 from app.codegen.task_contracts import (
     infer_interaction_mode,
-    infer_optimization_scope,
     infer_task_mode,
     interaction_mode_summary,
-    optimization_scope_summary,
     task_mode_summary,
 )
 from app.configs.codegen import PROPOSAL_SELECTION_GUIDANCE
@@ -48,56 +45,119 @@ from app.codegen.config import ROOT, RuntimeConfig, load_runtime_config
 from app.codegen.errors import LlmResponseError, LlmTransportError
 
 
-Transport = Callable[[dict[str, Any], RuntimeConfig], str]
+Transport = Callable[[dict[str, Any], RuntimeConfig], Awaitable[str]]
 RetryProgressCallback = Callable[[dict[str, Any]], None]
 _TRANSPORT_GATE_LOCK = threading.Lock()
 _TRANSPORT_DISPATCHERS: dict[tuple[str, int], "_TransportDispatcher"] = {}
 
 
 class _TransportDispatcher:
-    def __init__(self, *, max_workers: int) -> None:
-        self._queue: queue.PriorityQueue[tuple[int, int, Transport, dict[str, Any], RuntimeConfig, Future[str]]] = (
-            queue.PriorityQueue()
-        )
+    def __init__(self, *, base_url: str, max_workers: int) -> None:
+        self._base_url = base_url
+        self._max_workers = max_workers
         self._lock = threading.Lock()
         self._sequence = 0
-        self._threads = [
-            threading.Thread(
-                target=self._worker,
-                name=f"autoresearch-llm-{index}",
-                daemon=True,
-            )
-            for index in range(max_workers)
-        ]
-        for thread in self._threads:
-            thread.start()
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._queue: asyncio.PriorityQueue[tuple[int, int, Transport | None, dict[str, Any], RuntimeConfig, Future[str]]] | None = None
+        self._client: httpx.AsyncClient | None = None
+        self._startup_error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run_event_loop,
+            name=f"autoresearch-llm-dispatcher-{max_workers}",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
 
     def submit(
         self,
         *,
         priority: int,
-        sender: Transport,
+        sender: Transport | None,
         request_body: dict[str, Any],
         config: RuntimeConfig,
     ) -> Future[str]:
         future: Future[str] = Future()
+        if self._startup_error is not None:
+            raise RuntimeError(f"Failed to initialize async LLM transport dispatcher: {self._startup_error}") from self._startup_error
         with self._lock:
             sequence = self._sequence
             self._sequence += 1
-        self._queue.put((priority, sequence, sender, request_body, config, future))
+        assert self._loop is not None
+        assert self._queue is not None
+        self._loop.call_soon_threadsafe(
+            self._queue.put_nowait,
+            (priority, sequence, sender, request_body, config, future),
+        )
         return future
 
-    def _worker(self) -> None:
+    def _run_event_loop(self) -> None:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._queue = asyncio.PriorityQueue()
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                limits=httpx.Limits(
+                    max_connections=self._max_workers,
+                    max_keepalive_connections=self._max_workers,
+                ),
+                timeout=None,
+                trust_env=False,
+            )
+            for index in range(self._max_workers):
+                loop.create_task(self._worker(index))
+        except BaseException as exc:  # noqa: BLE001
+            self._startup_error = exc
+        finally:
+            self._ready.set()
+        if self._startup_error is None:
+            assert self._loop is not None
+            self._loop.run_forever()
+
+    async def _worker(self, _index: int) -> None:
+        assert self._queue is not None
         while True:
-            _priority, _sequence, sender, request_body, config, future = self._queue.get()
+            _priority, _sequence, sender, request_body, config, future = await self._queue.get()
             try:
                 if future.set_running_or_notify_cancel():
                     try:
-                        future.set_result(sender(request_body, config))
+                        if sender is None:
+                            future.set_result(await self._default_transport(request_body, config))
+                        else:
+                            future.set_result(await sender(request_body, config))
                     except BaseException as exc:  # noqa: BLE001
                         future.set_exception(exc)
             finally:
                 self._queue.task_done()
+
+    async def _default_transport(self, request_body: dict[str, Any], config: RuntimeConfig) -> str:
+        assert self._client is not None
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        try:
+            response = await self._client.post(
+                "/chat/completions",
+                json=request_body,
+                headers=headers,
+                timeout=config.timeout_s,
+            )
+        except httpx.TimeoutException as exc:
+            raise LlmTransportError("Model request timed out.", model=config.active_model) from exc
+        except httpx.TransportError as exc:
+            raise LlmTransportError(f"Model request failed: {exc}", model=config.active_model) from exc
+        body = response.text
+        if response.is_error:
+            raise LlmTransportError(
+                f"Model request failed with HTTP {response.status_code}: {body[:240]}",
+                model=config.active_model,
+            )
+        return body
 
 
 def _message_text(content: Any) -> str:
@@ -168,7 +228,7 @@ def _transport_dispatcher(config: RuntimeConfig) -> _TransportDispatcher:
     with _TRANSPORT_GATE_LOCK:
         dispatcher = _TRANSPORT_DISPATCHERS.get(key)
         if dispatcher is None:
-            dispatcher = _TransportDispatcher(max_workers=config.llm_concurrency)
+            dispatcher = _TransportDispatcher(base_url=config.base_url, max_workers=config.llm_concurrency)
             _TRANSPORT_DISPATCHERS[key] = dispatcher
         return dispatcher
 
@@ -269,14 +329,12 @@ def _proposal_system_prompt() -> str:
     )
 
 
-def _proposal_contract_lines(task: dict[str, Any]) -> tuple[str, str, str]:
+def _proposal_contract_lines(task: dict[str, Any]) -> tuple[str, str]:
     task_mode = infer_task_mode(task)
     interaction_mode = infer_interaction_mode(task)
-    optimization_scope = infer_optimization_scope(task)
     return (
         f"Task mode: {task_mode} ({task_mode_summary(task_mode)})",
         f"Interaction mode: {interaction_mode} ({interaction_mode_summary(interaction_mode)})",
-        f"Optimization scope: {optimization_scope} ({optimization_scope_summary(optimization_scope)})",
     )
 
 
@@ -396,6 +454,7 @@ def _emit_retry_progress(
     if progress_callback is None or attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
         return
     next_attempt = attempt + 1
+    parse_status_label = "connection error" if parse_status == "transport_error" else parse_status.replace("_", " ")
     progress_callback(
         {
             "phase": "llm_retry",
@@ -406,7 +465,7 @@ def _emit_retry_progress(
             "max_attempts": MODEL_COMPLETION_MAX_ATTEMPTS,
             "message": (
                 f"Retrying {purpose} with {runtime.active_model} "
-                f"(attempt {next_attempt}/{MODEL_COMPLETION_MAX_ATTEMPTS}) after {parse_status}."
+                f"(attempt {next_attempt}/{MODEL_COMPLETION_MAX_ATTEMPTS}) after {parse_status_label}."
             ),
         }
     )
@@ -509,31 +568,6 @@ def _request_preview(messages: list[dict[str, str]]) -> str:
     return _trim(user_messages[-1], limit=REQUEST_PREVIEW_LIMIT)
 
 
-def _default_transport(request_body: dict[str, Any], config: RuntimeConfig) -> str:
-    payload = json.dumps(request_body).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-    }
-    if config.api_key:
-        headers["Authorization"] = f"Bearer {config.api_key}"
-    request = urllib.request.Request(
-        url=f"{config.base_url}/chat/completions",
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=config.timeout_s) as response:
-            return response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise LlmTransportError(f"Model request failed with HTTP {exc.code}: {body[:240]}", model=config.active_model) from exc
-    except urllib.error.URLError as exc:
-        raise LlmTransportError(f"Model request failed: {exc.reason}", model=config.active_model) from exc
-    except TimeoutError as exc:
-        raise LlmTransportError("Model request timed out.", model=config.active_model) from exc
-
-
 @dataclass(slots=True)
 class ProposalRuntime:
     config: RuntimeConfig
@@ -578,7 +612,7 @@ class ProposalRuntime:
         if tools:
             request_body["tools"] = list(tools)
             request_body["tool_choice"] = _normalize_tool_choice(tool_choice)
-        sender = self.transport or _default_transport
+        sender = self.transport
         last_parse_error: LlmResponseError | None = None
         last_transport_error: LlmTransportError | None = None
         max_response_tokens = int(request_body["max_tokens"])
@@ -616,25 +650,6 @@ class ProposalRuntime:
                     messages=normalized_messages,
                     attempt=attempt,
                     exc=LlmTransportError("Model request timed out.", model=self.active_model),
-                )
-                if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
-                    raise last_transport_error from exc
-                _emit_retry_progress(
-                    progress_callback=progress_callback,
-                    purpose=purpose,
-                    runtime=self,
-                    attempt=attempt,
-                    parse_status="transport_error",
-                )
-                time.sleep(min(2**(attempt - 1), 5))
-                continue
-            except urllib.error.URLError as exc:
-                last_transport_error = _transport_failure_error(
-                    purpose=purpose,
-                    runtime=self,
-                    messages=normalized_messages,
-                    attempt=attempt,
-                    exc=LlmTransportError(f"Model request failed: {exc.reason}", model=self.active_model),
                 )
                 if attempt >= MODEL_COMPLETION_MAX_ATTEMPTS:
                     raise last_transport_error from exc
@@ -835,7 +850,7 @@ def _proposal_prompt(
         )
         for item in candidate_history[-6:]
     ]
-    task_mode_line, interaction_mode_line, optimization_scope_line = _proposal_contract_lines(task)
+    task_mode_line, interaction_mode_line = _proposal_contract_lines(task)
     system_prompt = _proposal_system_prompt()
     user_prompt = (
         f"Task id: {task['id']}\n"
@@ -848,7 +863,6 @@ def _proposal_prompt(
         f"Entry symbol: {task['entry_symbol']}\n"
         f"{task_mode_line}\n"
         f"{interaction_mode_line}\n"
-        f"{optimization_scope_line}\n"
         f"Objective: {objective_name}\n"
         f"Objective direction: {objective_direction}\n"
         f"Objective formula: {objective_formula}\n"

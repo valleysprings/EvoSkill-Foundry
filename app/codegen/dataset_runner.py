@@ -16,7 +16,7 @@ from app.codegen.dataset_support import (
     load_question_manifest,
 )
 from app.codegen.llm import ProposalRuntime
-from app.codegen.task_contracts import infer_interaction_mode, infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.codegen.task_contracts import infer_interaction_mode, infer_task_mode
 from app.codegen.trainer import run_codegen_task
 from app.memory.store import MemoryStore
 
@@ -29,6 +29,51 @@ def _question_preview(prompt: str, *, limit: int = QUESTION_PREVIEW_LIMIT) -> st
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 3].rstrip() + "..."
+
+
+def _raw_context_brief(item: dict[str, Any]) -> str | None:
+    raw_context = item.get("raw_context")
+    if not isinstance(raw_context, dict):
+        return None
+
+    benchmark = str(raw_context.get("benchmark") or "").strip().lower()
+    prompt_text = ""
+    for key in ("query", "latest_query", "question_text", "latest_user_message", "target_utterance", "user_message", "question", "instruction"):
+        candidate = str(raw_context.get(key) or "").strip()
+        if candidate:
+            prompt_text = candidate
+            break
+    if not prompt_text:
+        for key in ("dialogue", "new_dialogue", "old_dialogue"):
+            turns = raw_context.get(key)
+            if not isinstance(turns, list) or not turns:
+                continue
+            snippets: list[str] = []
+            for turn in turns[-3:]:
+                if not isinstance(turn, dict):
+                    continue
+                speaker = str(turn.get("speaker") or turn.get("role") or turn.get("from") or "speaker").strip()
+                text = str(turn.get("text") or turn.get("content") or turn.get("value") or "").strip()
+                if text:
+                    snippets.append(f"{speaker}: {text}")
+            if snippets:
+                prompt_text = " ".join(snippets)
+                break
+    if not prompt_text:
+        return None
+
+    if benchmark == "socialbench":
+        role_name = str(raw_context.get("role_name") or "").strip()
+        if role_name:
+            return f"{role_name}: {prompt_text}"
+    return prompt_text
+
+
+def _item_brief(item: dict[str, Any]) -> str:
+    contextual = _raw_context_brief(item)
+    if contextual:
+        return _question_preview(contextual)
+    return _question_preview(str(item.get("raw_prompt") or item.get("prompt") or ""))
 
 
 def _question_field_names(item: dict[str, Any]) -> list[str]:
@@ -50,8 +95,9 @@ def _question_field_names(item: dict[str, Any]) -> list[str]:
     return field_names
 
 
-def _dataset_loaded_message(task_id: str, items: list[dict[str, Any]]) -> str:
-    message = f"Loaded dataset {task_id} with {len(items)} questions."
+def _dataset_loaded_message(task: dict[str, Any], items: list[dict[str, Any]]) -> str:
+    unit = "episodes" if str(task.get("interaction_mode") or "") == "multi_turn" else "questions"
+    message = f"Loaded dataset {task['id']} with {len(items)} {unit}."
     if not items:
         return message
 
@@ -111,6 +157,45 @@ def _question_payload_for_result(task: dict[str, Any], item: dict[str, Any]) -> 
         "raw_expected_answer": item.get("raw_expected_answer"),
         "metadata": dict(item.get("metadata") or {}),
     }
+
+
+def _item_source_index(item: dict[str, Any]) -> int | None:
+    metadata = dict(item.get("metadata") or {})
+    raw_index = metadata.get("source_index")
+    if isinstance(raw_index, bool):
+        return None
+    try:
+        source_index = int(raw_index)
+    except (TypeError, ValueError):
+        return None
+    return source_index if source_index >= 0 else None
+
+
+def _item_run_source_index(item_run: dict[str, Any]) -> int | None:
+    raw_index = item_run.get("item_source_index")
+    if isinstance(raw_index, bool):
+        raw_index = None
+    if raw_index is not None:
+        try:
+            source_index = int(raw_index)
+        except (TypeError, ValueError):
+            source_index = None
+        else:
+            if source_index >= 0:
+                return source_index
+    question = item_run.get("question")
+    if isinstance(question, dict):
+        return _item_source_index(question)
+    return None
+
+
+def _item_run_sort_key(item_run: dict[str, Any]) -> tuple[bool, int, str]:
+    source_index = _item_run_source_index(item_run)
+    return (
+        source_index is None,
+        source_index if source_index is not None else 0,
+        str(item_run["item_id"]),
+    )
 
 
 def _item_selector_aliases(item: dict[str, Any], *, position: int | None = None) -> set[str]:
@@ -183,13 +268,14 @@ def _progress_wrapper(
     dataset_task_id: str,
     item_id: str,
     item_name: str,
-    item_prompt: str,
+    item_source_index: int | None,
+    item: dict[str, Any],
     expected_answer: object,
 ) -> ProgressCallback | None:
     if progress_callback is None:
         return None
 
-    item_brief = _question_preview(item_prompt)
+    item_brief = _item_brief(item)
     expected_answer_text = str(expected_answer).strip()
 
     def emit(event: dict[str, Any]) -> None:
@@ -201,6 +287,7 @@ def _progress_wrapper(
                 "question_task_id": event.get("task_id"),
                 "item_id": item_id,
                 "item_name": item_name,
+                "item_source_index": item_source_index,
                 "item_brief": item_brief,
                 "expected_answer": expected_answer_text,
                 "message": f"[{item_id}] {message}" if isinstance(message, str) and message else message,
@@ -304,6 +391,8 @@ def _failed_item_result(
         "dataset_task_id": task["id"],
         "item_id": item["item_id"],
         "item_name": item.get("name") or item["item_id"],
+        "item_source_index": _item_source_index(item),
+        "item_brief": _item_brief(item),
         "question": _question_payload_for_result(task, item),
     }
 
@@ -328,7 +417,8 @@ def _run_item(
         dataset_task_id=str(task["id"]),
         item_id=str(item["item_id"]),
         item_name=str(item.get("name") or item["item_id"]),
-        item_prompt=str(item.get("raw_prompt") or item["prompt"]),
+        item_source_index=_item_source_index(item),
+        item=item,
         expected_answer=item.get("raw_expected_answer") or item.get("expected_answer"),
     )
     try:
@@ -369,6 +459,8 @@ def _run_item(
     result["dataset_task_id"] = task["id"]
     result["item_id"] = item["item_id"]
     result["item_name"] = item.get("name") or item["item_id"]
+    result["item_source_index"] = _item_source_index(item)
+    result["item_brief"] = _item_brief(item)
     result["question"] = _question_payload_for_result(task, item)
     return result
 
@@ -381,27 +473,34 @@ def run_dataset_task(
     memory_root: Path,
     session_id: str,
     max_items: int | None = None,
+    max_episodes: int | None = None,
     eval_model: str | None = None,
     selected_item_ids: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
     if not is_dataset_task(task):
-        raise ValueError(f"Task {task['id']} does not use the dataset runtime backend.")
+        raise ValueError(f"Task {task['id']} is not configured as a local dataset-backed task.")
 
-    task_for_run = {**task, "eval_model": eval_model}
-    requested_items = max_items if isinstance(max_items, int) and max_items > 0 else int(task_for_run.get("dataset_size") or 0) or None
+    task_for_run = {
+        **task,
+        "eval_model": eval_model,
+        "runtime_model_override": proposal_runtime.active_model,
+    }
+    uses_episode_limit = str(task_for_run.get("interaction_mode") or "") == "multi_turn"
+    requested_limit = max_episodes if uses_episode_limit else max_items
+    requested_items = requested_limit if isinstance(requested_limit, int) and requested_limit > 0 else int(task_for_run.get("dataset_size") or 0) or None
     items = load_question_manifest(task_for_run, min_items=requested_items)
     if selected_item_ids:
         items = _select_requested_items(items, selected_item_ids)
-    elif isinstance(max_items, int) and max_items > 0:
-        items = items[:max_items]
+    elif isinstance(requested_limit, int) and requested_limit > 0:
+        items = items[:requested_limit]
     if progress_callback is not None:
         progress_callback(
             {
                 "phase": "dataset_loaded",
                 "task_id": task_for_run["id"],
-                "message": _dataset_loaded_message(task_for_run["id"], items),
+                "message": _dataset_loaded_message(task_for_run, items),
             }
         )
 
@@ -457,7 +556,7 @@ def run_dataset_task(
         finally:
             executor.shutdown(wait=True, cancel_futures=False)
 
-    item_runs.sort(key=lambda item_run: str(item_run["item_id"]))
+    item_runs.sort(key=_item_run_sort_key)
     summary = aggregate_dataset_metrics(item_runs)
     positive_experiences_added = sum(int(item_run.get("positive_experiences_added") or 0) for item_run in item_runs)
     negative_experiences_added = sum(int(item_run.get("negative_experiences_added") or 0) for item_run in item_runs)
@@ -498,10 +597,8 @@ def run_dataset_task(
             "candidate_budget": task_for_run["candidate_budget"],
             "branching_factor": task_for_run["branching_factor"],
             "item_workers": configured_workers,
-            "runtime_backend": infer_runtime_backend(task_for_run),
             "task_mode": infer_task_mode(task_for_run),
             "interaction_mode": infer_interaction_mode(task_for_run),
-            "optimization_scope": infer_optimization_scope(task_for_run),
             "benchmark_tier": task_for_run["benchmark_tier"],
             "track": task_for_run["track"],
             "dataset_id": task_for_run["dataset_id"],
@@ -518,10 +615,12 @@ def run_dataset_task(
             "requires_eval_model": bool(task_for_run.get("requires_eval_model")),
             "default_eval_model": task_for_run.get("default_eval_model"),
             "run_baseline_verifier": bool(task_for_run.get("run_baseline_verifier", True)),
-            "supports_max_items": True,
-            "default_max_items": task_for_run["dataset_size"] or len(items),
-            "supports_max_episodes": False,
-            "default_max_episodes": None,
+            "supports_runtime_config": isinstance(task_for_run.get("runtime_suite_config"), dict),
+            "suite_run_config": task_for_run.get("runtime_suite_config"),
+            "supports_max_items": not uses_episode_limit,
+            "default_max_items": (task_for_run["dataset_size"] or len(items)) if not uses_episode_limit else None,
+            "supports_max_episodes": uses_episode_limit,
+            "default_max_episodes": (task_for_run["dataset_size"] or len(items)) if uses_episode_limit else None,
         },
         "baseline": aggregate_candidate("baseline", item_runs, task_for_run["objective_label"]),
         "winner": aggregate_candidate("winner", item_runs, task_for_run["objective_label"]),
@@ -544,7 +643,8 @@ def run_dataset_task(
         "run_delta_primary_score": average_delta_primary_score,
         "run_delta_objective": average_objective_delta,
         "selection_reason": (
-            f"Dataset {task_for_run['id']} aggregated {summary['winner_passed']}/{summary['total_items']} solved questions "
+            f"Dataset {task_for_run['id']} aggregated {summary['winner_passed']}/{summary['total_items']} solved "
+            f"{'episodes' if uses_episode_limit else 'questions'} "
             f"with average {task_for_run['objective_label']}={summary['avg_winner_objective']}."
         ),
         "total_generations": generations_total,

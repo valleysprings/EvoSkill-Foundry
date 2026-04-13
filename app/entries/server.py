@@ -45,6 +45,14 @@ def _runtime_for_request(model: str | None = None, llm_concurrency: int | None =
     return runtime.with_model(model)
 
 
+def _effective_llm_concurrency(llm_concurrency: int | None, item_workers: int | None) -> int | None:
+    if llm_concurrency is not None:
+        return llm_concurrency
+    if item_workers is not None:
+        return item_workers
+    return None
+
+
 def _retry_backoff_budget_s() -> float:
     return float(sum(min(2 ** (attempt - 1), 5) for attempt in range(1, MODEL_COMPLETION_MAX_ATTEMPTS)))
 
@@ -757,7 +765,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                runtime = _runtime_for_request(model, llm_concurrency)
+                runtime = _runtime_for_request(model, _effective_llm_concurrency(llm_concurrency, item_workers))
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, _error_payload(exc), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -833,7 +841,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 _json_response(self, exc.as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                runtime = _runtime_for_request(model, llm_concurrency)
+                runtime = _runtime_for_request(model, _effective_llm_concurrency(llm_concurrency, item_workers))
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, _error_payload(exc), status=HTTPStatus.BAD_REQUEST)
                 return

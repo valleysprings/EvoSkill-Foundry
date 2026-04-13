@@ -1,7 +1,7 @@
 {
   "id": "sciq",
   "title": "SciQ",
-  "description": "Evolve a single-file solver independently for each SciQ multiple-choice science question in the local full validation split.",
+  "description": "Return the final answer for each SciQ multiple-choice science question in the local full validation split.",
   "benchmark_tier": "comparable",
   "track": "science_verified",
   "dataset_id": "sciq",
@@ -11,10 +11,8 @@
   "split": "validation",
   "answer_metric": "accuracy",
   "family": "science",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "single-file-optimization",
     "single-turn",

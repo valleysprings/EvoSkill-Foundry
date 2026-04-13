@@ -1,7 +1,7 @@
 {
   "id": "aime-2026",
   "title": "AIME 2026",
-  "description": "Evolve the editable solver independently for each AIME 2026 short-answer question in the local public split.",
+  "description": "Return the final answer for each AIME 2026 short-answer question in the local public split.",
   "benchmark_tier": "comparable",
   "track": "math_verified",
   "dataset_id": "aime_2026_full",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

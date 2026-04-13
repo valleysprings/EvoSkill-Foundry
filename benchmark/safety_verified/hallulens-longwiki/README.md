@@ -2,7 +2,7 @@
 
 Long-context grounded factuality benchmark built as a deterministic HalluLens-style GoodWiki long-form slice.
 
-- runtime backend: `benchmark_adapter`
+- runtime backend: `dataset`
 - task contract: `respond(question: dict, runtime) -> str`
 - primary metric: `long_form_hallucination_rate` (`direction=min`)
 - item aggregation: a prompt fails when the assistant abstains unnecessarily or introduces unsupported claims relative to the provided long reference

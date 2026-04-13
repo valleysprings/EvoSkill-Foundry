@@ -7,7 +7,7 @@ This task keeps the repo-local benchmark contract:
 - input: one CHASE dev turn, its database schema text, and prior utterance history
 - output: one SQL query string
 - scoring: Spider official-style execution match on the local sqlite database
-- unified repo contract: `runtime_backend=dataset`, `task_mode=answer`, `optimization_scope=implementation`
+- unified repo contract: `task_mode=answer`, `interaction_mode=single_turn`
 - verifier style: adapter, because the verifier extracts SQL text before Spider execution evaluation
 
 Prepare locally with:

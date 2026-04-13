@@ -1,7 +1,7 @@
 {
   "id": "math-500",
   "title": "MATH-500",
-  "description": "Evolve the editable solver independently for each MATH-500 short-answer question in the local full test split.",
+  "description": "Return the final answer for each MATH-500 short-answer question in the local full test split.",
   "benchmark_tier": "comparable",
   "track": "math_verified",
   "dataset_id": "math_500",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "exact_match_rate",
   "family": "math",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

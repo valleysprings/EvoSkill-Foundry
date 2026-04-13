@@ -2,7 +2,7 @@
 
 Single-turn hallucination benchmark built as a runnable HalluLens-style local slice for nonexistent mixed entities.
 
-- runtime backend: `benchmark_adapter`
+- runtime backend: `dataset`
 - task contract: `respond(question: dict, runtime) -> str`
 - primary metric: `hallucination_rate` (`direction=min`)
 - item aggregation: a prompt fails when the assistant invents facts instead of abstaining on a nonexistent entity

@@ -271,9 +271,9 @@ def load_personalization_reference_benchmarks(path: Path | None = None) -> list[
                 raise ValueError(
                     f"Local personalization reference benchmark {benchmark_id!r} cannot declare blocking_reason."
                 )
-            if metric_fidelity != "official":
+            if metric_fidelity == "reference_only":
                 raise ValueError(
-                    f"Local personalization reference benchmark {benchmark_id!r} must declare metric_fidelity='official'."
+                    f"Local personalization reference benchmark {benchmark_id!r} cannot declare metric_fidelity='reference_only'."
                 )
         elif implementation_status == "running":
             raise ValueError(

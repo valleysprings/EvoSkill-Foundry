@@ -9,7 +9,7 @@ from app.codegen.errors import AutoresearchError
 from app.configs.codegen import DEFAULT_FRONTIER_SIZE, DEFAULT_MEMORY_RETRIEVAL_TOP_K, DEFAULT_SESSION_ID
 from app.codegen.llm import ProposalRuntime, propose_code_candidate, reflect_strategy_experience
 from app.codegen.selection import metrics_rank, selection_spec_for_task
-from app.codegen.task_contracts import infer_interaction_mode, infer_optimization_scope, infer_runtime_backend, infer_task_mode
+from app.codegen.task_contracts import infer_interaction_mode, infer_task_mode
 from app.codegen.verifier import evaluate_materialized_candidate, finalize_candidate_metrics, materialize_candidate
 from app.memory.store import MemoryStore
 
@@ -80,7 +80,7 @@ def _run_baseline_verifier(task: dict[str, Any]) -> bool:
     configured = task.get("run_baseline_verifier")
     if configured is not None:
         return bool(configured)
-    return infer_runtime_backend(task) != "benchmark_adapter"
+    return True
 
 
 def _reference_only_baseline_metrics(task: dict[str, Any], source_code: str) -> dict[str, Any]:
@@ -720,6 +720,8 @@ def run_codegen_task(
                     memory_delta=0,
                     message=(
                         f"{branch_id} {candidate['agent']} status={candidate['verifier_status']} "
+                        f"passed_tests={candidate['metrics'].get('passed_tests', 0)} "
+                        f"total_tests={candidate['metrics'].get('total_tests', 0)} "
                         f"objective={candidate['metrics']['objective']} score={candidate['metrics']['objective_score']} "
                         f"primary_score={candidate['metrics']['primary_score']} "
                         f"tie_break_score={candidate['metrics']['tie_break_score']}"
@@ -956,7 +958,10 @@ def run_codegen_task(
             memory_delta=memory_delta,
             message=(
                 f"Best { _objective_label(task) } after generation {generation}: "
-                f"{current_best['metrics']['objective']} (accepts={len(accepted_candidates)}, frontier={len(frontier)})"
+                f"{current_best['metrics']['objective']} "
+                f"(passed_tests={current_best['metrics'].get('passed_tests', 0)} "
+                f"total_tests={current_best['metrics'].get('total_tests', 0)} "
+                f"accepts={len(accepted_candidates)}, frontier={len(frontier)})"
             ),
         )
 
@@ -995,10 +1000,8 @@ def run_codegen_task(
             "generation_budget": task["generation_budget"],
             "candidate_budget": task["candidate_budget"],
             "branching_factor": branching_factor,
-            "runtime_backend": infer_runtime_backend(task),
             "task_mode": infer_task_mode(task),
             "interaction_mode": infer_interaction_mode(task),
-            "optimization_scope": infer_optimization_scope(task),
             "benchmark_tier": task["benchmark_tier"],
             "track": task["track"],
             "dataset_id": task["dataset_id"],

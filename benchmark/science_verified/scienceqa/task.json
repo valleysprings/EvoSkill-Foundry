@@ -1,7 +1,7 @@
 {
   "id": "scienceqa",
   "title": "ScienceQA Text (Bio/Chem/Phys)",
-  "description": "Evolve a single-file solver independently for each text-only ScienceQA validation question from biology, chemistry, and physics.",
+  "description": "Return the final answer for each text-only ScienceQA validation question from biology, chemistry, and physics.",
   "benchmark_tier": "comparable",
   "track": "science_verified",
   "dataset_id": "scienceqa",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "science",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "single-file-optimization",
     "single-turn",

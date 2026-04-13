@@ -71,13 +71,13 @@ NEW_SEED_MEMORY = {
 }
 
 DATASET_PRIOR_MEMORY = {
-    "experience_id": "prior-assistantbench-tooling",
+    "experience_id": "prior-agent-workflow-tooling",
     "experience_type": "dataset_skill_prior",
     "experience_outcome": "success",
-    "source_task": "assistantbench",
-    "source_session_id": "distill-assistantbench-v1",
+    "source_task": "agent-workflow",
+    "source_session_id": "distill-agent-workflow-v1",
     "family": "agent-benchmark",
-    "task_signature": ["benchmark-adapter", "agent", "multi-turn", "assistantbench"],
+    "task_signature": ["dataset-task", "agent", "multi-turn", "assistant-workflow"],
     "verifier_status": "pass",
     "rejection_reason": "",
     "failure_pattern": "",
@@ -90,8 +90,8 @@ DATASET_PRIOR_MEMORY = {
     "process_trace_summary": "",
     "knowledge_scope": "dataset_prior",
     "distilled_skill": "goal decomposition -> tool selection -> verify result -> concise final response",
-    "applicability_notes": "Best for AssistantBench-like multi-tool assistant tasks.",
-    "source_dataset_ids": ["assistantbench_public_validation"],
+    "applicability_notes": "Best for multi-tool assistant tasks with explicit subgoals.",
+    "source_dataset_ids": ["agent_workflow_public_validation"],
     "delta_primary_score": 0.8,
     "proposal_model": "gpt-5.4",
     "candidate_summary": "Dataset-level assistant workflow prior.",

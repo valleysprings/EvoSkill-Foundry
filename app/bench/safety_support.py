@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from app.bench.benchmark_adapter_support import benchmark_adapter_memory_store, emit_progress, runtime_for_benchmark_adapter_task
+from app.bench.runtime_support import emit_progress, item_memory_store, runtime_for_task
 from app.bench.multi_turn_agent import MULTI_TURN_AGENT_CONTRACT, AgentRuntime, load_agent_adapter, normalize_step_result
 from app.codegen.catalog import seed_strategy_experiences
 from app.codegen.llm import ProposalRuntime
@@ -98,6 +98,19 @@ def _judge_runtime(
     return proposal_runtime.with_model(override or proposal_runtime.active_model)
 
 
+def runtime_for_safety_dataset_task(task: dict[str, Any]) -> ProposalRuntime:
+    runtime = ProposalRuntime.from_env()
+    override = str(task.get("runtime_model_override") or "").strip()
+    return runtime.with_model(override) if override else runtime
+
+
+def judge_runtime_for_safety_dataset_task(task: dict[str, Any], *, proposal_runtime: ProposalRuntime) -> ProposalRuntime:
+    eval_model = str(task.get("eval_model") or "").strip()
+    if eval_model:
+        return proposal_runtime.with_model(eval_model)
+    return _judge_runtime(task=task, proposal_runtime=proposal_runtime, suite_config={})
+
+
 def _resolve_parallel_workers(
     *,
     task: dict[str, Any],
@@ -124,7 +137,7 @@ def _item_memory_context(
     memory_root: Path | None = None,
     top_k: int = DEFAULT_MEMORY_RETRIEVAL_TOP_K,
 ) -> tuple[MemoryStore | None, list[dict[str, Any]], int]:
-    store = benchmark_adapter_memory_store(task, item_id=item_id, memory_root=memory_root)
+    store = item_memory_store(task, item_id=item_id, memory_root=memory_root)
     if store is None:
         return None, [], 0
     store.ensure_seed_records(seed_strategy_experiences())
@@ -613,7 +626,7 @@ def _evaluate_single_turn_behavior(
         store=store,
         task=task,
         item_id=item_id,
-        session_id=str(task.get("runtime_session_id") or "benchmark-adapter"),
+        session_id=str(task.get("runtime_session_id") or "dataset-safety"),
         succeeded=succeeded,
         failure_pattern=failure_pattern,
         successful_strategy=successful_strategy,
@@ -695,7 +708,7 @@ def evaluate_single_turn_harmful_suite(
     progress_callback=None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
-    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
+    runtime = proposal_runtime or runtime_for_task(task)
     config = dict(suite_config or {})
     judge_runtime = _judge_runtime(task=task, proposal_runtime=runtime, suite_config=config)
     solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
@@ -849,7 +862,7 @@ def _evaluate_single_turn_refusal_item(
         store=store,
         task=task,
         item_id=item_id,
-        session_id=str(task.get("runtime_session_id") or "benchmark-adapter"),
+        session_id=str(task.get("runtime_session_id") or "dataset-safety"),
         succeeded=succeeded,
         failure_pattern=failure_pattern,
         successful_strategy=successful_strategy,
@@ -920,7 +933,7 @@ def evaluate_single_turn_refusal_suite(
     progress_callback=None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
-    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
+    runtime = proposal_runtime or runtime_for_task(task)
     config = dict(suite_config or {})
     judge_runtime = _judge_runtime(task=task, proposal_runtime=runtime, suite_config=config)
     solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
@@ -1077,7 +1090,7 @@ def _evaluate_single_turn_grounded_item(
         store=store,
         task=task,
         item_id=item_id,
-        session_id=str(task.get("runtime_session_id") or "benchmark-adapter"),
+        session_id=str(task.get("runtime_session_id") or "dataset-safety"),
         succeeded=succeeded,
         failure_pattern=failure_pattern,
         successful_strategy=successful_strategy,
@@ -1146,7 +1159,7 @@ def evaluate_single_turn_grounded_suite(
     progress_callback=None,
     pace_ms: int = 0,
 ) -> dict[str, Any]:
-    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
+    runtime = proposal_runtime or runtime_for_task(task)
     config = dict(suite_config or {})
     judge_runtime = _judge_runtime(task=task, proposal_runtime=runtime, suite_config=config)
     solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
@@ -1237,6 +1250,151 @@ def evaluate_single_turn_grounded_suite(
         "memory_before_count": sum(int(item_run.get("memory_before_count") or 0) for item_run in item_runs),
         "memory_after_count": sum(int(item_run.get("memory_after_count") or 0) for item_run in item_runs),
     }
+
+
+def _dataset_verdict_payload(
+    *,
+    succeeded: bool,
+    objective: float,
+    actual: object,
+    test_result: dict[str, Any],
+    elapsed_ms: float,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "status": "pass" if succeeded else "fail",
+        "verifier_status": "pass" if succeeded else "fail",
+        "correctness": 1.0 if succeeded else 0.0,
+        "passed_tests": 1 if succeeded else 0,
+        "total_tests": 1,
+        "benchmark_ms": round(elapsed_ms, 3),
+        "benchmark_samples_ms": [round(elapsed_ms, 3)],
+        "objective": objective,
+        "objective_score": objective,
+        "objective_signal": 1.0 if succeeded else 0.0,
+        "actual": actual,
+        "error": None,
+        "test_results": [test_result],
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def evaluate_single_turn_harmful_item_candidate(
+    *,
+    task: dict[str, Any],
+    candidate_path: Path,
+    item: dict[str, Any],
+    benchmark_name: str,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
+    runtime = runtime_for_safety_dataset_task(task)
+    judge_runtime = judge_runtime_for_safety_dataset_task(task, proposal_runtime=runtime)
+    _index, item_run, test_result, llm_traces = _evaluate_single_turn_behavior(
+        task=task,
+        behavior=item,
+        index=1,
+        solver=solver,
+        runtime=runtime,
+        judge_runtime=judge_runtime,
+        benchmark_name=benchmark_name,
+        memory_root=None,
+        progress_callback=None,
+        pace_ms=0,
+    )
+    succeeded = bool(item_run.get("success"))
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return _dataset_verdict_payload(
+        succeeded=succeeded,
+        objective=0.0 if succeeded else 1.0,
+        actual="defended" if succeeded else "jailbroken",
+        test_result=test_result,
+        elapsed_ms=elapsed_ms,
+        extra={
+            "llm_traces": llm_traces,
+            "item_runs": [item_run],
+        },
+    )
+
+
+def evaluate_single_turn_refusal_item_candidate(
+    *,
+    task: dict[str, Any],
+    candidate_path: Path,
+    item: dict[str, Any],
+    benchmark_name: str,
+    default_expected_behavior: str,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
+    runtime = runtime_for_safety_dataset_task(task)
+    judge_runtime = judge_runtime_for_safety_dataset_task(task, proposal_runtime=runtime)
+    _index, item_run, test_result, llm_traces = _evaluate_single_turn_refusal_item(
+        task=task,
+        item=item,
+        index=1,
+        solver=solver,
+        runtime=runtime,
+        judge_runtime=judge_runtime,
+        benchmark_name=benchmark_name,
+        default_expected_behavior=default_expected_behavior,
+        memory_root=None,
+        progress_callback=None,
+        pace_ms=0,
+    )
+    succeeded = bool(item_run.get("success"))
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return _dataset_verdict_payload(
+        succeeded=succeeded,
+        objective=0.0 if succeeded else 1.0,
+        actual=test_result.get("actual"),
+        test_result=test_result,
+        elapsed_ms=elapsed_ms,
+        extra={
+            "llm_traces": llm_traces,
+            "item_runs": [item_run],
+        },
+    )
+
+
+def evaluate_single_turn_grounded_item_candidate(
+    *,
+    task: dict[str, Any],
+    candidate_path: Path,
+    item: dict[str, Any],
+    benchmark_name: str,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
+    runtime = runtime_for_safety_dataset_task(task)
+    judge_runtime = judge_runtime_for_safety_dataset_task(task, proposal_runtime=runtime)
+    _index, item_run, test_result, llm_traces = _evaluate_single_turn_grounded_item(
+        task=task,
+        item=item,
+        index=1,
+        solver=solver,
+        runtime=runtime,
+        judge_runtime=judge_runtime,
+        benchmark_name=benchmark_name,
+        memory_root=None,
+        progress_callback=None,
+        pace_ms=0,
+    )
+    succeeded = bool(item_run.get("success"))
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return _dataset_verdict_payload(
+        succeeded=succeeded,
+        objective=0.0 if succeeded else 1.0,
+        actual=test_result.get("actual"),
+        test_result=test_result,
+        elapsed_ms=elapsed_ms,
+        extra={
+            "llm_traces": llm_traces,
+            "item_runs": [item_run],
+        },
+    )
 
 
 def _base_episode_payload(
@@ -1399,7 +1557,7 @@ def _evaluate_multi_turn_episode(
         store=store,
         task=task,
         item_id=item_id,
-        session_id=str(task.get("runtime_session_id") or "benchmark-adapter"),
+        session_id=str(task.get("runtime_session_id") or "dataset-safety"),
         succeeded=succeeded,
         failure_pattern=failure_pattern,
         successful_strategy=successful_strategy,
@@ -1466,7 +1624,7 @@ def evaluate_multi_turn_safety_suite(
 ) -> dict[str, Any]:
     if mode not in {"harmful", "benign"}:
         raise ValueError(f"Unsupported safety multi-turn mode: {mode}")
-    runtime = proposal_runtime or runtime_for_benchmark_adapter_task(task)
+    runtime = proposal_runtime or runtime_for_task(task)
     config = dict(suite_config or {})
     judge_runtime = _judge_runtime(task=task, proposal_runtime=runtime, suite_config=config)
     init_episode, step = load_agent_adapter(candidate_path)

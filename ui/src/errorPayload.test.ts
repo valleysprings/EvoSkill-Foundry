@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeErrorPayload } from "./errorPayload.ts";
+import { displayErrorType, normalizeErrorPayload } from "./errorPayload.ts";
 
 test("normalizes a raw failed job object", () => {
   const payload = normalizeErrorPayload({
@@ -49,4 +49,9 @@ test("prefers payload details from thrown errors", () => {
   assert.equal(payload.error, "solve(problem) must return list[str]");
   assert.equal(payload.model, "deepseek-chat");
   assert.deepEqual(payload.details, { task_id: "planbench-lite" });
+});
+
+test("maps transport errors to a friendlier label", () => {
+  assert.equal(displayErrorType("llm_transport_error"), "connection error");
+  assert.equal(displayErrorType("runtime_error"), "runtime error");
 });

@@ -1,7 +1,7 @@
 {
   "id": "chase",
   "title": "CHASE",
-  "description": "Evolve the editable solver independently for each CHASE dev conversational natural-language-to-SQL item.",
+  "description": "Return the final answer for each CHASE dev conversational natural-language-to-SQL item.",
   "benchmark_tier": "comparable",
   "track": "text2sql_verified",
   "dataset_id": "chase",
@@ -13,10 +13,8 @@
   "allow_browsing": false,
   "answer_metric": "accuracy",
   "family": "text2sql",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "implementation",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",

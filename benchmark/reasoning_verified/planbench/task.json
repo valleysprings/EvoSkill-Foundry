@@ -1,7 +1,7 @@
 {
   "id": "planbench",
   "title": "PlanBench",
-  "description": "Evaluate direct PlanBench task_1 plan generation in the unified dataset runtime as an answer-adapter task with upstream-compatible text_to_plan parsing plus semantic VAL validation.",
+  "description": "Return the final answer for each PlanBench task_1 plan-generation prompt in the local unified dataset runtime, with upstream-compatible text_to_plan parsing plus semantic VAL validation.",
   "benchmark_tier": "comparable",
   "track": "reasoning_verified",
   "dataset_id": "planbench_task1_plan_generation",
@@ -12,10 +12,8 @@
   "allow_browsing": false,
   "answer_metric": "valid_plan_rate",
   "family": "planning",
-  "runtime_backend": "dataset",
   "task_mode": "answer",
   "interaction_mode": "single_turn",
-  "optimization_scope": "wrapper",
   "task_signature": [
     "editable-file-optimization",
     "single-turn",
@@ -34,7 +32,7 @@
   "branching_factor": 4,
   "item_workers": 20,
   "epsilon": 0.02,
-  "baseline_summary": "A placeholder answer-adapter that returns no plan for the active PlanBench prompt.",
+  "baseline_summary": "A placeholder dataset-level solver template that returns no plan for the active PlanBench prompt.",
   "objective_spec": {
     "display_name": "Valid plan rate",
     "direction": "max",
@@ -45,5 +43,5 @@
   "selection_spec": {
     "profile": "objective_only"
   },
-  "prompt_context": "Edit editable.py only. This task uses the unified dataset runtime, but it is not an exact-match answer task. Treat solve(question: dict) as the answer-adapter boundary: it receives the public PlanBench prompt payload and must return plan text that the upstream task_1 text_to_plan parser can extract and semantically validate against the official instance. You may return either a list[str] with one official-style action line per step or a newline-separated string of official-style action lines. Return natural-language or official object-token action text accepted by PlanBench task_1 parsing; do not return parenthesized PDDL. Preserve the declared helper symbols when useful. Do not use browsing or external network access."
+  "prompt_context": "Edit editable.py only. The entry symbol solve(question: dict) must return the final plan text for the current PlanBench prompt so the upstream task_1 text_to_plan parser can extract and semantically validate it against the official instance. You may return either a list[str] with one official-style action line per step or a newline-separated string of official-style action lines. Return natural-language or official object-token action text accepted by PlanBench task_1 parsing; do not return parenthesized PDDL. Preserve the declared helper symbols when useful. Do not use browsing or external network access."
 }
