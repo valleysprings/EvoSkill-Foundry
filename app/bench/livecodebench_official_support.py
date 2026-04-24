@@ -494,8 +494,8 @@ def _problem_cases(problem: dict[str, Any]) -> list[dict[str, Any]]:
     return list(problem.get("public_test_cases") or []) + list(problem.get("private_test_cases") or [])
 
 
-def problem_to_official_sample(problem: dict[str, Any]) -> dict[str, Any]:
-    cases = _problem_cases(problem)
+def problem_to_official_sample(problem: dict[str, Any], *, cases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    cases = cases if cases is not None else _problem_cases(problem)
     metadata = dict(problem.get("metadata") or {})
     evaluation_mode = str(problem.get("evaluation_mode") or "").strip().lower()
     fn_name = problem.get("function_name") or metadata.get("func_name")
@@ -513,9 +513,12 @@ def problem_to_official_sample(problem: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def official_case_rows(problem: dict[str, Any], code: str, timeout: int = OFFICIAL_TIMEOUT_S) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def official_case_rows(problem: dict[str, Any], code: str, timeout: int = OFFICIAL_TIMEOUT_S, *, max_test_cases: int | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cases = _problem_cases(problem)
-    raw_results, metadata = check_correctness(problem_to_official_sample(problem), generation=code, timeout=timeout)
+    if isinstance(max_test_cases, int) and max_test_cases > 0:
+        cases = cases[:max_test_cases]
+    sample = problem_to_official_sample(problem, cases=cases)
+    raw_results, metadata = check_correctness(sample, generation=code, timeout=timeout)
     first_failed_index = next((index for index, value in enumerate(raw_results) if value is not True), None)
     failure_actual = str(metadata.get("output") or "").rstrip("\n")
     failure_error = str(metadata.get("error_message") or metadata.get("error") or "").strip() or None
@@ -545,10 +548,10 @@ def official_case_rows(problem: dict[str, Any], code: str, timeout: int = OFFICI
     return rows, metadata
 
 
-def evaluate_livecodebench_problem(problem: dict[str, Any], candidate_path: Path) -> dict[str, Any]:
+def evaluate_livecodebench_problem(problem: dict[str, Any], candidate_path: Path, *, max_test_cases: int | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     code = candidate_path.read_text()
-    rows, metadata = official_case_rows(problem, code)
+    rows, metadata = official_case_rows(problem, code, max_test_cases=max_test_cases)
     passed = sum(1 for row in rows if row["passed"])
     total = len(rows)
     solved = passed == total

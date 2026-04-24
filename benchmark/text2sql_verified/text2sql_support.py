@@ -153,6 +153,20 @@ def _task_root(task: dict[str, Any]) -> Path:
     return Path(__file__).resolve().parent
 
 
+def _spider_db_path(task: dict[str, Any], item: dict[str, Any]) -> Path:
+    metadata = dict(item.get("metadata") or {})
+    raw_path = str(metadata.get("db_path") or "").strip()
+    task_root = _task_root(task)
+    if raw_path:
+        db_path = Path(raw_path)
+        return db_path if db_path.is_absolute() else (task_root / db_path).resolve()
+
+    db_id = str(metadata.get("db_id") or "").strip()
+    if not db_id:
+        raise ValueError("Spider execution evaluation requires metadata.db_id or metadata.db_path.")
+    return (task_root / "data" / "database" / db_id / f"{db_id}.sqlite").resolve()
+
+
 def _bird_db_path(task: dict[str, Any], item: dict[str, Any]) -> Path:
     metadata = dict(item.get("metadata") or {})
     raw_path = str(metadata.get("db_path") or "").strip()
@@ -563,6 +577,81 @@ def evaluate_spider_exact_candidate(*, task, candidate_path):
     }
 
 
+def evaluate_spider_execution_candidate(*, task, candidate_path):
+    item = task.get("question_item")
+    if not isinstance(item, dict):
+        raise ValueError("Dataset question task must provide question_item.")
+
+    metadata = dict(item.get("metadata") or {})
+    db_id = str(metadata.get("db_id") or "").strip()
+    if not db_id:
+        raise ValueError("Spider execution evaluation requires metadata.db_id.")
+
+    task_root = _task_root(task)
+    spider_root = external_root(task_root) / "spider"
+    db_path = _spider_db_path(task, item)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Spider sqlite database not found: {db_path}")
+
+    started = time.perf_counter()
+    solver = load_callable_from_path(candidate_path, str(task["entry_symbol"]))
+    raw_actual = solver(public_question_payload(item))
+    actual_sql = extract_sql_text(raw_actual)
+    gold_sql = extract_sql_text(item.get("raw_expected_answer") or item["expected_answer"])
+
+    execution = execute_spider_sqls(
+        spider_root=spider_root,
+        predicted_sql=actual_sql,
+        gold_sql=gold_sql,
+        db_path=db_path,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    state = str(execution.get("state") or "runtime_error")
+    passed = state == "ok" and bool(execution.get("passed"))
+    if state == "gold_parse_error":
+        raise RuntimeError(
+            f"Spider gold SQL failed to parse for {item.get('item_id') or '<unknown>'}: "
+            f"{execution.get('error') or 'unknown error'}"
+        )
+
+    row: dict[str, Any] = {
+        "name": item.get("name") or item["item_id"],
+        "expected": gold_sql,
+        "actual": actual_sql,
+        "actual_raw": str(raw_actual or ""),
+        "passed": passed,
+        "comparison_mode": "spider_execution",
+        "db_id": db_id,
+        "db_path": str(db_path),
+    }
+    if execution.get("error"):
+        row["execution_error"] = str(execution["error"])
+    if execution.get("predicted_preview") is not None:
+        row["predicted_result_preview"] = execution["predicted_preview"]
+    if execution.get("gold_preview") is not None:
+        row["expected_result_preview"] = execution["gold_preview"]
+    if execution.get("predicted_count") is not None:
+        row["predicted_result_count"] = execution["predicted_count"]
+    if execution.get("gold_count") is not None:
+        row["expected_result_count"] = execution["gold_count"]
+
+    return {
+        "status": "pass" if passed else "fail",
+        "verifier_status": "pass" if passed else "fail",
+        "correctness": 1.0 if passed else 0.0,
+        "passed_tests": 1 if passed else 0,
+        "total_tests": 1,
+        "benchmark_ms": round(elapsed_ms, 3),
+        "benchmark_samples_ms": [round(elapsed_ms, 3)],
+        "objective": 1.0 if passed else 0.0,
+        "objective_score": 1.0 if passed else 0.0,
+        "objective_signal": 1.0 if passed else 0.0,
+        "error": None if passed else row.get("execution_error"),
+        "test_results": [row],
+    }
+
+
 def evaluate_bird_execution_candidate(*, task, candidate_path):
     item = task.get("question_item")
     if not isinstance(item, dict):
@@ -646,6 +735,12 @@ def _load_spider_evaluation_modules(spider_root: str) -> tuple[Any, Any]:
         process_module = importlib.util.module_from_spec(process_spec)
         sys.modules["process_sql"] = process_module
         process_spec.loader.exec_module(process_module)
+
+        # test-suite-sql-eval's evaluation.py imports exec_eval from the same directory;
+        # ensure spider_root is on sys.path so the relative import resolves.
+        root_str = str(root)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
 
         evaluation_spec = importlib.util.spec_from_file_location("spider_evaluation", root / "evaluation.py")
         if evaluation_spec is None or evaluation_spec.loader is None:

@@ -323,14 +323,19 @@ def _evaluate_with_official_scoring(
     python_code: str,
     *,
     timeout_s: int,
+    max_test_cases: int | None = None,
 ) -> dict[str, Any]:
     utils = importlib.import_module("evaluation.utils")
     evaluator_module = importlib.import_module("evaluation.evaluate")
     runtime = utils.ParallelRun(evaluator_module.evaluate_instance)
     raw_results: dict[str, tuple[list[Any], str | None]] = {}
 
+    test_cases = list(data.test_cases)
+    if isinstance(max_test_cases, int) and max_test_cases > 0:
+        test_cases = test_cases[:max_test_cases]
+
     with utils.FileLock():
-        for case in data.test_cases:
+        for case in test_cases:
             file_path = Path(str(data.src_dir)) / str(data.task) / str(case)
             try:
                 instances = list(data.load_data(str(file_path)))
@@ -377,6 +382,8 @@ def evaluate_co_bench_candidate(
     problem_name = _question_problem_name(item)
     data_dir = _ensure_problem_data(task, config, problem_name)
     timeout_s = int(config.get("timeout_s") or 10)
+    max_test_cases_raw = config.get("max_test_cases")
+    max_test_cases = int(max_test_cases_raw) if isinstance(max_test_cases_raw, (int, float)) and max_test_cases_raw > 0 else None
     item_name = str(item.get("name") or problem_name)
     item_id = str(item.get("item_id") or problem_name)
     started = time.perf_counter()
@@ -385,7 +392,7 @@ def evaluate_co_bench_candidate(
         controller = importlib.import_module("evaluation.controller")
         data = controller.get_data(problem_name, src_dir=str(data_dir))
         try:
-            feedback = _evaluate_with_official_scoring(data, source_code, timeout_s=timeout_s)
+            feedback = _evaluate_with_official_scoring(data, source_code, timeout_s=timeout_s, max_test_cases=max_test_cases)
             test_score = float(feedback["test_score"])
             test_row = {
                 "name": item_name,

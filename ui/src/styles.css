@@ -946,3 +946,64 @@ input.control[type="number"]::-webkit-inner-spin-button {
     font-size: 2rem;
   }
 }
+
+/* Persona selector */
+.persona-section {
+  display: grid;
+  gap: 12px;
+}
+
+.persona-search {
+  width: 100%;
+}
+
+.persona-capsules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.persona-capsule {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  user-select: none;
+}
+
+.persona-capsule:hover {
+  border-color: var(--accent, #7e5e42);
+  color: var(--fg);
+}
+
+.persona-capsule.selected {
+  background: rgba(126, 94, 66, 0.15);
+  border-color: var(--accent, #7e5e42);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.persona-capsule .persona-kind {
+  font-size: 0.65rem;
+  opacity: 0.6;
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.persona-payload-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.persona-group {
+  display: grid;
+  gap: 8px;
+}

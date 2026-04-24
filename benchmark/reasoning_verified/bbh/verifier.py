@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import time
 
-from app.bench.benchmark_support import normalize_answer_text, public_question_payload
+from app.bench.benchmark_support import (
+    choice_answer_matches,
+    choice_response_display,
+    normalize_answer_text,
+    public_question_payload,
+)
 from app.codegen.verifier import load_callable_from_path
 
 
@@ -18,6 +23,17 @@ def _match_answer(item: dict, raw_actual: object) -> tuple[bool, str]:
     prediction = _stringify_answer(raw_actual).strip()
     if not prediction:
         return False, ""
+    choices = list(item.get("choices") or [])
+    metadata = dict(item.get("metadata") or {})
+    if choices:
+        passed, actual = choice_answer_matches(
+            prediction,
+            expected=item["expected_answer"],
+            choices=choices,
+            answer_alias_list=metadata.get("answer_aliases", []),
+            correct_choice_index=metadata.get("correct_choice_index"),
+        )
+        return passed, actual
     normalized_prediction = normalize_answer_text(prediction)
     normalized_expected = normalize_answer_text(item["expected_answer"])
     return normalized_prediction == normalized_expected, normalized_prediction
@@ -40,6 +56,17 @@ def evaluate_candidate(*, task, candidate_path, source_code, baseline_metrics, m
         "actual_raw": _stringify_answer(raw_actual),
         "passed": passed,
     }
+    choices = list(item.get("choices") or [])
+    metadata = dict(item.get("metadata") or {})
+    if choices:
+        actual_display = choice_response_display(
+            actual,
+            raw_actual=raw_actual,
+            choices=choices,
+            preferred_choice_index=metadata.get("correct_choice_index") if passed else None,
+        )
+        if actual_display:
+            row["actual_display"] = actual_display
     return {
         "status": "pass" if passed else "fail",
         "verifier_status": "pass" if passed else "fail",

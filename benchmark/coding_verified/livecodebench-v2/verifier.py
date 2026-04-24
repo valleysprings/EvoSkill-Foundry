@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.bench.livecodebench_official_support import evaluate_livecodebench_problem
+from app.bench.runtime_support import effective_suite_run_config
 
 ROOT = Path(__file__).resolve().parent
 
@@ -31,4 +32,7 @@ def evaluate_candidate(*, task, candidate_path, source_code, baseline_metrics, m
     problem = _load_problem(task)
     if not list(problem.get("public_test_cases") or []) and not list(problem.get("private_test_cases") or []):
         raise ValueError("LiveCodeBench cached item did not contain any test cases.")
-    return evaluate_livecodebench_problem(problem, Path(candidate_path))
+    config = effective_suite_run_config(task, Path(candidate_path))
+    max_test_cases_raw = config.get("max_test_cases")
+    max_test_cases = int(max_test_cases_raw) if isinstance(max_test_cases_raw, (int, float)) and max_test_cases_raw > 0 else None
+    return evaluate_livecodebench_problem(problem, Path(candidate_path), max_test_cases=max_test_cases)

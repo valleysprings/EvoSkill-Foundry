@@ -108,5 +108,6 @@
     "formula": "pass@1 = solved_problems / total_problems; for a single item this is 1 if all official tests pass else 0"
   },
   "prompt_context": "Edit editable.py only. The active item is a single Python coding problem. For stdin problems, produce a full Python program with solve() and an if __name__ == '__main__' entry that reads stdin and prints stdout. For functional LeetCode-style problems, implement class Solution with the required method from the provided context and keep solve() defined, even if it is unused. Use only the Python standard library and do not use external network access.",
-  "function_name": "solve"
+  "function_name": "solve",
+  "supports_test_case_limit": true
 }

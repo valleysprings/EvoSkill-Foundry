@@ -109,6 +109,7 @@ export type TaskSummary = {
   default_max_items?: number | null;
   supports_max_episodes: boolean;
   default_max_episodes?: number | null;
+  supports_test_case_limit?: boolean;
   available_skills?: TaskSkill[];
 };
 

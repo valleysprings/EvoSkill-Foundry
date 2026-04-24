@@ -135,6 +135,7 @@ def generate_discrete_payload(
     record_skill: bool = False,
     skill_item_limit: int | None = None,
     selected_skill_id: str | None = None,
+    persona: str | None = None,
 ) -> dict[str, Any]:
     active_runs_root = runs_root or RUNS
     active_workspace_root = workspace_root or (active_runs_root / "workspace" / "current")
@@ -204,7 +205,17 @@ def generate_discrete_payload(
                 ),
             }
         ]
+    if persona is not None and persona.strip():
+        if task_id is None or len(tasks) != 1:
+            raise ConfigError("persona requires running exactly one task.")
+        tasks = [{**tasks[0], "persona": persona.strip()}]
     _validate_runtime_dependencies(tasks)
+    # Inject leakage_free flag: dataset tasks without skill distillation use
+    # self-critique as the selection signal to avoid ground truth leakage.
+    tasks = [
+        {**t, "leakage_free": is_dataset_task(t) and not record_skill}
+        for t in tasks
+    ]
     legacy_store = MemoryStore(
         active_runs_root / WORKING_MEMORY_NAME,
         markdown_path=active_runs_root / WORKING_MEMORY_MD_NAME,
@@ -471,6 +482,7 @@ def write_discrete_artifacts(
     record_skill: bool = False,
     skill_item_limit: int | None = None,
     selected_skill_id: str | None = None,
+    persona: str | None = None,
 ) -> Path:
     active_runs_root = runs_root or RUNS
     session_id = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
@@ -507,6 +519,7 @@ def write_discrete_artifacts(
         record_skill=record_skill,
         skill_item_limit=skill_item_limit,
         selected_skill_id=selected_skill_id,
+        persona=persona,
     )
     payload["audit"]["session_id"] = session_id
     generated_at = str(payload["summary"]["generated_at"])

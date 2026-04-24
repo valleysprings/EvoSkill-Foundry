@@ -636,6 +636,7 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "default_max_items": _task_default_max_items(task, suite_run_config),
         "supports_max_episodes": _task_supports_max_episodes(task),
         "default_max_episodes": _task_default_max_episodes(task, suite_run_config),
+        "supports_test_case_limit": bool(task.get("supports_test_case_limit")),
     }
 
 
@@ -764,8 +765,14 @@ def load_codegen_tasks(
     return sorted(tasks, key=_sort_key)
 
 
-def list_codegen_task_summaries() -> list[dict[str, Any]]:
-    return [task_summary(task) for task in load_codegen_tasks()]
+_task_summaries_cache: list[dict[str, Any]] | None = None
+
+
+def list_codegen_task_summaries(*, refresh: bool = False) -> list[dict[str, Any]]:
+    global _task_summaries_cache
+    if _task_summaries_cache is None or refresh:
+        _task_summaries_cache = [task_summary(task) for task in load_codegen_tasks()]
+    return _task_summaries_cache
 
 
 def seed_strategy_experiences() -> list[dict[str, Any]]:

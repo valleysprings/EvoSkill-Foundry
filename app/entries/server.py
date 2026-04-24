@@ -382,6 +382,7 @@ def _run_job_process(
     record_skill: bool,
     skill_item_limit: int | None,
     selected_skill_id: str | None,
+    persona: str | None,
 ) -> None:
     def progress(event: dict) -> None:
         event_queue.put({"type": "event", "event": event})
@@ -405,6 +406,7 @@ def _run_job_process(
             record_skill=record_skill,
             skill_item_limit=skill_item_limit,
             selected_skill_id=selected_skill_id,
+            persona=persona,
         )
         event_queue.put({"type": "completed", "artifact_path": str(artifact)})
     except Exception as exc:  # noqa: BLE001
@@ -429,6 +431,7 @@ def _run_job(
     record_skill: bool,
     skill_item_limit: int | None,
     selected_skill_id: str | None,
+    persona: str | None,
 ) -> None:
     if _should_run_job_inline():
         def progress(event: dict) -> None:
@@ -454,6 +457,7 @@ def _run_job(
                 record_skill=record_skill,
                 skill_item_limit=skill_item_limit,
                 selected_skill_id=selected_skill_id,
+                persona=persona,
             )
             payload = json.loads(Path(artifact).read_text())
             with JOB_LOCK:
@@ -488,6 +492,7 @@ def _run_job(
             record_skill,
             skill_item_limit,
             selected_skill_id,
+            persona,
         ),
         daemon=True,
     )
@@ -585,6 +590,7 @@ def _start_job(
     record_skill: bool = False,
     skill_item_limit: int | None = None,
     selected_skill_id: str | None = None,
+    persona: str | None = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
     stall_timeout_s = _job_stall_timeout_s(proposal_runtime)
@@ -604,6 +610,7 @@ def _start_job(
             "record_skill": record_skill,
             "skill_item_limit": skill_item_limit,
             "selected_skill_id": selected_skill_id,
+            "persona": persona,
             "events": [],
             "payload": None,
             "terminal": False,
@@ -636,6 +643,7 @@ def _start_job(
             record_skill,
             skill_item_limit,
             selected_skill_id,
+            persona,
         ),
         daemon=True,
     )
@@ -687,6 +695,16 @@ class DemoHandler(SimpleHTTPRequestHandler):
             _json_response(self, runtime.describe())
             return
 
+        if parsed.path == "/api/running-job":
+            with JOB_LOCK:
+                running = next(
+                    ({"job_id": jid, **{k: v for k, v in j.items() if k != "events"}}
+                     for jid, j in JOBS.items() if j.get("status") == "running"),
+                    None,
+                )
+            _json_response(self, {"job": running})
+            return
+
         if parsed.path == "/api/job":
             job_id = query.get("job_id", [None])[0]
             if job_id is None:
@@ -735,6 +753,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             record_skill_value = request_body.get("record_skill")
             skill_item_limit_value = request_body.get("skill_item_limit")
             selected_skill_id_value = request_body.get("selected_skill_id")
+            persona_value = request_body.get("persona")
             if task_id is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "task_id is required")
                 return
@@ -758,6 +777,12 @@ class DemoHandler(SimpleHTTPRequestHandler):
                     selected_skill_id = selected_skill_id_value.strip() or None
                 else:
                     raise ConfigError("selected_skill_id must be a string.")
+                if persona_value is None:
+                    persona = None
+                elif isinstance(persona_value, str):
+                    persona = persona_value.strip() or None
+                else:
+                    raise ConfigError("persona must be a string.")
             except ValueError as exc:
                 _json_response(self, ConfigError(str(exc)).as_payload(), status=HTTPStatus.BAD_REQUEST)
                 return
@@ -787,6 +812,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         record_skill,
                         skill_item_limit,
                         selected_skill_id,
+                        persona,
                     ),
                     "model": runtime.active_model,
                     "policy_model": runtime.active_model,

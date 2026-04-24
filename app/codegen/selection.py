@@ -8,6 +8,11 @@ PRIMARY_SCORE_FORMULA = (
     "primary_score = objective_score "
     "(the task-facing objective normalized so that higher is always better)"
 )
+LEAKAGE_FREE_PRIMARY_SCORE_FORMULA = (
+    "primary_score = selection_objective_score "
+    "(the hidden self-verifier confidence used for candidate selection; "
+    "ground-truth objective/objective_score remain the reported verifier result)"
+)
 TIE_BREAK_SCORE_FORMULA = "tie_break_score is task-specific; see task.selection_spec.tie_break_formula"
 DELTA_PRIMARY_SCORE_FORMULA = "delta_primary_score = primary_score(generation_winner) - primary_score(selected_parent)"
 RUN_DELTA_PRIMARY_SCORE_FORMULA = "run_delta_primary_score = primary_score(final_winner) - primary_score(baseline)"
@@ -187,6 +192,7 @@ def selection_spec_for_task(task: dict[str, Any]) -> dict[str, Any]:
     raw_override = dict(task.get("selection_spec") or {})
     profile_name = str(raw_override.get("profile") or _default_profile_name(task)).strip().lower()
     profile = deepcopy(SELECTION_PROFILES.get(profile_name) or SELECTION_PROFILES["objective_only"])
+    leakage_free = bool(task.get("leakage_free"))
 
     if "summary_template" in raw_override:
         profile["summary_template"] = str(raw_override.get("summary_template") or "").strip() or profile["summary_template"]
@@ -206,10 +212,12 @@ def selection_spec_for_task(task: dict[str, Any]) -> dict[str, Any]:
 
     profile["profile"] = profile_name
     profile["display_name"] = str(raw_override.get("display_name") or "Layered selection policy")
-    profile["primary_metric"] = "objective_score"
-    profile["primary_label"] = "Normalized objective score"
+    profile["primary_metric"] = "selection_objective_score" if leakage_free else "objective_score"
+    profile["primary_label"] = "Self-verifier confidence" if leakage_free else "Normalized objective score"
     profile["primary_direction"] = "max"
-    profile["primary_formula"] = PRIMARY_SCORE_FORMULA
+    profile["primary_formula"] = LEAKAGE_FREE_PRIMARY_SCORE_FORMULA if leakage_free else PRIMARY_SCORE_FORMULA
+    if leakage_free and all(str(rule.get("metric") or "").strip() == "verifier_status" for rule in profile["gate"]):
+        profile["gate"] = [_gate_rule("selection_verifier_status", "==", "pass", label="self-verified pass")]
     profile["gate_summary"] = _render_gate_summary(profile["gate"])
     profile["tie_break_formula"] = _render_tie_break_formula(profile["tie_break_metrics"])
     profile["delta_template"] = (

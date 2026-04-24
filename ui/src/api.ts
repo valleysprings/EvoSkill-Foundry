@@ -13,6 +13,7 @@ type StartJobOptions = {
   suiteConfig?: Record<string, unknown> | null;
   recordSkill?: boolean;
   selectedSkillId?: string | null;
+  persona?: string | null;
 };
 
 type JsonOptions = RequestInit | undefined;
@@ -63,6 +64,7 @@ export async function startJob(
   const suiteConfig = options.suiteConfig;
   const recordSkill = options.recordSkill;
   const selectedSkillId = options.selectedSkillId;
+  const persona = options.persona;
   if (typeof branchingFactor === "number" && Number.isFinite(branchingFactor)) {
     params.set("branching_factor", String(Math.max(1, Math.floor(branchingFactor))));
   }
@@ -100,6 +102,9 @@ export async function startJob(
   if (taskId && typeof selectedSkillId === "string" && selectedSkillId.trim()) {
     requestBody.selected_skill_id = selectedSkillId.trim();
   }
+  if (taskId && typeof persona === "string" && persona.trim()) {
+    requestBody.persona = persona.trim();
+  }
   if (taskId && Object.keys(requestBody).length) {
     request.headers = { "Content-Type": "application/json" };
     request.body = JSON.stringify(requestBody);
@@ -109,4 +114,9 @@ export async function startJob(
 
 export async function loadJob(jobId: string): Promise<JobState> {
   return fetchJson<JobState>(`/api/job?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+}
+
+export async function loadRunningJob(): Promise<{ job_id: string } | null> {
+  const result = await fetchJson<{ job: { job_id: string } | null }>("/api/running-job", { cache: "no-store" });
+  return result.job ?? null;
 }

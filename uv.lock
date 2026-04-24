@@ -187,6 +187,7 @@ dependencies = [
     { name = "bert-score" },
     { name = "datasets" },
     { name = "evaluate" },
+    { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "math-verify", extra = ["antlr4-13-2"] },
     { name = "matplotlib" },
@@ -197,6 +198,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rouge-score" },
     { name = "sacrebleu" },
+    { name = "sqlparse" },
     { name = "tqdm" },
     { name = "transformers" },
 ]
@@ -206,6 +208,7 @@ requires-dist = [
     { name = "bert-score", specifier = ">=0.3.13,<0.4" },
     { name = "datasets", specifier = ">=3,<4" },
     { name = "evaluate", specifier = ">=0.4.5,<0.5" },
+    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "huggingface-hub", specifier = ">=0.30,<1" },
     { name = "math-verify", extras = ["antlr4-13-2"], specifier = ">=0.9,<1" },
     { name = "matplotlib", specifier = ">=3.9,<4" },
@@ -216,6 +219,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "rouge-score", specifier = ">=0.1.2,<0.2" },
     { name = "sacrebleu", specifier = ">=2.5,<3" },
+    { name = "sqlparse", specifier = ">=0.5,<1" },
     { name = "tqdm", specifier = ">=4.67,<5" },
     { name = "transformers", specifier = ">=4.51,<5" },
 ]
@@ -2480,6 +2484,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "sqlparse"
+version = "0.5.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/76/437d71068094df0726366574cf3432a4ed754217b436eb7429415cf2d480/sqlparse-0.5.5.tar.gz", hash = "sha256:e20d4a9b0b8585fdf63b10d30066c7c94c5d7a7ec47c889a2d83a3caa93ff28e", size = 120815, upload-time = "2025-12-19T07:17:45.073Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/4b/359f28a903c13438ef59ebeee215fb25da53066db67b305c125f1c6d2a25/sqlparse-0.5.5-py3-none-any.whl", hash = "sha256:12a08b3bf3eec877c519589833aed092e2444e68240a3577e8e26148acc7b1ba", size = 46138, upload-time = "2025-12-19T07:17:46.573Z" },
 ]
 
 [[package]]

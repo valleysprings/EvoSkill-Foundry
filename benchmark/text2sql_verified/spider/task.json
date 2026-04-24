@@ -35,8 +35,8 @@
     "direction": "max",
     "unit": "ratio",
     "summary_template": "Higher accuracy is better across independently evolved Spider text-to-SQL question runs.",
-    "formula": "accuracy = exact_normalized_sql_matches / total_questions"
+    "formula": "accuracy = execution_matches / total_questions"
   },
-  "prompt_context": "Edit editable.py only. The entry symbol solve(question: dict) must return a SQL string for the current Spider text-to-SQL item. The verifier is adapter-style: it extracts SQL text from the return value and scores normalized SQL exact match against the gold query.",
+  "prompt_context": "Edit editable.py only. The entry symbol solve(question: dict) must return a SQL string for the current Spider text-to-SQL item. The verifier is adapter-style: it extracts SQL text from the return value and scores execution accuracy (EX) against the gold query using the spider sqlite databases.",
   "function_name": "solve"
 }

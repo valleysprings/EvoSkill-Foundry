@@ -833,25 +833,72 @@ def _proposal_prompt(
         )
         for memory in memories
     ]
-    history_lines = [
-        "- "
-        + json.dumps(
-            {
-                "generation": item.get("generation"),
-                "candidate": item.get("agent"),
-                "objective": item.get("metrics", {}).get("objective"),
-                "primary_score": item.get("metrics", {}).get("primary_score"),
-                "tie_break_score": item.get("metrics", {}).get("tie_break_score"),
-                "gate_passed": item.get("metrics", {}).get("gate_passed"),
-                "status": item.get("metrics", {}).get("status"),
-                "candidate_summary": item.get("candidate_summary"),
-                "strategy": item.get("strategy"),
-            }
-        )
-        for item in candidate_history[-6:]
-    ]
     task_mode_line, interaction_mode_line = _proposal_contract_lines(task)
     system_prompt = _proposal_system_prompt()
+    leakage_free = bool(task.get("leakage_free"))
+    if leakage_free:
+        history_lines = [
+            "- "
+            + json.dumps(
+                {
+                    "generation": item.get("generation"),
+                    "candidate": item.get("agent"),
+                    "self_critique_score": item.get("metrics", {}).get("self_critique_score"),
+                    "primary_score": item.get("metrics", {}).get("primary_score"),
+                    "tie_break_score": item.get("metrics", {}).get("tie_break_score"),
+                    "gate_passed": item.get("metrics", {}).get("gate_passed"),
+                    "selection_status": item.get("metrics", {}).get("selection_verifier_status"),
+                    "candidate_summary": item.get("candidate_summary"),
+                    "strategy": item.get("strategy"),
+                }
+            )
+            for item in candidate_history[-6:]
+        ]
+    else:
+        history_lines = [
+            "- "
+            + json.dumps(
+                {
+                    "generation": item.get("generation"),
+                    "candidate": item.get("agent"),
+                    "objective": item.get("metrics", {}).get("objective"),
+                    "primary_score": item.get("metrics", {}).get("primary_score"),
+                    "tie_break_score": item.get("metrics", {}).get("tie_break_score"),
+                    "gate_passed": item.get("metrics", {}).get("gate_passed"),
+                    "status": item.get("metrics", {}).get("status"),
+                    "candidate_summary": item.get("candidate_summary"),
+                    "strategy": item.get("strategy"),
+                }
+            )
+            for item in candidate_history[-6:]
+        ]
+    if leakage_free:
+        # In leakage-free mode expose only the hidden selection signal, never the ground-truth objective.
+        parent_score_lines = (
+            f"Selected parent self_critique_score: {parent_candidate['metrics'].get('self_critique_score')}\n"
+            f"Selected parent primary_score: {parent_candidate['metrics'].get('primary_score')}\n"
+            f"Selected parent gate_passed: {parent_candidate['metrics'].get('gate_passed')}\n"
+        )
+        best_score_lines = (
+            f"Global best self_critique_score: {current_best['metrics'].get('self_critique_score')}\n"
+            f"Global best primary_score: {current_best['metrics'].get('primary_score')}\n"
+            f"Global best gate_passed: {current_best['metrics'].get('gate_passed')}\n"
+        )
+    else:
+        parent_score_lines = (
+            f"Selected parent objective: {parent_candidate['metrics']['objective']}\n"
+            f"Selected parent objective_score: {parent_candidate['metrics'].get('objective_score')}\n"
+            f"Selected parent primary_score: {parent_candidate['metrics'].get('primary_score')}\n"
+            f"Selected parent tie_break_score: {parent_candidate['metrics'].get('tie_break_score')}\n"
+            f"Selected parent gate_passed: {parent_candidate['metrics'].get('gate_passed')}\n"
+        )
+        best_score_lines = (
+            f"Global best objective: {current_best['metrics']['objective']}\n"
+            f"Global best objective_score: {current_best['metrics'].get('objective_score')}\n"
+            f"Global best primary_score: {current_best['metrics'].get('primary_score')}\n"
+            f"Global best tie_break_score: {current_best['metrics'].get('tie_break_score')}\n"
+            f"Global best gate_passed: {current_best['metrics'].get('gate_passed')}\n"
+        )
     user_prompt = (
         f"Task id: {task['id']}\n"
         f"Title: {task['title']}\n"
@@ -872,17 +919,9 @@ def _proposal_prompt(
         f"Prompt context: {task.get('prompt_context') or 'n/a'}\n"
         f"Generation: {generation}\n"
         f"Selected parent summary: {parent_candidate['candidate_summary']}\n"
-        f"Selected parent objective: {parent_candidate['metrics']['objective']}\n"
-        f"Selected parent objective_score: {parent_candidate['metrics'].get('objective_score')}\n"
-        f"Selected parent primary_score: {parent_candidate['metrics'].get('primary_score')}\n"
-        f"Selected parent tie_break_score: {parent_candidate['metrics'].get('tie_break_score')}\n"
-        f"Selected parent gate_passed: {parent_candidate['metrics'].get('gate_passed')}\n"
+        f"{parent_score_lines}"
         f"Global best summary: {current_best['candidate_summary']}\n"
-        f"Global best objective: {current_best['metrics']['objective']}\n"
-        f"Global best objective_score: {current_best['metrics'].get('objective_score')}\n"
-        f"Global best primary_score: {current_best['metrics'].get('primary_score')}\n"
-        f"Global best tie_break_score: {current_best['metrics'].get('tie_break_score')}\n"
-        f"Global best gate_passed: {current_best['metrics'].get('gate_passed')}\n"
+        f"{best_score_lines}"
         "Baseline source:\n"
         f"{current_best['baseline_source']}\n"
         "Selected parent editable file:\n"
@@ -948,29 +987,51 @@ def reflect_strategy_experience(
         outcome_instructions = FAILURE_REFLECTION_OUTCOME_INSTRUCTIONS
     failed_tests = [result["name"] for result in winner["metrics"].get("test_results", []) if not result.get("passed")]
     process_trace_summary = _multi_turn_process_feedback(winner["metrics"])
-    user_prompt = (
-        f"Task id: {task['id']}\n"
-        f"Generation: {generation}\n"
-        f"Outcome: {outcome}\n"
-        f"Interaction mode: {infer_interaction_mode(task)}\n"
-        f"Previous best summary: {previous_best['candidate_summary']}\n"
-        f"Previous best objective: {previous_best['metrics']['objective']}\n"
-        f"Winner summary: {winner['candidate_summary']}\n"
-        f"Winner strategy: {winner['strategy']}\n"
-        f"Winner rationale: {winner['rationale']}\n"
-        f"Winner verifier_status: {winner['metrics']['verifier_status']}\n"
-        f"Winner objective: {winner['metrics']['objective']}\n"
-        f"Winner primary_score: {winner['metrics'].get('primary_score')}\n"
-        f"Winner tie_break_score: {winner['metrics'].get('tie_break_score')}\n"
-        f"Winner error: {winner['metrics'].get('error')}\n"
-        f"Failed tests: {json.dumps(failed_tests)}\n"
-        f"Rejection reason: {rejection_reason or 'n/a'}\n"
-        f"delta_primary_score: {delta_primary_score}\n"
-        f"Winner process trace summary: {process_trace_summary or 'n/a'}\n"
-        f"{_reflection_interaction_guidance(task)}\n"
-        f"{outcome_instructions}\n"
-        f"{REFLECTION_FRAGMENT_INSTRUCTION}"
-    )
+    leakage_free = bool(task.get("leakage_free"))
+    if leakage_free:
+        # No ground truth signals: omit objective scores, failed test names, delta
+        user_prompt = (
+            f"Task id: {task['id']}\n"
+            f"Generation: {generation}\n"
+            f"Outcome: {outcome}\n"
+            f"Interaction mode: {infer_interaction_mode(task)}\n"
+            f"Previous best summary: {previous_best['candidate_summary']}\n"
+            f"Winner summary: {winner['candidate_summary']}\n"
+            f"Winner strategy: {winner['strategy']}\n"
+            f"Winner rationale: {winner['rationale']}\n"
+            f"Winner self_critique_score: {winner['metrics'].get('self_critique_score')}\n"
+            f"Winner primary_score: {winner['metrics'].get('primary_score')}\n"
+            f"Winner error: {winner['metrics'].get('error')}\n"
+            f"Rejection reason: {rejection_reason or 'n/a'}\n"
+            f"Winner process trace summary: {process_trace_summary or 'n/a'}\n"
+            f"{_reflection_interaction_guidance(task)}\n"
+            f"{outcome_instructions}\n"
+            f"{REFLECTION_FRAGMENT_INSTRUCTION}"
+        )
+    else:
+        user_prompt = (
+            f"Task id: {task['id']}\n"
+            f"Generation: {generation}\n"
+            f"Outcome: {outcome}\n"
+            f"Interaction mode: {infer_interaction_mode(task)}\n"
+            f"Previous best summary: {previous_best['candidate_summary']}\n"
+            f"Previous best objective: {previous_best['metrics']['objective']}\n"
+            f"Winner summary: {winner['candidate_summary']}\n"
+            f"Winner strategy: {winner['strategy']}\n"
+            f"Winner rationale: {winner['rationale']}\n"
+            f"Winner verifier_status: {winner['metrics']['verifier_status']}\n"
+            f"Winner objective: {winner['metrics']['objective']}\n"
+            f"Winner primary_score: {winner['metrics'].get('primary_score')}\n"
+            f"Winner tie_break_score: {winner['metrics'].get('tie_break_score')}\n"
+            f"Winner error: {winner['metrics'].get('error')}\n"
+            f"Failed tests: {json.dumps(failed_tests)}\n"
+            f"Rejection reason: {rejection_reason or 'n/a'}\n"
+            f"delta_primary_score: {delta_primary_score}\n"
+            f"Winner process trace summary: {process_trace_summary or 'n/a'}\n"
+            f"{_reflection_interaction_guidance(task)}\n"
+            f"{outcome_instructions}\n"
+            f"{REFLECTION_FRAGMENT_INSTRUCTION}"
+        )
     payload, trace = runtime.complete_json(
         purpose="memory_reflection",
         system_prompt=system_prompt,

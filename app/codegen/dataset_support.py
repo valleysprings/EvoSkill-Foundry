@@ -16,6 +16,48 @@ from app.configs.codegen import (
     DATASET_SINGLE_QUESTION_INSTRUCTION,
     QUESTION_PREVIEW_LIMIT,
 )
+from app.configs.paths import ROOT
+from app.codegen.selection import selection_spec_for_task
+
+_PERSONAS: dict[str, Any] | None = None
+
+
+def _load_personas() -> dict[str, Any]:
+    global _PERSONAS
+    if _PERSONAS is None:
+        path = ROOT / "references" / "personas.json"
+        _PERSONAS = json.loads(path.read_text()) if path.exists() else {}
+    return _PERSONAS
+
+
+def resolve_persona_instruction(persona: str | None) -> str | None:
+    """Return the instruction string for a persona spec like 'role:detective', 'trait:concise',
+    or 'role:detective+trait:concise'. Returns None if persona is empty or unrecognized."""
+    if not persona or not persona.strip():
+        return None
+    personas = _load_personas()
+    roles = personas.get("roles", {})
+    traits = personas.get("traits", {})
+    parts = [p.strip() for p in persona.strip().split("+") if p.strip()]
+    instructions: list[str] = []
+    for part in parts:
+        if ":" in part:
+            kind, _, name = part.partition(":")
+            name = name.strip()
+            if kind.strip() == "role":
+                desc = roles.get(name)
+                if desc:
+                    instructions.append(f"You are acting as a {name}: {desc}")
+            elif kind.strip() == "trait":
+                desc = traits.get(name)
+                if desc:
+                    instructions.append(desc)
+        else:
+            # bare name: check roles first, then traits
+            desc = roles.get(part) or traits.get(part)
+            if desc:
+                instructions.append(desc)
+    return " ".join(instructions) if instructions else None
 
 VALID_MATH_ANSWER_FORMATS = {"symbolic", "numeric", "choice"}
 
@@ -316,7 +358,8 @@ def micro_task_id(dataset_task_id: str, item_id: str) -> str:
 
 
 def question_prompt_context(task: dict[str, Any], item: dict[str, Any]) -> str:
-    sections = [str(task.get("prompt_context") or "").strip()]
+    persona_instruction = resolve_persona_instruction(str(task.get("persona") or "").strip() or None)
+    sections = ([persona_instruction] if persona_instruction else []) + [str(task.get("prompt_context") or "").strip()]
     interaction_mode = str(task.get("interaction_mode") or "single_turn").strip()
     item_label = "episode" if interaction_mode == "multi_turn" else "question"
     sections.append(f"Dataset {item_label} id: {item['item_id']}")
@@ -365,6 +408,7 @@ def build_micro_task(task: dict[str, Any], item: dict[str, Any]) -> dict[str, An
             "prompt_context": question_prompt_context(task, item),
         }
     )
+    micro_task["selection_spec"] = selection_spec_for_task(micro_task)
     return micro_task
 
 
@@ -380,6 +424,14 @@ def aggregate_dataset_metrics(item_runs: list[dict[str, Any]]) -> dict[str, Any]
     )
     failure_count = total_items - winner_passed
 
+    # Ground truth solve rate: count items where winner has _ground_truth_score == 1.0
+    # Only populated in leakage_free mode; falls back to verifier_status otherwise.
+    gt_winner_passed = sum(
+        1
+        for item in item_runs
+        if float(item["winner"]["metrics"].get("_ground_truth_score") if item["winner"]["metrics"].get("_ground_truth_score") is not None else (1.0 if item["winner"]["metrics"]["verifier_status"] == "pass" else 0.0)) >= 1.0
+    )
+
     if total_items:
         baseline_objective /= total_items
         winner_objective /= total_items
@@ -391,6 +443,7 @@ def aggregate_dataset_metrics(item_runs: list[dict[str, Any]]) -> dict[str, Any]
         "winner_passed": winner_passed,
         "failure_count": failure_count,
         "solved_ratio": round((winner_passed / total_items) if total_items else 0.0, 6),
+        "ground_truth_solve_rate": round((gt_winner_passed / total_items) if total_items else 0.0, 6),
         "avg_baseline_objective": round(baseline_objective, 6),
         "avg_winner_objective": round(winner_objective, 6),
         "avg_delta_primary_score": round(avg_delta_primary_score, 6),

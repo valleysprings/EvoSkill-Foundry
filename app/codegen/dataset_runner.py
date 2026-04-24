@@ -16,6 +16,7 @@ from app.codegen.dataset_support import (
     load_question_manifest,
 )
 from app.codegen.llm import ProposalRuntime
+from app.codegen.selection import selection_spec_for_task
 from app.codegen.task_contracts import infer_interaction_mode, infer_task_mode
 from app.codegen.trainer import run_codegen_task
 from app.memory.store import MemoryStore
@@ -488,6 +489,7 @@ def run_dataset_task(
         "eval_model": eval_model,
         "runtime_model_override": proposal_runtime.active_model,
     }
+    task_for_run["selection_spec"] = selection_spec_for_task(task_for_run)
     uses_episode_limit = str(task_for_run.get("interaction_mode") or "") == "multi_turn"
     requested_limit = max_episodes if uses_episode_limit else max_items
     requested_items = requested_limit if isinstance(requested_limit, int) and requested_limit > 0 else int(task_for_run.get("dataset_size") or 0) or None

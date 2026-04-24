@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { loadJob, loadLatestRun, loadRuntime, loadTasks, startJob } from "./api";
+import { loadJob, loadLatestRun, loadRunningJob, loadRuntime, loadTasks, startJob } from "./api";
 import { displayErrorType, normalizeErrorPayload, stringifyUnknown } from "./errorPayload";
 import { initialTaskId, mergeTaskCatalogs, taskScopedPayload } from "./reportCache";
 import type {
@@ -151,6 +151,46 @@ const DEFAULT_FRONTEND_GENERATION_BUDGET = 3;
 const DEFAULT_FRONTEND_CANDIDATE_BUDGET = 1;
 const DEFAULT_FRONTEND_LLM_CONCURRENCY = 20;
 const DEFAULT_FRONTEND_ITEM_WORKERS = 5;
+const PERSONA_ROLES: Record<string, string> = {
+  assistant: "A general-purpose aide that helps with various tasks and queries.",
+  researcher: "An investigator who gathers and analyzes information on specific topics.",
+  programmer: "A software developer who writes, debugs, and explains code.",
+  analyst: "A specialist who examines data and provides insights.",
+  teacher: "An educator who instructs and facilitates learning experiences.",
+  detective: "An investigator who solves mysteries through evidence analysis.",
+  philosopher: "A thinker who explores fundamental questions about existence and knowledge.",
+  scientist: "A researcher who applies scientific methods to understand phenomena.",
+  mathematician: "A specialist who solves mathematical problems and explains concepts.",
+  lawyer: "A legal professional who provides advice on laws and regulations.",
+  engineer: "A technical expert who solves problems using scientific principles.",
+  strategist: "A planner who develops approaches to achieve specific goals.",
+  scholar: "An academic devoted to deep study and theoretical understanding.",
+  contrarian: "Someone who consistently takes opposing views to challenge consensus.",
+  devil_advocate: "A challenger who argues opposing viewpoints to test and strengthen ideas.",
+  robot: "A mechanical being processing information through pure logic and algorithmic precision.",
+};
+const PERSONA_TRAITS: Record<string, string> = {
+  concise: "Prefers brief, to-the-point responses that get straight to the core message.",
+  verbose: "Tends to provide lengthy, detailed explanations with extensive elaboration.",
+  analytical: "Breaks down complex topics into logical components and examines each part systematically.",
+  creative: "Offers imaginative solutions, novel perspectives, and original approaches.",
+  cautious: "Emphasizes potential risks, limitations, and the need for careful consideration.",
+  skeptical: "Questions assumptions, seeks evidence, and challenges conventional thinking.",
+  methodical: "Follows systematic, step-by-step approaches to problem-solving.",
+  blunt: "Delivers information directly without sugar-coating or excessive politeness.",
+  formal: "Uses professional language, proper grammar, and maintains a respectful tone.",
+  casual: "Adopts a relaxed, conversational tone with informal language.",
+  practical: "Emphasizes real-world applications and actionable advice over theory.",
+  philosophical: "Explores deeper meanings, existential questions, and abstract concepts.",
+  socratic: "Uses questions to guide users toward their own insights and discoveries.",
+  data_driven: "Relies on statistics, research, and quantitative evidence.",
+  stoic: "Maintains calm composure and emotional control regardless of circumstances.",
+  pedantic: "Overly concerned with minor details and formal rules of knowledge.",
+  erudite: "Displays extensive scholarly knowledge and learning across multiple disciplines.",
+  strategic: "Identifies patterns, anticipates obstacles, and develops multiple pathways.",
+  principled: "Adheres to consistent ethical framework and clearly stated values.",
+  efficient: "Prioritizes getting to solutions quickly with minimum wasted effort.",
+};
 const DEFAULT_BROWSE_MODE = "general_intelligence";
 const DEFAULT_INTERACTION_MODE = "single_turn";
 const SAFETY_BROWSER_MODE = "safety";
@@ -981,9 +1021,9 @@ function hasTieBreakMetrics(selectionSpec: SelectionSpec): boolean {
 
 function replacePrimaryTerms(text: string | undefined | null): string {
   return String(text ?? "")
-    .replace(/\bprimary scores\b/gi, "selection scores")
-    .replace(/\bprimary score\b/gi, "selection score")
-    .replace(/\bprimary_score\b/gi, "selection score");
+    .replace(/\bprimary scores\b/gi, "selection metrics")
+    .replace(/\bprimary score\b/gi, "selection metric")
+    .replace(/\bprimary_score\b/gi, "selection metric");
 }
 
 function selectionPipelineLabel(selectionSpec: SelectionSpec): string {
@@ -2566,7 +2606,7 @@ function deltaChart(run: Run) {
         {showSelectionScoreTrace ? (
           <span className="legend-item">
             <span className="legend-swatch primary-line-swatch" />
-            selection score vs {anchorLabel}
+            selection metric vs {anchorLabel}
           </span>
         ) : null}
         <span className="legend-item">
@@ -2717,14 +2757,13 @@ function branchCard(branch: Branch, objectiveSpec: ObjectiveSpec, openByDefault 
           <span className={`badge ${branch.memory_delta > 0 ? "good" : branch.memory_delta < 0 ? "warn" : ""}`}>
             memory {branch.memory_delta > 0 ? `+${branch.memory_delta}` : branch.memory_delta}
           </span>
-          <span className="badge">evolve metric {formatSigned(branch.delta_primary_score, 4)}</span>
+          <span className="badge">metric delta {formatSigned(branch.delta_primary_score, 4)}</span>
         </div>
       </summary>
       <div className="detail-body stack">
         <div className="metric-grid compact-metrics">
           {metric("parent agent", branch.parent_candidate.agent)}
           {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(branch.winner.metrics.objective, objectiveSpec))}
-          {metric("winner score", formatValue(branch.winner.metrics.primary_score))}
           {metric("winner tie-break", formatValue(branch.winner.metrics.tie_break_score))}
           {metric("beats run best", String(Boolean(branch.winner_improved_global_best)))}
         </div>
@@ -2767,7 +2806,7 @@ function generationCard(generation: Generation, objectiveSpec: ObjectiveSpec, op
           <span className={`badge ${numeric(generation.memory_delta) > 0 ? "good" : numeric(generation.memory_delta) < 0 ? "warn" : ""}`}>
             memory {numeric(generation.memory_delta) > 0 ? `+${generation.memory_delta}` : generation.memory_delta ?? 0}
           </span>
-          <span className="badge">evolve metric {formatSigned(generation.delta_primary_score, 4)}</span>
+          <span className="badge">metric delta {formatSigned(generation.delta_primary_score, 4)}</span>
         </div>
       </summary>
       <div className="detail-body stack">
@@ -2775,7 +2814,6 @@ function generationCard(generation: Generation, objectiveSpec: ObjectiveSpec, op
           {metric("parent pool", generation.parents?.length ?? generation.branches.length)}
           {metric("selected candidate", generation.winner.label)}
           {metric(objectiveLabel(objectiveSpec), formatObjectiveValue(generation.winner.metrics.objective, objectiveSpec))}
-          {metric("winner score", formatValue(generation.winner.metrics.primary_score))}
           {metric("winner tie-break", formatValue(generation.winner.metrics.tie_break_score))}
           {metric("positive writes", generation.positive_writebacks ?? 0)}
           {metric("negative writes", generation.negative_writebacks ?? 0)}
@@ -2792,6 +2830,7 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
   const completedRatio = task.totalItems ? task.completedItems / task.totalItems : 0;
   const passRatio = task.totalItems ? task.passItems / task.totalItems : 0;
   const queuedLabel = queuedItemsLabel(task.items.length, task.totalItems);
+  const showsSearchMetrics = task.roundSummaries.length > 0 || task.acceptedCount !== 0 || task.memoryDelta !== 0;
   const recentTaskEvents = task.events
     .filter((event) => !event.item_id && stringValue(event.message))
     .slice(-6);
@@ -2814,8 +2853,8 @@ function liveTaskSection(task: LiveTaskCard, nowMs: number) {
         {metric("completion", formatPercent(completedRatio))}
         {metric(task.usesMaxEpisodes ? "episodes solved" : "items solved", `${task.passItems}/${task.totalItems || "?"}`)}
         {metric("solve rate", formatPercent(passRatio))}
-        {metric("frontier accepts", task.acceptedCount)}
-        {metric("memory delta", task.memoryDelta > 0 ? `+${task.memoryDelta}` : task.memoryDelta)}
+        {showsSearchMetrics ? metric("frontier accepts", task.acceptedCount) : null}
+        {showsSearchMetrics ? metric("memory delta", task.memoryDelta > 0 ? `+${task.memoryDelta}` : task.memoryDelta) : null}
       </div>
       {queuedLabel ? <p className="small muted">{queuedLabel}</p> : null}
       {task.roundSummaries.length || recentTaskEvents.length ? (
@@ -3235,9 +3274,13 @@ export function App() {
   const [maxItemsInput, setMaxItemsInput] = useState("");
   const [maxEpisodesInput, setMaxEpisodesInput] = useState("");
   const [maxTurnsInput, setMaxTurnsInput] = useState("");
+  const [testCaseLimitInput, setTestCaseLimitInput] = useState("");
   const [selectedRuntimeSplit, setSelectedRuntimeSplit] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState("");
   const [recordSkillEnabled, setRecordSkillEnabled] = useState(false);
+  const [selectedPersonaRole, setSelectedPersonaRole] = useState("");
+  const [selectedPersonaTrait, setSelectedPersonaTrait] = useState("");
+  const [personaSearch, setPersonaSearch] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [taskBriefTaskId, setTaskBriefTaskId] = useState<string | null>(null);
   const [datasetWarnings, setDatasetWarnings] = useState<DatasetWarning[]>([]);
@@ -3488,6 +3531,30 @@ export function App() {
           setPayload(scopedPayloadOrEmpty(taskPayload, defaultTaskId, tasks));
         }
         setOpenCompletedTasks({});
+        // Restore polling if a job was running when the page was refreshed
+        const runningJob = await loadRunningJob();
+        if (cancelled) return;
+        if (runningJob) {
+          const token = pollToken.current;
+          let job = await loadJob(runningJob.job_id);
+          while (job.status === "running" && token === pollToken.current) {
+            setLiveJob(job);
+            await sleep(pageVisible() ? LIVE_JOB_POLL_MS : LIVE_JOB_BACKGROUND_POLL_MS);
+            job = await loadJob(runningJob.job_id);
+          }
+          if (token === pollToken.current) {
+            setLiveJob(job);
+            if (job.status !== "failed") {
+              try {
+                const refreshed = normalizePayload(await loadLatestRun(), tasks);
+                setPayload(refreshed);
+              } catch { /* keep existing payload */ }
+            } else {
+              setError(normalizeErrorPayload(job));
+            }
+          }
+          return;
+        }
         setLiveJob(null);
         setError(null);
       } catch (caught) {
@@ -3554,6 +3621,9 @@ export function App() {
     setSelectedRuntimeSplit(selectedTask.runtime_split_selector?.default_value || "");
     setSelectedSkillId("");
     setRecordSkillEnabled(false);
+    setSelectedPersonaRole("");
+    setSelectedPersonaTrait("");
+    setPersonaSearch("");
     if (selectedTask.supports_eval_model) {
       setSelectedEvalModel(selectedTask.default_eval_model || selectedModel || runtimeInfo.active_model);
       return;
@@ -3758,6 +3828,7 @@ export function App() {
     const maxItems = supportsMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
     const maxEpisodes = supportsMaxEpisodes && maxEpisodesInput.trim() ? Math.max(1, Math.floor(numeric(maxEpisodesInput))) : null;
     const maxTurns = supportsMaxEpisodes && maxTurnsInput.trim() ? Math.max(1, Math.floor(numeric(maxTurnsInput))) : null;
+    const testCaseLimit = selectedTask?.supports_test_case_limit && testCaseLimitInput.trim() ? Math.max(1, Math.floor(numeric(testCaseLimitInput))) : null;
     const suiteConfigEntries: Record<string, unknown> = {};
     if (selectedTask?.runtime_split_selector) {
       const selectedSplit = selectedRuntimeSplit || selectedTask.runtime_split_selector.default_value;
@@ -3767,6 +3838,9 @@ export function App() {
     }
     if (selectedTask?.supports_runtime_config && maxTurns != null) {
       suiteConfigEntries.max_turns = maxTurns;
+    }
+    if (selectedTask?.supports_test_case_limit && testCaseLimit != null) {
+      suiteConfigEntries.max_test_cases = testCaseLimit;
     }
     const suiteConfig = Object.keys(suiteConfigEntries).length ? suiteConfigEntries : null;
     pollToken.current += 1;
@@ -3811,6 +3885,9 @@ export function App() {
           suiteConfig,
           recordSkill,
           selectedSkillId: chosenSkillId,
+          persona: isDatasetTask && (selectedPersonaRole || selectedPersonaTrait)
+            ? [selectedPersonaRole, selectedPersonaTrait].filter(Boolean).join("+")
+            : null,
       });
       let job = await loadJob(start.job_id);
       while (job.status === "running" && token === pollToken.current) {
@@ -3888,6 +3965,7 @@ export function App() {
   const selectedTaskEpisodeDatasetSize = selectedTask?.supports_max_episodes ? selectedTask?.dataset_size ?? null : null;
   const selectedTaskUsesMaxItems = Boolean(selectedTask?.supports_max_items);
   const selectedTaskUsesMaxEpisodes = Boolean(selectedTask?.supports_max_episodes);
+  const selectedTaskSupportsTestCaseLimit = Boolean(selectedTask?.supports_test_case_limit);
   const selectedTaskSupportsParallelWorkers = taskSupportsParallelWorkers(selectedTask);
   const selectedTaskSupportsEvalModel = Boolean(selectedTask?.supports_eval_model);
   const selectedTaskRequiresEvalModel = Boolean(selectedTask?.requires_eval_model);
@@ -3923,6 +4001,7 @@ export function App() {
   const parsedMaxItems = selectedTaskUsesMaxItems && maxItemsInput.trim() ? Math.max(1, Math.floor(numeric(maxItemsInput))) : null;
   const parsedMaxEpisodes = selectedTaskUsesMaxEpisodes && maxEpisodesInput.trim() ? Math.max(1, Math.floor(numeric(maxEpisodesInput))) : null;
   const parsedMaxTurns = selectedTaskUsesMaxEpisodes && maxTurnsInput.trim() ? Math.max(1, Math.floor(numeric(maxTurnsInput))) : null;
+  const parsedTestCaseLimit = selectedTaskSupportsTestCaseLimit && testCaseLimitInput.trim() ? Math.max(1, Math.floor(numeric(testCaseLimitInput))) : null;
   const parsedBranchingFactor = branchingFactorInput.trim() ? Math.max(1, Math.floor(numeric(branchingFactorInput))) : null;
   const parsedGenerationBudget = generationBudgetInput.trim() ? Math.max(1, Math.floor(numeric(generationBudgetInput))) : null;
   const parsedCandidateBudget = candidateBudgetInput.trim() ? Math.max(1, Math.floor(numeric(candidateBudgetInput))) : null;
@@ -3988,6 +4067,23 @@ export function App() {
     : selectedTaskDefaultMaxTurns
       ? `Blank uses the current default of ${selectedTaskDefaultMaxTurns} turns per episode.`
       : "Cap how many environment/API turns each episode can take.";
+  const allPersonaEntries: { key: string; kind: "role" | "trait"; desc: string }[] = [
+    ...Object.entries(PERSONA_ROLES).map(([key, desc]) => ({ key, kind: "role" as const, desc })),
+    ...Object.entries(PERSONA_TRAITS).map(([key, desc]) => ({ key, kind: "trait" as const, desc })),
+  ];
+  const filteredRoles = personaSearch.trim()
+    ? Object.entries(PERSONA_ROLES).filter(([k, d]) => k.includes(personaSearch.toLowerCase()) || d.toLowerCase().includes(personaSearch.toLowerCase()))
+    : Object.entries(PERSONA_ROLES);
+  const filteredTraits = personaSearch.trim()
+    ? Object.entries(PERSONA_TRAITS).filter(([k, d]) => k.includes(personaSearch.toLowerCase()) || d.toLowerCase().includes(personaSearch.toLowerCase()))
+    : Object.entries(PERSONA_TRAITS);
+  const personaPayloadChars =
+    (selectedPersonaRole ? (PERSONA_ROLES[selectedPersonaRole.replace(/^role:/, "")] || "").length + 40 : 0) +
+    (selectedPersonaTrait ? (PERSONA_TRAITS[selectedPersonaTrait.replace(/^trait:/, "")] || "").length + 20 : 0);
+  const personaPayloadHint = selectedPersonaRole || selectedPersonaTrait
+    ? `~${personaPayloadChars} chars added to system prompt`
+    : "No persona — baseline system prompt only.";
+
   const skillSelectHelper = selectedTaskAvailableSkills.length
     ? `${selectedTaskAvailableSkills.length} distilled skill${selectedTaskAvailableSkills.length === 1 ? "" : "s"} available for this dataset.`
     : "No distilled skill recorded for this dataset yet.";
@@ -4425,6 +4521,21 @@ export function App() {
                   <span className="small muted">{maxItemsHelper}</span>
                 </label>
               ) : null}
+              {selectedTaskSupportsTestCaseLimit ? (
+                <label className="field">
+                  <span className="field-label">Test Case Limit</span>
+                  <input
+                    className="control"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="all"
+                    value={testCaseLimitInput}
+                    onChange={(event) => setTestCaseLimitInput(event.target.value)}
+                  />
+                  <span className="small muted">{parsedTestCaseLimit ? `First ${parsedTestCaseLimit} test cases will be run per problem.` : "Blank runs all test cases per problem."}</span>
+                </label>
+              ) : null}
               {selectedTaskUsesMaxEpisodes ? (
                 <label className="field">
                   <span className="field-label">{maxEpisodesLabel}</span>
@@ -4464,6 +4575,70 @@ export function App() {
               ) : null}
             </div>
           </section>
+
+          {selectedTaskIsDataset ? (
+            <section className="subpanel">
+              <div className="subpanel-header">
+                <div>
+                  <p className="eyebrow">PERSONA</p>
+                </div>
+                <span className="small muted">{personaPayloadHint}</span>
+              </div>
+              <div className="persona-section">
+                <input
+                  className="control persona-search"
+                  type="search"
+                  placeholder="Search personas…"
+                  value={personaSearch}
+                  onChange={(e) => setPersonaSearch(e.target.value)}
+                />
+                {filteredRoles.length > 0 && (
+                  <div className="persona-group">
+                    <span className="caption">Role</span>
+                    <div className="persona-capsules">
+                      {filteredRoles.map(([key, desc]) => {
+                        const value = `role:${key}`;
+                        const isSelected = selectedPersonaRole === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            title={desc}
+                            className={`persona-capsule${isSelected ? " selected" : ""}`}
+                            onClick={() => setSelectedPersonaRole(isSelected ? "" : value)}
+                          >
+                            {key.replace(/_/g, " ")}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {filteredTraits.length > 0 && (
+                  <div className="persona-group">
+                    <span className="caption">Trait</span>
+                    <div className="persona-capsules">
+                      {filteredTraits.map(([key, desc]) => {
+                        const value = `trait:${key}`;
+                        const isSelected = selectedPersonaTrait === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            title={desc}
+                            className={`persona-capsule${isSelected ? " selected" : ""}`}
+                            onClick={() => setSelectedPersonaTrait(isSelected ? "" : value)}
+                          >
+                            {key.replace(/_/g, " ")}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : null}
 
           {selectedTaskIsDataset ? (
             <section className="subpanel">

@@ -22,6 +22,7 @@ from app.configs.codegen import (
     SPEED_SCORE_CAP,
 )
 from app.codegen.selection import compute_tie_break_score, evaluate_gate
+from app.bench.self_critique import self_critique_score
 
 
 def _line_count(code: str) -> int:
@@ -212,6 +213,7 @@ def finalize_candidate_metrics(
         "tie_break_score": round(tie_break_score, 6),
         "error": raw_metrics.get("error"),
         "test_results": list(raw_metrics.get("test_results") or []),
+        "_ground_truth_score": raw_metrics.get("_ground_truth_score"),
     }
     for key, value in raw_metrics.items():
         if key not in metrics:
@@ -377,6 +379,7 @@ def evaluate_materialized_candidate(
     source_code: str,
     baseline_metrics: dict[str, Any] | None,
     memory_applied: bool,
+    proposal_runtime: Any | None = None,
 ) -> dict[str, Any]:
     network_error = _network_access_error(task, source_code)
     if network_error is not None:
@@ -392,6 +395,41 @@ def evaluate_materialized_candidate(
         )
         if not isinstance(raw_metrics, dict):
             raise ValueError("Task verifier must return a metrics dict.")
+
+        leakage_free = bool(task.get("leakage_free"))
+        if leakage_free and proposal_runtime is not None:
+            # Preserve ground truth score for end-of-run reporting only
+            gt_score = float(raw_metrics.get("objective_score") or raw_metrics.get("objective") or 0.0)
+            raw_metrics = dict(raw_metrics)
+            raw_metrics["_ground_truth_score"] = gt_score
+
+            # Keep the ground-truth verifier result intact, but drive hidden selection
+            # with a separate self-critique confidence signal.
+            question_item = dict(task.get("question_item") or {})
+            test_results = list(raw_metrics.get("test_results") or [])
+            candidate_output = ""
+            if test_results and isinstance(test_results[0], dict):
+                candidate_output = str(
+                    test_results[0].get("actual_display")
+                    or test_results[0].get("actual")
+                    or test_results[0].get("actual_raw")
+                    or ""
+                )
+            confidence = self_critique_score(
+                proposal_runtime,
+                task=task,
+                candidate_output=candidate_output,
+                question_item=question_item,
+            )
+            threshold = float(task.get("self_critique_threshold") or 0.65)
+            selection_status = "pass" if confidence >= threshold else "fail"
+            raw_metrics["self_critique_score"] = confidence
+            raw_metrics["selection_objective"] = confidence
+            raw_metrics["selection_objective_score"] = confidence
+            raw_metrics["selection_signal"] = confidence
+            raw_metrics["selection_verifier_status"] = selection_status
+            raw_metrics["primary_score"] = confidence
+
         return finalize_candidate_metrics(
             task=task,
             source_code=source_code,

@@ -105,7 +105,12 @@ def _reference_only_baseline_metrics(task: dict[str, Any], source_code: str) -> 
     )
 
 
-def _baseline_candidate(task: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+def _baseline_candidate(
+    task: dict[str, Any],
+    workspace_root: Path,
+    *,
+    proposal_runtime: ProposalRuntime | None = None,
+) -> dict[str, Any]:
     baseline_file = Path(str(task["editable_path"]))
     baseline_source = baseline_file.read_text()
     source_path, source_code = materialize_candidate(
@@ -122,6 +127,7 @@ def _baseline_candidate(task: dict[str, Any], workspace_root: Path) -> dict[str,
             source_code=source_code,
             baseline_metrics=None,
             memory_applied=False,
+            proposal_runtime=proposal_runtime,
         )
         if baseline_verifier_ran
         else _reference_only_baseline_metrics(task, source_code)
@@ -228,6 +234,19 @@ def _extend_frontier(
 
 
 def _failure_reason_against_parent(task: dict[str, Any], parent_candidate: dict[str, Any], winner: dict[str, Any], epsilon: float) -> str:
+    if bool(task.get("leakage_free")):
+        selection_status = str(
+            winner["metrics"].get("selection_verifier_status")
+            or ("pass" if winner["metrics"].get("gate_passed") else "fail")
+        ).strip().lower()
+        if selection_status != "pass":
+            return "Candidate did not clear the hidden self-verification confidence threshold."
+        winner_primary = _primary_score(winner)
+        parent_primary = _primary_score(parent_candidate)
+        return (
+            "Candidate cleared self-verification but did not improve the hidden selection score "
+            f"over the selected parent ({winner_primary:.3f} vs {parent_primary:.3f}; epsilon {epsilon:.3f})."
+        )
     verifier_status = winner["metrics"]["verifier_status"]
     if verifier_status == "error":
         return f"Candidate errored before verification completed: {winner['metrics'].get('error') or 'unknown error'}"
@@ -391,11 +410,11 @@ def run_codegen_task(
     pace_ms: int = 0,
 ) -> dict[str, Any]:
     normalized_task = dict(task)
-    normalized_task["selection_spec"] = dict(task.get("selection_spec") or selection_spec_for_task(normalized_task))
+    normalized_task["selection_spec"] = selection_spec_for_task(normalized_task)
     normalized_task["run_baseline_verifier"] = _run_baseline_verifier(task)
     task = normalized_task
     _emit(progress_callback, pace_ms, phase="task_loaded", task_id=task["id"], message=f"Loaded task {task['id']}")
-    baseline = _baseline_candidate(task, workspace_root / task["id"])
+    baseline = _baseline_candidate(task, workspace_root / task["id"], proposal_runtime=proposal_runtime)
     baseline_metrics = baseline["metrics"] if baseline.get("baseline_metrics_available") else None
     current_best: dict[str, Any] | None = None
     frontier: list[dict[str, Any]] = []
@@ -683,6 +702,7 @@ def run_codegen_task(
                     source_code=source_code,
                     baseline_metrics=baseline_metrics,
                     memory_applied=bool(retrieved),
+                    proposal_runtime=proposal_runtime,
                 )
                 candidate = {
                     **spec,

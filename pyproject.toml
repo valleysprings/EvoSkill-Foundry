@@ -20,6 +20,7 @@ dependencies = [
   "PyYAML>=6,<7",
   "rouge-score>=0.1.2,<0.2",
   "sacrebleu>=2.5,<3",
+  "sqlparse>=0.5,<1",
   "tqdm>=4.67,<5",
   "transformers>=4.51,<5",
 ]

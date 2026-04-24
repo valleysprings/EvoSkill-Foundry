@@ -1098,6 +1098,67 @@ class CodegenVerifierTest(unittest.TestCase):
         )
         self.assertEqual(metrics["status"], "fail")
 
+    def test_leakage_free_selection_signal_does_not_override_ground_truth_metrics(self) -> None:
+        task = dict(self._loaded_task_or_skip("bbh"))
+        task["leakage_free"] = True
+        item = next(item for item in load_question_manifest(task) if item["item_id"] == "bbh-disambiguation-qa-000")
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            "def solve(question: dict) -> str:\n    return 'Ambiguous'\n",
+        )
+
+        class _Runtime:
+            active_model = "test-self-verifier"
+
+        with patch("app.codegen.verifier.self_critique_score", return_value=0.9):
+            metrics = evaluate_materialized_candidate(
+                task=micro_task,
+                source_path=source_path,
+                source_code=source_code,
+                baseline_metrics=None,
+                memory_applied=False,
+                proposal_runtime=_Runtime(),
+            )
+
+        self.assertEqual(micro_task["selection_spec"]["primary_metric"], "selection_objective_score")
+        self.assertEqual(micro_task["selection_spec"]["gate"][0]["metric"], "selection_verifier_status")
+        self.assertEqual(metrics["verifier_status"], "fail")
+        self.assertEqual(metrics["status"], "fail")
+        self.assertEqual(metrics["objective"], 0.0)
+        self.assertEqual(metrics["objective_score"], 0.0)
+        self.assertEqual(metrics["_ground_truth_score"], 0.0)
+        self.assertEqual(metrics["self_critique_score"], 0.9)
+        self.assertEqual(metrics["selection_objective_score"], 0.9)
+        self.assertEqual(metrics["selection_verifier_status"], "pass")
+        self.assertEqual(metrics["primary_score"], 0.9)
+        self.assertTrue(metrics["gate_passed"])
+        self.assertTrue(metrics["test_results"])
+        self.assertFalse(metrics["test_results"][0]["passed"])
+        self.assertEqual(metrics["test_results"][0]["actual"], "ambiguous")
+
+    def test_bbh_choice_text_matches_correct_option_label(self) -> None:
+        task = dict(self._loaded_task_or_skip("bbh"))
+        item = next(item for item in load_question_manifest(task) if item["item_id"] == "bbh-geometric-shapes-006")
+        micro_task = build_micro_task(task, item)
+        _, source_path, source_code = self._materialize(
+            micro_task,
+            "def solve(question: dict) -> str:\n    return 'triangle'\n",
+        )
+        metrics = evaluate_materialized_candidate(
+            task=micro_task,
+            source_path=source_path,
+            source_code=source_code,
+            baseline_metrics=None,
+            memory_applied=False,
+        )
+
+        self.assertEqual(metrics["verifier_status"], "pass")
+        self.assertEqual(metrics["objective"], 1.0)
+        self.assertTrue(metrics["test_results"][0]["passed"])
+        self.assertEqual(metrics["test_results"][0]["actual"], "triangle")
+        self.assertEqual(metrics["test_results"][0]["actual_display"], "J -> triangle")
+
 
 if __name__ == "__main__":
     unittest.main()
